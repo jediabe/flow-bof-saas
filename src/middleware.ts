@@ -36,6 +36,12 @@ export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
   if (
     pathname === "/api/health" ||
+    // Connected-runner API: each route enforces its own Bearer-token
+    // auth (see src/lib/runner-auth.ts). HTTP Basic Auth would
+    // intercept the request before the runner's token check ever
+    // runs, so we let /api/runner/* through here and rely on the
+    // route handler to 401 unauthenticated callers.
+    pathname.startsWith("/api/runner/") ||
     pathname.startsWith("/_next/") ||
     pathname.startsWith("/uploads/") ||
     pathname === "/favicon.ico" ||

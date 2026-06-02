@@ -33,6 +33,12 @@ RUN apk add --no-cache libc6-compat openssl
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
+# Belt-and-suspenders: make sure public/ exists so the runner stage's
+# COPY of /app/public never fails. The repo ships `public/.gitkeep`,
+# so this should always be a no-op, but a build context that excludes
+# every file under public/ would otherwise leave the directory absent.
+RUN mkdir -p /app/public/uploads/batches
+
 # Swap the working SQLite schema for the Postgres variant so the
 # generated Prisma client targets Postgres in production. The local
 # schema file on the host is never touched — only the in-container copy.

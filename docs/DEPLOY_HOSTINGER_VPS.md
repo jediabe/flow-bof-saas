@@ -96,15 +96,26 @@ page once it's live.
 
 ## 4. First build + boot
 
+> **Always pass `--env-file .env.production`** to every `docker compose`
+> command. Compose only auto-reads `.env`; the variables in
+> `docker-compose.prod.yml` (`${POSTGRES_USER}`, `${APP_DOMAIN}`, …)
+> won't interpolate without it.
+>
+> If you'd rather not type the flag every time, symlink:
+> `ln -s .env.production .env` (the deploy script still works
+> either way).
+
 ```bash
-docker compose -f docker-compose.prod.yml up -d --build
+docker compose --env-file .env.production \
+  -f docker-compose.prod.yml up -d --build
 ```
 
 This builds the app image, pulls Postgres + Caddy, and brings
 everything up. Watch logs:
 
 ```bash
-docker compose -f docker-compose.prod.yml logs -f
+docker compose --env-file .env.production \
+  -f docker-compose.prod.yml logs -f
 ```
 
 You're looking for:
@@ -113,26 +124,26 @@ You're looking for:
 - `app   | ▲ Next.js …` followed by `Listening on http://0.0.0.0:3000`
 - `caddy | obtained certificate` (or a clear ACME error message)
 
-## 5. Apply the schema + seed
+## 5. Apply the schema
 
-The first boot leaves Postgres empty. Push the Prisma schema:
-
-```bash
-docker compose -f docker-compose.prod.yml exec app \
-  node_modules/.bin/prisma db push
-```
-
-Seed (optional — only if you have a seed.ts you actually want to run
-on a fresh deploy):
+The first boot leaves Postgres empty. **Do not** try to run Prisma
+from inside the `app` container — the standalone production image is
+slim and ships without `@prisma/engines` / the Prisma CLI. Use the
+helper:
 
 ```bash
-docker compose -f docker-compose.prod.yml exec app \
-  node_modules/.bin/prisma db seed
+./scripts/prod-db-push.sh
 ```
 
-> ⚠ The seed currently inserts a default user + workspace. Re-running
-> it on a populated DB is a no-op because it uses `findOrCreate`-style
-> reads, but verify by reading `prisma/seed.ts` before you run it.
+That script spins up a one-shot `node:20-bookworm-slim` container,
+joins the compose network so it can reach `db`, stages the repo into
+a temp dir (so the host's `prisma/schema.prisma` stays SQLite-shaped),
+and runs `prisma db push --accept-data-loss` against Postgres.
+
+Seeding is optional. The repo's seed script also doesn't ship in the
+prod image, so the same temp-container trick applies if you want it —
+edit `scripts/prod-db-push.sh` to call `prisma db seed` after the
+push, or run it ad-hoc from a bookworm-slim container the same way.
 
 ## 6. Smoke test
 
@@ -147,16 +158,22 @@ Open `https://your-domain` in a browser. You should see:
 
 ## 7. Daily operations
 
-| Action                            | Command                                                                                          |
-| --------------------------------- | ------------------------------------------------------------------------------------------------ |
-| Tail all logs                     | `docker compose -f docker-compose.prod.yml logs -f`                                              |
-| Tail app only                     | `docker compose -f docker-compose.prod.yml logs -f app`                                          |
-| Restart the app                   | `docker compose -f docker-compose.prod.yml restart app`                                          |
-| Restart everything                | `docker compose -f docker-compose.prod.yml restart`                                              |
-| Stop everything                   | `docker compose -f docker-compose.prod.yml down`                                                 |
-| Pull latest code + rebuild        | `git pull && docker compose -f docker-compose.prod.yml up -d --build`                            |
-| Apply a new Prisma schema change  | `docker compose -f docker-compose.prod.yml exec app node_modules/.bin/prisma db push`            |
-| Open psql against the live DB     | `docker compose -f docker-compose.prod.yml exec db psql -U $POSTGRES_USER -d $POSTGRES_DB`       |
+Every compose command below uses `--env-file .env.production` so the
+shell variables in the compose file interpolate. If you skip that
+flag you'll get `WARN[0000] The "POSTGRES_USER" variable is not set`
+and the stack will misboot.
+
+| Action                            | Command                                                                                              |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| Tail all logs                     | `docker compose --env-file .env.production -f docker-compose.prod.yml logs -f`                       |
+| Tail app only                     | `docker compose --env-file .env.production -f docker-compose.prod.yml logs -f app`                   |
+| Container status                  | `docker compose --env-file .env.production -f docker-compose.prod.yml ps`                            |
+| Restart the app                   | `docker compose --env-file .env.production -f docker-compose.prod.yml restart app`                   |
+| Restart everything                | `docker compose --env-file .env.production -f docker-compose.prod.yml restart`                       |
+| Stop everything                   | `docker compose --env-file .env.production -f docker-compose.prod.yml down`                          |
+| Pull latest code + rebuild        | `git pull && docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build`     |
+| Apply a new Prisma schema change  | `./scripts/prod-db-push.sh`                                                                          |
+| Open psql against the live DB     | `docker compose --env-file .env.production -f docker-compose.prod.yml exec db psql -U $POSTGRES_USER -d $POSTGRES_DB` |
 
 The helper script `scripts/deploy-prod.sh` bundles
 *pull → build → up → db push* into one command:
@@ -190,8 +207,8 @@ Restore (db):
 
 ```bash
 gunzip -c backups/postgres-….sql.gz \
-  | docker compose -f docker-compose.prod.yml exec -T db \
-      psql -U $POSTGRES_USER -d $POSTGRES_DB
+  | docker compose --env-file .env.production -f docker-compose.prod.yml \
+      exec -T db psql -U $POSTGRES_USER -d $POSTGRES_DB
 ```
 
 Restore (uploads):
@@ -206,45 +223,97 @@ tar xzf backups/uploads-….tar.gz
 ```bash
 cd /opt/flow-bof/flow-bof-saas
 git pull
-docker compose -f docker-compose.prod.yml up -d --build
-docker compose -f docker-compose.prod.yml exec app \
-  node_modules/.bin/prisma db push
+docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build
+./scripts/prod-db-push.sh
 ```
 
-(Or just run `./scripts/deploy-prod.sh`.)
+(Or just run `./scripts/deploy-prod.sh`, which does all of the above.)
 
 ## 10. Resetting / wiping
 
 Nuke containers but keep data:
 
 ```bash
-docker compose -f docker-compose.prod.yml down
+docker compose --env-file .env.production -f docker-compose.prod.yml down
 ```
 
 Nuke containers **and data** (irreversible — wipes Postgres + Caddy
 state):
 
 ```bash
-docker compose -f docker-compose.prod.yml down -v
+docker compose --env-file .env.production -f docker-compose.prod.yml down -v
 rm -rf uploads
 ```
 
 ## 11. Troubleshooting
 
-- **Caddy can't get a cert.** DNS for `APP_DOMAIN` isn't pointed at
-  the VPS yet, or ports 80/443 aren't open on the firewall. `dig
-  +short app.example.com` from your laptop should show the VPS IP.
-- **`app` exits immediately.** Almost always a bad `DATABASE_URL` or
-  the DB hasn't finished booting. Compose's healthcheck already
-  delays `app` until Postgres is ready, but logs are gold:
-  `docker compose -f docker-compose.prod.yml logs app`.
-- **Kalodata images 404 on the runner.** `AGENT_ASSET_BASE_URL` must
-  be reachable *from the runner* — that's normally a public URL.
-  Check the value in `.env.production` and that the firewall allows
-  ingress on 443.
-- **First page load hangs forever then 401s.** Browsers cache the
-  401 challenge response if Cache-Control isn't strict. Hard-refresh,
-  or open in a private window and re-enter credentials.
+**`WARN[0000] The "POSTGRES_USER" variable is not set`** (or
+`POSTGRES_DB`, `POSTGRES_PASSWORD`, `APP_DOMAIN`) — you ran
+`docker compose -f docker-compose.prod.yml ...` *without*
+`--env-file .env.production`. Compose only auto-reads `.env`, not
+`.env.production`. Re-run with the flag, or symlink
+`ln -s .env.production .env`.
+
+**`failed to compute cache key: "/app/public": not found`** during
+`docker compose ... up --build` — your repo is missing
+`public/.gitkeep`. Pull the latest commit (the file is tracked
+exactly so this directory always exists in the build context).
+
+**Caddy can't bind port 80.** Another process is squatting on it.
+```bash
+sudo ss -tulpn | grep ':80'
+```
+If you see `traefik` (often pre-installed on some Hostinger images):
+```bash
+sudo systemctl stop traefik
+sudo systemctl disable traefik
+```
+If it's another Docker container, stop it via `docker ps` →
+`docker stop <name>`.
+
+**Caddy can't get an LE certificate.** DNS for `APP_DOMAIN` isn't
+pointed at the VPS yet, or ports 80/443 aren't open on the firewall.
+`dig +short app.example.com` from your laptop should show the VPS
+IP. UFW must allow `80/tcp` + `443/tcp`.
+
+**Prisma — `Cannot find module '@prisma/engines'`.** You tried to
+run `prisma db push` *inside the production app container*. The
+standalone image strips Prisma's CLI + engines on purpose (smaller +
+faster cold start). Always use `./scripts/prod-db-push.sh` instead;
+it runs the migration in a separate `node:20-bookworm-slim`
+container that has everything Prisma needs.
+
+**Prisma — `Prisma failed to detect the libssl/openssl version`** /
+`Could not parse schema engine response`. You ran the migration
+from a `node:20-alpine` container. Alpine's musl libc + bundled libssl
+confuse Prisma's engine. The helper script uses
+`node:20-bookworm-slim` (Debian glibc + OpenSSL) for exactly this
+reason — use it via `./scripts/prod-db-push.sh` rather than rolling
+your own one-shot container.
+
+**`./scripts/prod-db-push.sh` says it can't find the compose
+network.** The script auto-detects `<projectname>_default`; if you
+set `COMPOSE_PROJECT_NAME` to something exotic or renamed the
+deploy folder, the network name won't match. Bring the stack up
+first (`docker compose --env-file .env.production -f
+docker-compose.prod.yml up -d db`), then re-run the script — it
+re-runs the discovery on every invocation.
+
+**`app` exits immediately.** Almost always a bad `DATABASE_URL` or
+Postgres hasn't finished booting. Compose's healthcheck already
+delays `app` until `db` reports `pg_isready`, but logs are gold:
+```bash
+docker compose --env-file .env.production -f docker-compose.prod.yml logs app
+```
+
+**Kalodata images 404 on the runner.** `AGENT_ASSET_BASE_URL` must
+be reachable *from the runner* — that's normally a public URL.
+Check the value in `.env.production` and that the firewall allows
+ingress on 443.
+
+**First page load hangs forever then 401s.** Browsers cache the
+401 challenge response if Cache-Control isn't strict. Hard-refresh,
+or open in a private window and re-enter credentials.
 
 ## 12. What's NOT in this deploy
 

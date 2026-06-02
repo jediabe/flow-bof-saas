@@ -5,6 +5,7 @@ import EmptyState from "@/components/ui/EmptyState";
 import StatusChip from "@/components/StatusChip";
 import { createAgent, deleteAgent } from "./actions";
 import TestAgentForm from "./TestAgentForm";
+import RunnerTokenPanel from "./RunnerTokenPanel";
 
 export const dynamic = "force-dynamic";
 
@@ -107,6 +108,14 @@ export default async function RunnerPage() {
                     <span className="text-text/70">Base URL: </span>
                     <code className="id-mono">{a.baseUrl}</code>
                   </div>
+                  <RunnerTokenPanel
+                    agentId={a.id}
+                    hasToken={!!a.runnerTokenHash}
+                    last4={a.runnerTokenLast4}
+                    connectedAt={a.connectedAt?.toISOString() ?? null}
+                    lastPollAt={a.lastPollAt?.toISOString() ?? null}
+                    status={a.status}
+                  />
                   <div className="flex flex-wrap items-center gap-2">
                     <TestAgentForm agentId={a.id} />
                     <form action={deleteAgent} className="inline ml-auto">

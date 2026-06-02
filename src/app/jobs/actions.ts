@@ -70,6 +70,35 @@ export async function createSampleJob(input: {
     },
   });
 
+  // Polling vs direct dispatch.
+  //
+  // - "polling"  — the runner reaches us, not the other way around.
+  //   We just leave the row at status="queued"; the connected runner
+  //   pulls it via /api/runner/jobs/next. Used for hosted production
+  //   (the SaaS can't punch into the user's localhost).
+  // - "direct"   — historical local-dev path. The SaaS calls the
+  //   agent's HTTP API directly and blocks until it returns.
+  //
+  // Per-agent override: if the agent has a runnerTokenHash but the
+  // env is "direct", we still respect direct mode for that call —
+  // the user might be debugging the local agent's HTTP API. Polling
+  // mode never falls back to direct (the agent.baseUrl on a hosted
+  // VPS deploy is "http://127.0.0.1:9444" which the SaaS can't
+  // reach anyway).
+  const mode = (process.env.APP_RUNNER_MODE || "direct").toLowerCase();
+  if (mode === "polling") {
+    revalidatePath("/jobs");
+    revalidatePath(`/jobs/${job.id}`);
+    revalidatePath("/dashboard");
+    if (input.batchId) revalidatePath(`/batches/${input.batchId}`);
+    return {
+      ok: true,
+      jobId: job.id,
+      message:
+        "Queued. Waiting for the connected runner to claim it.",
+    };
+  }
+
   // Build the envelope using the Job's id so the agent's logs +
   // our DB row share an ID.
   const envelope = buildEnvelope(input.jobType, input.payload ?? {}, job.id);

@@ -1,0 +1,10 @@
+# Keeps `public/` tracked even when it's otherwise empty.
+#
+# The production Dockerfile copies /app/public into the runner image
+# (`COPY --from=builder /app/public ./public`). Docker fails the build
+# when the source path doesn't exist, which it does on a fresh clone
+# if every file under public/ is gitignored. This `.gitkeep` ensures
+# the directory is always present in the build context.
+#
+# Kalodata-downloaded reference images land under public/uploads/ at
+# runtime; that subtree stays gitignored.

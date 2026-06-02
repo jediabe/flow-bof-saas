@@ -5,15 +5,19 @@ out/
 *.log
 .DS_Store
 
-# Env
+# Env. The `!.env*.example` exception keeps the templates tracked
+# while every real env file (with secrets in it) stays out of git.
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
+!.env.production.example
 
-# Prisma
+# Prisma local state (SQLite-only; Postgres lives in a Docker volume).
 prisma/dev.db
 prisma/dev.db-journal
 prisma/migrations/migration_lock.toml.bak
+*.db
+*.db-journal
 
 # Editor noise
 .vscode/
@@ -27,3 +31,7 @@ coverage/
 # Dev-only; real production uses object storage (R2/S3) with signed
 # URLs. Large enough that we never want this folder in the repo.
 public/uploads/
+uploads/
+
+# Production backup tarballs from scripts/backup-prod.sh.
+backups/

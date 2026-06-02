@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { db } from "@/lib/db";
 import { getCurrentWorkspace } from "@/lib/workspace";
 import { getHealth, getJobTypes } from "@/lib/agent-client";
+import { mintRunnerToken } from "@/lib/runner-auth";
 
 /**
  * Create a new Agent record. Workspace-scoped to the current
@@ -108,4 +109,80 @@ export async function testAgentHealth(formData: FormData): Promise<{
     jobTypes,
     message: message || (ok ? "Agent reachable." : "Agent did not respond."),
   };
+}
+
+/**
+ * Mint a fresh connected-runner token for an Agent. Returns the
+ * full token to the caller exactly once — the DB only ever stores
+ * the SHA-256 digest plus the last-4 preview. If the agent already
+ * has a token this *replaces* it (rotation).
+ *
+ * On rotation we also clear `connectedAt` and flip status back to
+ * "unknown" so the dashboard accurately shows "not connected" until
+ * the runner checks in with the new credentials.
+ */
+export async function generateRunnerToken(formData: FormData): Promise<{
+  ok: boolean;
+  token: string;
+  last4: string;
+  message: string;
+}> {
+  const id = String(formData.get("id") || "");
+  if (!id) {
+    return { ok: false, token: "", last4: "", message: "missing agent id" };
+  }
+  const { workspace } = await getCurrentWorkspace();
+  const agent = await db.agent.findFirst({
+    where: { id, workspaceId: workspace.id },
+    select: { id: true },
+  });
+  if (!agent) {
+    return { ok: false, token: "", last4: "", message: "agent not found" };
+  }
+
+  const minted = mintRunnerToken();
+  await db.agent.update({
+    where: { id: agent.id },
+    data: {
+      runnerTokenHash:  minted.tokenHash,
+      runnerTokenLast4: minted.last4,
+      // New token → connection is severed until the new runner says
+      // hello. Make that visible to the user.
+      connectedAt: null,
+      lastPollAt:  null,
+      status:      "unknown",
+    },
+  });
+  revalidatePath("/agents");
+  revalidatePath("/dashboard");
+  return {
+    ok: true,
+    token: minted.token,
+    last4: minted.last4,
+    message:
+      "Copy this token now — it won't be shown again. " +
+      "Set RUNNER_TOKEN on your local runner and start `--runner-poll`.",
+  };
+}
+
+/**
+ * Revoke an Agent's runner token. The next /api/runner/* call from
+ * that runner will fail with 401 until the user generates a new one.
+ */
+export async function revokeRunnerToken(formData: FormData): Promise<void> {
+  const id = String(formData.get("id") || "");
+  if (!id) return;
+  const { workspace } = await getCurrentWorkspace();
+  await db.agent.updateMany({
+    where: { id, workspaceId: workspace.id },
+    data: {
+      runnerTokenHash:  null,
+      runnerTokenLast4: null,
+      connectedAt:      null,
+      lastPollAt:       null,
+      status:           "unknown",
+    },
+  });
+  revalidatePath("/agents");
+  revalidatePath("/dashboard");
 }

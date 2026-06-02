@@ -14,10 +14,12 @@
     "db:seed": "tsx prisma/seed.ts",
     "db:postgres:push": "prisma db push --schema prisma/schema.postgres.prisma",
     "db:postgres:generate": "prisma generate --schema prisma/schema.postgres.prisma",
-    "docker:build:prod": "docker compose -f docker-compose.prod.yml build",
-    "docker:up:prod": "docker compose -f docker-compose.prod.yml up -d",
-    "docker:logs:prod": "docker compose -f docker-compose.prod.yml logs -f",
-    "docker:down:prod": "docker compose -f docker-compose.prod.yml down"
+    "docker:prod:build": "docker compose --env-file .env.production -f docker-compose.prod.yml build",
+    "docker:prod:up": "docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build",
+    "docker:prod:down": "docker compose --env-file .env.production -f docker-compose.prod.yml down",
+    "docker:prod:logs": "docker compose --env-file .env.production -f docker-compose.prod.yml logs -f",
+    "docker:prod:ps": "docker compose --env-file .env.production -f docker-compose.prod.yml ps",
+    "db:prod:push": "./scripts/prod-db-push.sh"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.100.1",

@@ -14,21 +14,24 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-COMPOSE="docker compose -f docker-compose.prod.yml"
+ENV_FILE=".env.production"
+COMPOSE_FILE="docker-compose.prod.yml"
+
+if [ ! -f "$ENV_FILE" ]; then
+  echo "❌ $ENV_FILE is missing." >&2
+  exit 1
+fi
+
+COMPOSE="docker compose --env-file $ENV_FILE -f $COMPOSE_FILE"
 TS=$(date -u +%Y%m%d-%H%M%S)
 OUT=backups
 mkdir -p "$OUT"
-
-if [ ! -f .env.production ]; then
-  echo "❌ .env.production is missing." >&2
-  exit 1
-fi
 
 # Pull Postgres creds out of .env.production so we don't have to
 # hard-code them here. `set -a` exports everything sourced.
 set -a
 # shellcheck disable=SC1091
-. ./.env.production
+. ./"$ENV_FILE"
 set +a
 
 echo "▶ pg_dump → $OUT/postgres-$TS.sql.gz"

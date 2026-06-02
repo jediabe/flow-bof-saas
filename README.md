@@ -125,11 +125,18 @@ git clone <your-fork-url> /opt/flow-bof/flow-bof-saas
 cd /opt/flow-bof/flow-bof-saas
 cp .env.production.example .env.production
 $EDITOR .env.production   # set APP_DOMAIN, POSTGRES_PASSWORD, BASIC_AUTH_*, AUTH_SECRET
+chmod +x scripts/*.sh
 
-docker compose -f docker-compose.prod.yml up -d --build
-docker compose -f docker-compose.prod.yml exec app \
-  node_modules/.bin/prisma db push
+docker compose --env-file .env.production -f docker-compose.prod.yml \
+  up -d --build
+./scripts/prod-db-push.sh
 ```
+
+`--env-file .env.production` is mandatory — Compose auto-reads `.env`,
+not `.env.production`, so omitting it leaves `${POSTGRES_USER}` etc.
+unset. The Prisma schema is pushed via a separate
+`node:20-bookworm-slim` helper rather than `exec`-ing into the app
+container; the standalone production image strips the Prisma CLI.
 
 The production image swaps in [`prisma/schema.postgres.prisma`](prisma/schema.postgres.prisma)
 at build time so local `npm run dev` keeps using SQLite.

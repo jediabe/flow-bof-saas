@@ -103,6 +103,22 @@ model Agent {
   status      String   @default("unknown")
   baseUrl     String
   lastSeenAt  DateTime?
+
+  // Connected-runner / polling-mode fields. The runner authenticates
+  // by POSTing `Authorization: Bearer <runner_token>` to /api/runner/*;
+  // only the SHA-256 hex digest of that token is stored here, so a
+  // dump of the row never leaks usable credentials. `runnerTokenLast4`
+  // is the human-readable preview the dashboard shows once the
+  // one-time-display window has closed.
+  runnerTokenHash  String?   @unique
+  runnerTokenLast4 String?
+  // Set the first time we see a successful /api/runner/health call
+  // after generation. Cleared when the user revokes + regenerates.
+  connectedAt      DateTime?
+  // Bumped on every authenticated runner request — health, next-job,
+  // event, complete, fail. Used to detect "runner is online right now".
+  lastPollAt       DateTime?
+
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 

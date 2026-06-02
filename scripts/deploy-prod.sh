@@ -1,22 +1,33 @@
 #!/usr/bin/env bash
 #
-# Pull, rebuild, restart, and re-push Prisma schema. Run this on the
+# Pull, rebuild, restart, and push the Prisma schema. Run this on the
 # VPS whenever you've shipped new code to the deploy branch.
 #
 #   ./scripts/deploy-prod.sh
 #
 # Idempotent — safe to re-run if it bails mid-way through.
+#
+# Why every compose invocation passes --env-file:
+#
+#   docker-compose.prod.yml uses ${POSTGRES_USER}, ${APP_DOMAIN}, etc.
+#   for interpolation. Compose only reads .env (implicit) or whatever
+#   you point at with --env-file. We use the explicit form so this
+#   script works regardless of whether the user also copied
+#   .env.production to .env.
 
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-COMPOSE="docker compose -f docker-compose.prod.yml"
+ENV_FILE=".env.production"
+COMPOSE_FILE="docker-compose.prod.yml"
 
-if [ ! -f .env.production ]; then
-  echo "❌ .env.production is missing. Copy .env.production.example and fill it in." >&2
+if [ ! -f "$ENV_FILE" ]; then
+  echo "❌ $ENV_FILE is missing. Copy .env.production.example and fill it in." >&2
   exit 1
 fi
+
+COMPOSE="docker compose --env-file $ENV_FILE -f $COMPOSE_FILE"
 
 echo "▶ git pull"
 git pull --ff-only
@@ -24,20 +35,18 @@ git pull --ff-only
 echo "▶ docker compose up -d --build (this can take a few minutes)"
 $COMPOSE up -d --build
 
-echo "▶ waiting for the app container to come up..."
-# Compose's healthcheck on `db` blocks `app` until Postgres is ready;
-# we just have to wait for `app` itself to reach a steady state.
-for i in $(seq 1 30); do
-  if $COMPOSE ps app | grep -qE 'running|healthy'; then
-    break
-  fi
-  sleep 2
-done
+echo "▶ pushing Prisma schema to Postgres..."
+# Don't try `compose exec app prisma db push` — the standalone
+# production image strips Prisma's CLI + engines. The dedicated
+# helper spins up a node:20-bookworm-slim container that joins the
+# compose network just long enough to run `prisma db push`.
+./scripts/prod-db-push.sh
 
-echo "▶ prisma db push"
-$COMPOSE exec -T app node_modules/.bin/prisma db push
+echo "▶ container status:"
+$COMPOSE ps
 
-APP_DOMAIN=$(grep -E '^APP_DOMAIN=' .env.production | head -1 | cut -d= -f2-)
+APP_DOMAIN=$(grep -E '^APP_DOMAIN=' "$ENV_FILE" | head -1 | cut -d= -f2-)
 echo
-echo "✅ Deploy complete. Visit: https://${APP_DOMAIN}"
+echo "✅ Deploy complete."
+echo "   Visit:  https://${APP_DOMAIN}"
 echo "   Health: https://${APP_DOMAIN}/api/health"
