@@ -1,0 +1,85 @@
+# Production Docker Compose for flow-bof-saas.
+#
+# Three services:
+#   - app   :  Next.js (standalone) running as `node server.js`.
+#   - db    :  Postgres 16.
+#   - caddy :  HTTPS reverse proxy (Let's Encrypt auto-cert).
+#
+# Local dev does NOT use this file — `npm run dev` keeps using SQLite.
+# Bring this up only on the VPS:
+#
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# Volumes:
+#   - ./uploads          : Kalodata-downloaded reference images. Mounted
+#                          into the app container so they survive
+#                          rebuilds + container restarts.
+#   - postgres_data      : Postgres data directory.
+#   - caddy_data/config  : Let's Encrypt certs + Caddy state.
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: flow-bof-saas
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    # No host port: Caddy is the only thing that talks to :3000.
+    # Compose's default bridge network resolves "app" by name.
+    expose:
+      - "3000"
+    volumes:
+      # Reference images downloaded by the Kalodata importer live
+      # under /app/public/uploads in the container. Bind-mounting a
+      # host directory means they survive container restarts and
+      # rebuilds. The host path is created on first `docker compose up`.
+      - ./uploads:/app/public/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:16-alpine
+    container_name: flow-bof-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    # Do NOT publish 5432 to the host — the database is internal-only.
+    # If you need to connect with psql from the VPS itself, do it from
+    # inside the container: `docker compose exec db psql -U $POSTGRES_USER -d $POSTGRES_DB`
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: flow-bof-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      # APP_DOMAIN is substituted into Caddyfile via Caddy's native
+      # {$VAR} support. Set it in .env.production.
+      APP_DOMAIN: ${APP_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:

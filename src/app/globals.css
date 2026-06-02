@@ -1,0 +1,154 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ---------------------------------------------------------------------
+ * Global look
+ * ------------------------------------------------------------------- */
+@layer base {
+  html, body {
+    @apply bg-bg text-text font-sans antialiased;
+  }
+  body {
+    /* Subtle radial-glow backdrop. Fixed so it doesn't scroll with
+       content; the body itself stays the solid base colour. */
+    background-image: theme("backgroundImage.radial-glow");
+    background-attachment: fixed;
+    min-height: 100vh;
+  }
+  /* Anchor styles: muted by default; pages opt-in to the accent. */
+  a {
+    @apply text-text hover:text-accent transition-colors;
+  }
+  /* Selection: gentle cyan tint instead of the default OS blue. */
+  ::selection {
+    background: rgba(56, 189, 248, 0.25);
+    color: theme("colors.text");
+  }
+  /* Scrollbars (webkit) — thin + dark so they don't compete with the
+     panel surfaces. */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track   { background: transparent; }
+  ::-webkit-scrollbar-thumb   { background: theme("colors.border");
+                                border-radius: 999px; }
+  ::-webkit-scrollbar-thumb:hover { background: theme("colors.border-strong"); }
+  pre, code {
+    @apply font-mono;
+  }
+}
+
+/* ---------------------------------------------------------------------
+ * Component primitives. Most live as React components in
+ * src/components/ui — these classes back them.
+ * ------------------------------------------------------------------- */
+@layer components {
+  /* Panel — rounded card surface. */
+  .panel {
+    @apply bg-panel border border-border rounded-2xl;
+  }
+  .panel2 {
+    @apply bg-panel2 border border-border rounded-2xl;
+  }
+  .panel-accent {
+    @apply panel shadow-glow-accent;
+  }
+
+  /* Buttons */
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5
+           px-4 py-2 text-sm rounded-xl
+           border border-border bg-panel2 text-text
+           hover:bg-border transition-colors cursor-pointer
+           disabled:opacity-50 disabled:cursor-not-allowed
+           focus:outline-none focus:ring-2 focus:ring-accent/40;
+  }
+  .btn-primary {
+    @apply bg-accent-soft text-bg border-accent
+           hover:bg-accent hover:text-bg shadow-glow-accent;
+  }
+  .btn-ghost {
+    @apply bg-transparent border-transparent text-muted
+           hover:text-text hover:bg-panel2;
+  }
+  .btn-danger {
+    @apply text-bad border-bad/40 hover:bg-bad/10 hover:text-bad;
+  }
+
+  /* Form controls */
+  .field {
+    @apply w-full px-3 py-2 text-sm rounded-xl
+           border border-border bg-bg/80 text-text
+           placeholder:text-muted2
+           focus:outline-none focus:border-accent focus:bg-bg;
+  }
+  .field-row {
+    @apply flex flex-col gap-1.5;
+  }
+  .label {
+    @apply text-[10px] uppercase tracking-[0.12em] text-muted;
+  }
+
+  /* Chips */
+  .chip {
+    @apply inline-flex items-center gap-1 px-2 py-0.5 text-[11px] uppercase
+           tracking-wider rounded-full
+           border border-border bg-panel2 text-muted;
+  }
+  .chip-ok    { @apply text-ok    border-ok/40    bg-ok/[0.06]; }
+  .chip-warn  { @apply text-warn  border-warn/40  bg-warn/[0.06]; }
+  .chip-bad   { @apply text-bad   border-bad/40   bg-bad/[0.06]; }
+  .chip-accent{ @apply text-accent border-accent/40 bg-accent/[0.06]; }
+
+  /* Section headings */
+  .section-header {
+    @apply flex items-baseline justify-between mb-3;
+  }
+  .section-title {
+    @apply text-xs uppercase tracking-[0.14em] text-muted font-medium;
+  }
+  .h-page {
+    @apply text-2xl font-semibold tracking-tight;
+  }
+
+  /* Mono / ID styling */
+  .id-mono {
+    @apply font-mono text-[11px] text-muted2 break-all;
+  }
+
+  /* Timeline dot — used by ActivityTimeline. The variant classes
+     supply the colour + glow; the base sets size + position. */
+  .timeline-dot {
+    @apply relative w-2.5 h-2.5 rounded-full mt-1.5 flex-shrink-0;
+  }
+  .timeline-dot-ok    {
+    background: theme("colors.ok");
+    box-shadow: 0 0 0 3px rgba(52,211,153,0.18), 0 0 12px rgba(52,211,153,0.45);
+  }
+  .timeline-dot-bad   {
+    background: theme("colors.bad");
+    box-shadow: 0 0 0 3px rgba(248,113,113,0.18), 0 0 12px rgba(248,113,113,0.45);
+  }
+  .timeline-dot-warn  {
+    background: theme("colors.warn");
+    box-shadow: 0 0 0 3px rgba(251,191,36,0.18), 0 0 8px rgba(251,191,36,0.40);
+  }
+  .timeline-dot-muted {
+    background: theme("colors.muted2");
+    box-shadow: 0 0 0 3px rgba(94,102,121,0.15);
+  }
+  .timeline-dot-accent {
+    background: theme("colors.accent");
+    box-shadow: 0 0 0 3px rgba(56,189,248,0.18), 0 0 12px rgba(56,189,248,0.55);
+  }
+
+  /* Pulse animation for the "running" dot on Job detail. */
+  @keyframes saas-pulse {
+    0%, 100% { transform: scale(1);   opacity: 0.95; }
+    50%      { transform: scale(1.15); opacity: 1; }
+  }
+  .timeline-dot-running {
+    background: theme("colors.accent");
+    box-shadow: 0 0 0 3px rgba(56,189,248,0.18), 0 0 12px rgba(56,189,248,0.55);
+    animation: saas-pulse 1.4s ease-in-out infinite;
+  }
+}

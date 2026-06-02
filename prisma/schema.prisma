@@ -1,0 +1,218 @@
+// SaaS skeleton schema for Flow BOF Automation.
+//
+// Each model maps 1:1 to a concept from docs/ARCHITECTURE.md:
+//   * User / Workspace               — accounts + tenancy.
+//   * Agent                          — a registered local agent instance.
+//   * Batch / Product                — the user's content.
+//   * Job / JobEvent                 — work queued for an agent.
+//
+// The skeleton does NOT model billing, auth providers, or any
+// browser-cookie / credential storage — that boundary is enforced in
+// docs/SECURITY.md.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Skeleton dev uses SQLite — no service to run. To move to Postgres
+// later, change `provider` to "postgresql" and point DATABASE_URL at
+// a Postgres connection string. The `@db.Text` annotations in this
+// file are removed for SQLite compatibility; restore them on
+// `imagePrompt` (Product) and `message` (JobEvent) if you migrate.
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Tenancy
+// ---------------------------------------------------------------------------
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  workspaces Workspace[] @relation("WorkspaceOwner")
+}
+
+model Workspace {
+  id        String   @id @default(cuid())
+  name      String
+  ownerId   String
+  owner     User     @relation("WorkspaceOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  agents   Agent[]
+  batches  Batch[]
+  jobs     Job[]
+  settings WorkspaceSettings?
+}
+
+// ---------------------------------------------------------------------------
+// Workspace-level settings — AI provider config, etc.
+//
+// ALPHA: API keys are stored *unencrypted* in this row. Acceptable for a
+// localhost SQLite prototype; production must encrypt at rest (column-
+// level KMS) or move them to a secrets manager. See docs/AI_PROVIDERS.md.
+//
+// Keys are never returned to client components in full; the settings
+// server action returns a masked preview ("****abcd") plus a `set`
+// boolean per key. Server-side workers read the row directly.
+// ---------------------------------------------------------------------------
+
+model WorkspaceSettings {
+  id          String   @id @default(cuid())
+  workspaceId String   @unique
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  // One of: "manual" | "openai" | "anthropic" | "openrouter".
+  aiProvider  String   @default("manual")
+
+  openaiApiKey        String?
+  openaiModel         String?
+
+  anthropicApiKey     String?
+  anthropicModel      String?
+
+  openrouterApiKey    String?
+  openrouterModel     String?
+  openrouterSiteUrl   String?
+  openrouterAppName   String?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// Agents — one row per registered local agent install.
+// ---------------------------------------------------------------------------
+
+// `status` is one of: "offline" | "online" | "unknown".
+// (SQLite doesn't support Prisma enums — stored as a String. The
+// TypeScript layer in src/lib/agent-client.ts + the page renderers
+// know the valid set.)
+model Agent {
+  id          String   @id @default(cuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  name        String
+  status      String   @default("unknown")
+  baseUrl     String
+  lastSeenAt  DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  jobs Job[]
+
+  @@index([workspaceId])
+}
+
+// ---------------------------------------------------------------------------
+// Content
+// ---------------------------------------------------------------------------
+
+model Batch {
+  id          String    @id @default(cuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  name        String
+  status      String    @default("draft")
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  products Product[]
+  jobs     Job[]
+
+  @@index([workspaceId])
+}
+
+model Product {
+  id                 String   @id @default(cuid())
+  batchId            String
+  batch              Batch    @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  productName        String
+  originalTitle      String?
+  tiktokUrl          String?
+  category           String?
+  retailerName       String?
+  imageUrl           String?
+  // Cloud-hosted reference image URL. Reserved for future signed-URL
+  // download support; the local runner can't fetch these yet.
+  referenceImageUrl  String?
+  // Local filesystem path the runner uses to read the reference image
+  // (e.g. "inputs/reference_images/01_primary.jpg"). Must resolve on
+  // the runner machine. Phase-3-cloud will replace this with signed
+  // URL downloads on the runner side.
+  referenceImagePathLocal String?
+  imagePrompt        String?
+  // AI-generated supporting copy. Optional — populated by
+  // generateAiPrompts; manual / deterministic fallback leaves them null.
+  hook               String?
+  caption            String?
+  // JSON-encoded string[] (SQLite has no array type). Read with
+  // parseJson<string[]>(p.hashtags) on the consumer side.
+  hashtags           String?
+  // Per-product error from the last AI prompt-gen attempt. Cleared on
+  // the next successful generation. Kept so the user sees *which*
+  // product blew up without having to open every job.
+  aiPromptError      String?
+  aiPromptGeneratedAt DateTime?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@index([batchId])
+}
+
+// ---------------------------------------------------------------------------
+// Jobs
+// ---------------------------------------------------------------------------
+
+// `status` is one of: "queued" | "running" | "succeeded" | "failed"
+// | "cancelled". (SQLite doesn't support Prisma enums.)
+//
+// `payload` / `result` / `error` carry JSON encoded as a String. The
+// server actions JSON.stringify on write; the page renderers
+// JSON.parse on read. Moving to Postgres later: switch these to
+// `Json` and drop the stringify/parse glue.
+model Job {
+  id          String   @id @default(cuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  batchId     String?
+  batch       Batch?   @relation(fields: [batchId], references: [id], onDelete: SetNull)
+  agentId     String?
+  agent       Agent?   @relation(fields: [agentId], references: [id], onDelete: SetNull)
+  jobType     String
+  status      String   @default("queued")
+  payload     String
+  result      String?
+  error       String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  events JobEvent[]
+
+  @@index([workspaceId])
+  @@index([batchId])
+  @@index([agentId])
+  @@index([status])
+}
+
+model JobEvent {
+  id        String   @id @default(cuid())
+  jobId     String
+  job       Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  eventType String   // "progress" / "result" / "error"
+  stage     String?
+  message   String?
+  current   Int?
+  total     Int?
+  details   String?
+  createdAt DateTime @default(now())
+
+  @@index([jobId])
+}

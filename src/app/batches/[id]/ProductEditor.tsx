@@ -1,0 +1,422 @@
+"use client";
+
+import { useState, useTransition } from "react";
+import StatusChip from "@/components/StatusChip";
+import {
+  UK_RETAILER_FALLBACK,
+  UK_RETAILERS,
+  buildUkStorePrompt,
+  findRetailer,
+} from "@/lib/uk-retailers";
+import { updateProduct, deleteProduct } from "../actions";
+
+export interface ProductRow {
+  id: string;
+  productName: string;
+  originalTitle: string | null;
+  tiktokUrl: string | null;
+  category: string | null;
+  retailerName: string | null;
+  imageUrl: string | null;
+  referenceImageUrl: string | null;
+  referenceImagePathLocal: string | null;
+  imagePrompt: string | null;
+  hook: string | null;
+  caption: string | null;
+  hashtags: string[];
+  aiPromptError: string | null;
+  aiPromptGeneratedAt: string | null;
+  submittedStatus: SubmittedStatus | null;
+}
+
+/** Per-product status derived from the latest generate_flow_images job. */
+export type SubmittedStatus =
+  | "submitted"
+  | "failed"
+  | "skipped"
+  | "pending"
+  | "unknown";
+
+const STATUS_VARIANT: Record<SubmittedStatus, "ok" | "warn" | "bad" | "muted"> = {
+  submitted: "ok",
+  failed:    "bad",
+  skipped:   "warn",
+  pending:   "muted",
+  unknown:   "muted",
+};
+
+/**
+ * Inline product card with edit-in-place. Shows a thumbnail preview
+ * (from referenceImageUrl after Kalodata import), retailer chip,
+ * prompt readiness, and submitted status at a glance — the user can
+ * scan a batch and immediately see which rows are blocking image
+ * generation.
+ *
+ * The local reference image path field is intentionally pushed under
+ * an "Advanced override" disclosure: the Kalodata import flow handles
+ * the reference URL automatically, and surfacing the path field at the
+ * top tempts users to hand-edit it for the wrong reason.
+ */
+export default function ProductEditor({
+  batchId,
+  product,
+}: {
+  batchId: string;
+  product: ProductRow;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [pending, startTransition] = useTransition();
+
+  const [draft, setDraft] = useState({
+    productName:             product.productName,
+    originalTitle:           product.originalTitle ?? "",
+    tiktokUrl:               product.tiktokUrl ?? "",
+    category:                product.category ?? "",
+    retailerName:            product.retailerName ?? UK_RETAILER_FALLBACK,
+    referenceImagePathLocal: product.referenceImagePathLocal ?? "",
+    imagePrompt:             product.imagePrompt ?? "",
+  });
+
+  // "Ready" = the runner has *something* to send: either a SaaS-hosted
+  // reference URL or a local override path, plus a prompt. The video
+  // / dispatch layers do the final check.
+  const hasReference =
+    !!product.referenceImageUrl || !!product.referenceImagePathLocal;
+  const ready = hasReference && !!product.imagePrompt;
+  const missingPrompt = !product.imagePrompt;
+  const missingRef = !hasReference;
+
+  const retailerLabel = findRetailer(product.retailerName).label;
+
+  function fillUkPrompt() {
+    setDraft((d) => ({ ...d, imagePrompt: buildUkStorePrompt(d.retailerName) }));
+  }
+
+  function save() {
+    const fd = new FormData();
+    fd.set("id", product.id);
+    fd.set("batchId", batchId);
+    fd.set("productName", draft.productName);
+    fd.set("originalTitle", draft.originalTitle);
+    fd.set("tiktokUrl", draft.tiktokUrl);
+    fd.set("category", draft.category);
+    fd.set(
+      "retailerName",
+      draft.retailerName === UK_RETAILER_FALLBACK ? "" : draft.retailerName,
+    );
+    fd.set("referenceImagePathLocal", draft.referenceImagePathLocal);
+    fd.set("imagePrompt", draft.imagePrompt);
+    startTransition(async () => {
+      await updateProduct(fd);
+      setExpanded(false);
+    });
+  }
+
+  function remove() {
+    const fd = new FormData();
+    fd.set("id", product.id);
+    fd.set("batchId", batchId);
+    startTransition(async () => {
+      await deleteProduct(fd);
+    });
+  }
+
+  return (
+    <div
+      className={`rounded-2xl border bg-panel2 overflow-hidden transition-colors ${
+        expanded ? "border-accent/50" : "border-border"
+      }`}
+    >
+      {/* Thumbnail + summary header ---------------------------------- */}
+      <button
+        type="button"
+        className="w-full text-left flex gap-3 p-3 group"
+        onClick={() => setExpanded((v) => !v)}
+      >
+        <Thumbnail
+          src={product.referenceImageUrl}
+          fallbackSrc={product.imageUrl}
+          alt={product.productName}
+        />
+        <div className="flex-1 min-w-0">
+          <div className="font-medium text-text truncate group-hover:text-accent transition-colors">
+            {product.productName}
+          </div>
+          {product.category && (
+            <div className="text-[11px] text-muted mt-0.5 truncate">
+              {product.category}
+            </div>
+          )}
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {product.submittedStatus &&
+              product.submittedStatus !== "unknown" && (
+                <StatusChip
+                  label={product.submittedStatus}
+                  variant={STATUS_VARIANT[product.submittedStatus]}
+                />
+              )}
+            {ready ? (
+              <StatusChip label="ready" variant="ok" />
+            ) : (
+              <>
+                {missingPrompt && (
+                  <StatusChip label="no prompt" variant="warn" />
+                )}
+                {missingRef && (
+                  <StatusChip label="no reference" variant="warn" />
+                )}
+              </>
+            )}
+            <StatusChip label={retailerLabel} variant="muted" />
+            {product.aiPromptGeneratedAt && (
+              <StatusChip label="AI prompt" variant="accent" />
+            )}
+            {product.aiPromptError && (
+              <StatusChip label="AI error" variant="bad" />
+            )}
+          </div>
+        </div>
+        <span className="text-[11px] text-muted2 self-start mt-1 select-none">
+          {expanded ? "▲" : "▼"}
+        </span>
+      </button>
+
+      {/* Expanded editor --------------------------------------------- */}
+      {expanded && (
+        <div className="px-4 pb-4 space-y-3 border-t border-border pt-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <Field label="Product name">
+              <input
+                className="field"
+                value={draft.productName}
+                onChange={(e) =>
+                  setDraft({ ...draft, productName: e.target.value })
+                }
+              />
+            </Field>
+            <Field label="Original title">
+              <input
+                className="field"
+                value={draft.originalTitle}
+                onChange={(e) =>
+                  setDraft({ ...draft, originalTitle: e.target.value })
+                }
+              />
+            </Field>
+            <Field label="Category">
+              <input
+                className="field"
+                value={draft.category}
+                onChange={(e) =>
+                  setDraft({ ...draft, category: e.target.value })
+                }
+              />
+            </Field>
+            <Field label="TikTok URL">
+              <input
+                className="field"
+                value={draft.tiktokUrl}
+                onChange={(e) =>
+                  setDraft({ ...draft, tiktokUrl: e.target.value })
+                }
+              />
+            </Field>
+            <Field label="Retailer / store">
+              <select
+                className="field"
+                value={draft.retailerName}
+                onChange={(e) =>
+                  setDraft({ ...draft, retailerName: e.target.value })
+                }
+              >
+                {UK_RETAILERS.map((r) => (
+                  <option key={r.key} value={r.key}>
+                    {r.label}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Reference image URL">
+              <div className="field opacity-80 text-[12px] break-all">
+                {product.referenceImageUrl || (
+                  <span className="text-muted">
+                    Imported from Kalodata or pasted manually
+                  </span>
+                )}
+              </div>
+            </Field>
+          </div>
+
+          <Field
+            label="Image prompt"
+            action={
+              <button
+                type="button"
+                className="btn btn-ghost text-[11px] px-2 py-1"
+                onClick={fillUkPrompt}
+              >
+                Build UK store prompt
+              </button>
+            }
+          >
+            <textarea
+              className="field"
+              rows={6}
+              value={draft.imagePrompt}
+              onChange={(e) =>
+                setDraft({ ...draft, imagePrompt: e.target.value })
+              }
+            />
+          </Field>
+
+          {/* AI-generated supporting copy — read-only here; the bulk
+              AiPromptsPanel above is the one place that writes these
+              fields, by design. */}
+          {(product.hook ||
+            product.caption ||
+            product.hashtags.length > 0 ||
+            product.aiPromptError) && (
+            <section className="rounded-xl border border-border bg-bg/40 p-3 space-y-2 text-xs">
+              <div className="flex items-baseline justify-between">
+                <span className="label">AI generated</span>
+                {product.aiPromptGeneratedAt && (
+                  <span className="text-[10px] text-muted">
+                    {new Date(product.aiPromptGeneratedAt).toLocaleString()}
+                  </span>
+                )}
+              </div>
+              {product.aiPromptError && (
+                <div className="text-bad">{product.aiPromptError}</div>
+              )}
+              {product.hook && (
+                <div>
+                  <span className="text-muted">hook:</span>{" "}
+                  <span className="text-text">{product.hook}</span>
+                </div>
+              )}
+              {product.caption && (
+                <div>
+                  <span className="text-muted">caption:</span>{" "}
+                  <span className="text-text">{product.caption}</span>
+                </div>
+              )}
+              {product.hashtags.length > 0 && (
+                <div className="flex flex-wrap gap-1">
+                  {product.hashtags.map((h, i) => (
+                    <span key={i} className="chip">
+                      {h}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </section>
+          )}
+
+          <details className="text-xs">
+            <summary className="cursor-pointer text-muted hover:text-text transition-colors select-none">
+              Advanced override
+            </summary>
+            <div className="mt-2 space-y-1">
+              <label className="block">
+                <span className="label">Local reference image path</span>
+                <input
+                  className="field mt-1"
+                  placeholder="inputs/reference_images/01_primary.jpg"
+                  value={draft.referenceImagePathLocal}
+                  onChange={(e) =>
+                    setDraft({
+                      ...draft,
+                      referenceImagePathLocal: e.target.value,
+                    })
+                  }
+                />
+                <div className="text-[11px] text-muted mt-1">
+                  Debug/fallback only. Used when the runner is on the
+                  same machine as a reference image you'd rather pass
+                  by path. Normal workflow goes through the
+                  Kalodata-imported reference URL.
+                </div>
+              </label>
+            </div>
+          </details>
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={save}
+              disabled={pending}
+            >
+              {pending ? "Saving…" : "Save"}
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              onClick={() => setExpanded(false)}
+              disabled={pending}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="btn btn-danger ml-auto"
+              onClick={remove}
+              disabled={pending}
+            >
+              Delete
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Thumbnail({
+  src,
+  fallbackSrc,
+  alt,
+}: {
+  src: string | null;
+  fallbackSrc?: string | null;
+  alt: string;
+}) {
+  const effective = src || fallbackSrc || "";
+  return (
+    <div className="w-14 h-14 shrink-0 rounded-xl border border-border bg-bg overflow-hidden">
+      {effective ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={effective}
+          alt={alt}
+          loading="lazy"
+          className="w-full h-full object-cover"
+        />
+      ) : (
+        <div className="w-full h-full flex items-center justify-center text-muted2 text-lg">
+          ◇
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Field({
+  label,
+  children,
+  action,
+}: {
+  label: string;
+  children: React.ReactNode;
+  action?: React.ReactNode;
+}) {
+  return (
+    <label className="block">
+      <div className="flex items-baseline justify-between">
+        <span className="label">{label}</span>
+        {action}
+      </div>
+      <div className="mt-1">{children}</div>
+    </label>
+  );
+}

@@ -1,0 +1,35 @@
+# Caddy reverse proxy for flow-bof-saas.
+#
+# {$APP_DOMAIN} is substituted by Caddy at startup using the env var
+# set in docker-compose.prod.yml (which itself reads .env.production).
+# If your DNS for that domain points at this VPS, Caddy will auto-
+# fetch a Let's Encrypt certificate on first start. Subsequent renewals
+# are automatic.
+#
+# To run without HTTPS (local VPS testing): set APP_DOMAIN=:80 and the
+# block below behaves like a plain HTTP server on port 80.
+
+{$APP_DOMAIN} {
+	encode gzip zstd
+
+	# Forward everything to the Next.js app container. Caddy talks to
+	# `app` by Docker service name; the app expects to see real client
+	# IPs / proto in X-Forwarded-* headers, which Caddy sets by default.
+	reverse_proxy app:3000
+
+	# Caps an inbound request body. The Kalodata XLSX importer is the
+	# only big-payload path right now; tune this up if you start
+	# accepting larger workbooks.
+	request_body {
+		max_size 25MB
+	}
+
+	# Soft security defaults. Tweak if you embed this in an iframe.
+	header {
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy        "strict-origin-when-cross-origin"
+		# HSTS only when running over real HTTPS — Caddy's automatic
+		# certs flip this on; for `APP_DOMAIN=:80` it's a no-op.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+	}
+}

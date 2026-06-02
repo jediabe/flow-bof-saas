@@ -1,0 +1,42 @@
+{
+  "name": "flow-bof-saas",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Hosted SaaS skeleton for Flow BOF Automation. Brain to the local agent's hands.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "db:push": "prisma db push",
+    "db:generate": "prisma generate",
+    "db:studio": "prisma studio",
+    "db:seed": "tsx prisma/seed.ts",
+    "db:postgres:push": "prisma db push --schema prisma/schema.postgres.prisma",
+    "db:postgres:generate": "prisma generate --schema prisma/schema.postgres.prisma",
+    "docker:build:prod": "docker compose -f docker-compose.prod.yml build",
+    "docker:up:prod": "docker compose -f docker-compose.prod.yml up -d",
+    "docker:logs:prod": "docker compose -f docker-compose.prod.yml logs -f",
+    "docker:down:prod": "docker compose -f docker-compose.prod.yml down"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.100.1",
+    "@prisma/client": "^5.22.0",
+    "next": "^15.0.3",
+    "openai": "^6.41.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.1",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.49",
+    "prisma": "^5.22.0",
+    "tailwindcss": "^3.4.15",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

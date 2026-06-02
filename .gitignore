@@ -1,0 +1,29 @@
+# Next.js / Node
+node_modules/
+.next/
+out/
+*.log
+.DS_Store
+
+# Env
+.env
+.env.local
+.env.*.local
+
+# Prisma
+prisma/dev.db
+prisma/dev.db-journal
+prisma/migrations/migration_lock.toml.bak
+
+# Editor noise
+.vscode/
+.idea/
+
+# Build artifacts
+dist/
+coverage/
+
+# Locally-served reference images downloaded during Kalodata import.
+# Dev-only; real production uses object storage (R2/S3) with signed
+# URLs. Large enough that we never want this folder in the repo.
+public/uploads/

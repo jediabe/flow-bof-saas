@@ -1,0 +1,261 @@
+"use client";
+
+import Link from "next/link";
+import { useMemo, useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
+import StatusChip from "@/components/StatusChip";
+import { createSampleJob } from "../../jobs/actions";
+
+export interface ImageGenAgent {
+  id: string;
+  name: string;
+  status: string;
+}
+
+export interface ImageGenProduct {
+  id: string;
+  productName: string;
+  /** SaaS-hosted reference URL (preferred). Absolute or `/uploads/...`. */
+  referenceImageUrl: string | null;
+  /** Local override path (debug/fallback only). */
+  referenceImagePathLocal: string | null;
+  imagePrompt: string | null;
+}
+
+export interface LastImageJobSummary {
+  jobId: string;
+  createdAt: string;
+  submitted: number;
+  failed: number;
+  total: number;
+}
+
+type WaitMode = "submit_only" | "capture";
+type AutomationMode = "safe" | "balanced" | "fast";
+
+/**
+ * "Generate Product Images" workbench section. Collects the eligible
+ * products in this batch (those with both a local reference path and a
+ * prompt) and dispatches a generate_flow_images job to the chosen
+ * runner.
+ *
+ * The whole call goes through the existing createSampleJob action so
+ * we get the same streaming + JobEvent persistence as the video flow.
+ */
+export default function GenerateImagesPanel({
+  batchId,
+  agents,
+  products,
+  lastJob,
+  agentAssetBaseUrl,
+}: {
+  batchId: string;
+  agents: ImageGenAgent[];
+  products: ImageGenProduct[];
+  lastJob: LastImageJobSummary | null;
+  /**
+   * Externally-reachable URL prefix the runner uses to fetch reference
+   * images stored under public/uploads/. Comes from
+   * AGENT_ASSET_BASE_URL on the server side; passed in so this client
+   * component doesn't reach into process.env.
+   */
+  agentAssetBaseUrl: string;
+}) {
+  const router = useRouter();
+  const [pending, startTransition] = useTransition();
+  const [agentId, setAgentId] = useState(agents[0]?.id ?? "");
+  const [waitMode, setWaitMode] = useState<WaitMode>("submit_only");
+  const [automationMode, setAutomationMode] = useState<AutomationMode>("balanced");
+  const [limit, setLimit] = useState<number>(30);
+  const [lastError, setLastError] = useState<string | null>(null);
+
+  // Eligible = a prompt + at least one reference source (URL or
+  // local-override path). The runner can resolve either; we ship
+  // both when both are set and let the runner prefer the URL.
+  const eligible = useMemo(
+    () =>
+      products.filter(
+        (p) =>
+          !!p.imagePrompt &&
+          (!!p.referenceImageUrl || !!p.referenceImagePathLocal),
+      ),
+    [products],
+  );
+
+  const missingPrompt = products.filter((p) => !p.imagePrompt).length;
+  const missingRef = products.filter(
+    (p) => !p.referenceImageUrl && !p.referenceImagePathLocal,
+  ).length;
+  const disabled =
+    pending || !agentId || eligible.length === 0;
+
+  function makeAbsolute(relOrAbs: string): string {
+    if (/^https?:\/\//i.test(relOrAbs)) return relOrAbs;
+    const base = agentAssetBaseUrl.replace(/\/+$/, "");
+    return relOrAbs.startsWith("/") ? `${base}${relOrAbs}` : `${base}/${relOrAbs}`;
+  }
+
+  function submit() {
+    setLastError(null);
+    const items = eligible.slice(0, limit).map((p) => {
+      const item: Record<string, unknown> = {
+        item_id:      p.id,
+        product_name: p.productName,
+        image_prompt: p.imagePrompt!,
+      };
+      if (p.referenceImageUrl) {
+        item.reference_image_url = makeAbsolute(p.referenceImageUrl);
+      }
+      if (p.referenceImagePathLocal) {
+        // Send both when set — the runner prefers the path when it
+        // exists, falls back to the URL otherwise. Useful when a
+        // power user has cached a local copy.
+        item.reference_image_path = p.referenceImagePathLocal;
+      }
+      return item;
+    });
+    const payload = {
+      items,
+      limit,
+      wait_mode:        waitMode,
+      automation_mode:  automationMode,
+    };
+    startTransition(async () => {
+      const r = await createSampleJob({
+        jobType: "generate_flow_images",
+        agentId,
+        batchId,
+        payload,
+      });
+      // Stay on the batch page. The result is surfaced inline by the
+      // LatestTaskResult panel keyed on ?job=<id>. The job detail
+      // page is still reachable via "View technical details" for
+      // debugging.
+      if (r.jobId) {
+        router.push(`/batches/${batchId}?job=${r.jobId}#activity`);
+      }
+      if (!r.ok) {
+        setLastError(r.message);
+      }
+    });
+  }
+
+  return (
+    <section className="panel p-5 space-y-4">
+      <div className="flex items-baseline justify-between gap-2">
+        <div>
+          <div className="section-title">Generate Product Images</div>
+          <p className="text-xs text-muted mt-1">
+            Submit each ready product to Google Flow using the chosen
+            runner. The runner reads the reference image from the local
+            filesystem path you set on the product.
+          </p>
+        </div>
+        <span className="text-[11px] text-muted">
+          generate_flow_images
+        </span>
+      </div>
+
+      {/* Readiness counts ------------------------------------------- */}
+      <div className="flex flex-wrap gap-2 text-xs">
+        <StatusChip
+          label={`${eligible.length} ready`}
+          variant={eligible.length > 0 ? "ok" : "muted"}
+        />
+        {missingPrompt > 0 && (
+          <StatusChip label={`${missingPrompt} missing prompt`} variant="warn" />
+        )}
+        {missingRef > 0 && (
+          <StatusChip
+            label={`${missingRef} missing reference`}
+            variant="warn"
+          />
+        )}
+        {lastJob && (
+          <Link
+            href={`/jobs/${lastJob.jobId}`}
+            className="text-accent hover:underline ml-auto"
+          >
+            View last run ({lastJob.submitted}/{lastJob.total} submitted) →
+          </Link>
+        )}
+      </div>
+
+      {/* Controls --------------------------------------------------- */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+        <label className="block">
+          <span className="label">Runner</span>
+          <select
+            className="field mt-1"
+            value={agentId}
+            onChange={(e) => setAgentId(e.target.value)}
+          >
+            {agents.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.name} — {a.status}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="block">
+          <span className="label">Wait mode</span>
+          <select
+            className="field mt-1"
+            value={waitMode}
+            onChange={(e) => setWaitMode(e.target.value as WaitMode)}
+          >
+            <option value="submit_only">submit_only</option>
+            <option value="capture">capture</option>
+          </select>
+        </label>
+        <label className="block">
+          <span className="label">Automation mode</span>
+          <select
+            className="field mt-1"
+            value={automationMode}
+            onChange={(e) =>
+              setAutomationMode(e.target.value as AutomationMode)
+            }
+          >
+            <option value="safe">safe</option>
+            <option value="balanced">balanced</option>
+            <option value="fast">fast</option>
+          </select>
+        </label>
+        <label className="block">
+          <span className="label">Limit</span>
+          <input
+            type="number"
+            className="field mt-1"
+            min={1}
+            max={100}
+            value={limit}
+            onChange={(e) =>
+              setLimit(Math.max(1, Math.min(100, Number(e.target.value) || 1)))
+            }
+          />
+        </label>
+      </div>
+
+      <div className="flex items-center gap-3">
+        <button
+          type="button"
+          className="btn btn-primary"
+          disabled={disabled}
+          onClick={submit}
+        >
+          {pending ? "Submitting…" : "Generate Images"}
+        </button>
+        <span className="text-[11px] text-muted">
+          {eligible.length === 0
+            ? "Add a reference image and prompt to at least one product."
+            : `Will submit ${Math.min(eligible.length, limit)} of ${eligible.length} ready products.`}
+        </span>
+      </div>
+
+      {lastError && (
+        <div className="text-xs text-bad">⚠ {lastError}</div>
+      )}
+    </section>
+  );
+}
