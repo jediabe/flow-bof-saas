@@ -149,12 +149,34 @@ push, or run it ad-hoc from a bookworm-slim container the same way.
 
 Open `https://your-domain` in a browser. You should see:
 
-1. A Basic Auth prompt — log in with `BASIC_AUTH_USER` /
-   `BASIC_AUTH_PASSWORD`.
-2. The cockpit dashboard.
-3. `https://your-domain/api/health` returns
+1. **Optional outer gate**: if `BASIC_AUTH_USER` / `BASIC_AUTH_PASSWORD`
+   are set, the browser prompts for HTTP Basic credentials first.
+2. **App signup**: redirected to `/signup`. Create your first account.
+   The dashboard appears immediately after — there's no email
+   verification step yet.
+3. **Logout / login flow** lives in the left rail (your email + a
+   "Log out" link). Logging out drops you at `/login`.
+4. `https://your-domain/api/health` returns
    `{"ok": true, "database": "reachable", ...}` *without* prompting
-   for credentials (the middleware skips this path on purpose).
+   for any credential (the middleware skips that path on purpose).
+
+> **First-user note.** Anyone who can reach `/signup` can create an
+> account. Behind a populated `BASIC_AUTH_*` outer gate this is
+> fine — you control the gate. On a fully public deploy you'll
+> want to add invite-only signup before flipping the gate off.
+
+### `AUTH_SECRET` must be set
+
+The app login uses `AUTH_SECRET` to sign session cookies. It needs
+to be **at least 32 characters**:
+
+```bash
+openssl rand -base64 48
+```
+
+If `AUTH_SECRET` is missing or too short, every signup/login attempt
+fails with a server error. Set it in `.env.production` before the
+first boot.
 
 ## 7. Daily operations
 
@@ -181,6 +203,36 @@ The helper script `scripts/deploy-prod.sh` bundles
 ```bash
 ./scripts/deploy-prod.sh
 ```
+
+## 7a. Hourly uploads cleanup
+
+The SaaS isn't a media library — final videos stay in Google Flow,
+Kalodata XLSX uploads are parsed in-memory, and reference images
+live only as long as their batch does. A small cleanup script
+sweeps the bits that can leak through anyway:
+
+- `public/uploads/_tmp/` and `public/uploads/excel/`: anything
+  older than 24 hours is deleted.
+- `public/uploads/batches/<batchId>/`: any directory whose Batch
+  row no longer exists is removed.
+
+Run it on demand:
+
+```bash
+docker compose --env-file .env.production -f docker-compose.prod.yml \
+  exec -T app node scripts/cleanup-uploads.mjs
+```
+
+Hourly cron line (`crontab -e` on the VPS):
+
+```cron
+0 * * * * cd /opt/flow-bof/flow-bof-saas && docker compose --env-file .env.production -f docker-compose.prod.yml exec -T app node scripts/cleanup-uploads.mjs >> /var/log/flow-bof-cleanup.log 2>&1
+```
+
+The script never touches the database, never deletes products /
+prompts / job rows / reference images of *active* batches, and
+never exits non-zero on a missing scratch directory — so a stale
+cron line on a fresh install is harmless.
 
 ## 8. Backups
 

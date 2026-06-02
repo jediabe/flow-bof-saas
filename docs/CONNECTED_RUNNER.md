@@ -113,6 +113,11 @@ Hosted production (`https://app.autobof.xyz`) sets
 
 ## Boundary guarantees
 
+- **Metadata only.** The runner reports job progress, success /
+  failure, Flow media IDs, edit IDs, counts, and errors. It never
+  uploads generated videos, generated images, debug snapshots, or
+  any other media payload to the SaaS. Final videos stay in Google
+  Flow — users download from there.
 - **No keys leave the SaaS server.** AI provider keys never appear in
   any job payload; the runner never sees them.
 - **No browser cookies cross the boundary.** Google / TikTok session

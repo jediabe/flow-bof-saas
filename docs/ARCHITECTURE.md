@@ -60,22 +60,69 @@ that lets users author content.
 
 ## Boundary rules (security model)
 
+**The SaaS is an automation/control dashboard, not a media library.**
+It holds just enough metadata to orchestrate work and track its
+status. Final generated videos stay in Google Flow; users download
+them directly from there.
+
 The SaaS:
 
-- **Holds:** product data, prompts, batch metadata, job results, job
-  event timelines, registered agent connection info (URL + token).
-- **Does NOT hold:** browser cookies, Google credentials, TikTok
-  credentials, Chrome user data dirs, generated image / video files.
+- **Holds:**
+  - Product metadata (name, category, retailer, TikTok URL, prompt)
+  - Reference image URLs/paths used as inputs to image generation
+  - Job metadata: status, payload, result envelope, error, events
+  - Flow media IDs / edit IDs returned by the runner
+  - AI provider settings (per-workspace, server-side only)
+  - Runner registration + connected-runner token hashes
+- **Does NOT hold:**
+  - Final generated video files
+  - Large Google Flow output media
+  - Google / TikTok cookies, credentials, or browser profiles
+  - AI provider keys in plaintext on the client
+  - Debug snapshots from the runner
 
 The local agent:
 
 - **Holds:** session tokens for the SaaS, the path to the user's debug
-  Chrome profile, the per-run job cache. Everything sensitive (Google
-  cookies, TikTok cookies, the actual logged-in browser session) lives
-  inside the user's Chrome — the agent only TALKS to that Chrome via
-  CDP, it never reads the profile dir directly.
+  Chrome profile, the per-run job cache, debug snapshots/screenshots.
+  Everything sensitive (Google cookies, TikTok cookies, the actual
+  logged-in browser session) lives inside the user's Chrome — the
+  agent only TALKS to that Chrome via CDP, it never reads the profile
+  dir directly.
+- **Reports back only metadata.** Job envelopes coming back to the
+  SaaS carry counts, media IDs, edit IDs, errors — never raw video
+  files or large image payloads.
 
 See [SECURITY.md](SECURITY.md) for the longer form.
+
+## Storage policy (alpha)
+
+Concrete retention rules for the dashboard's on-disk state. The
+hourly cleanup job (`npm run cleanup:uploads`, also wired to a
+VPS cron — see [DEPLOY_HOSTINGER_VPS.md](DEPLOY_HOSTINGER_VPS.md))
+enforces them.
+
+| Artefact                             | Retained where                    | TTL                            |
+| ------------------------------------ | --------------------------------- | ------------------------------ |
+| Kalodata `.xlsx` upload              | Parsed in-memory, never on disk   | n/a (no persistence)           |
+| Temp import scratch files            | `public/uploads/_tmp/`, `…/excel/` | 24h (auto-deleted)            |
+| Product reference images             | `public/uploads/batches/<batchId>/` | While the Batch row exists  |
+| Orphaned reference-image directories | (after batch delete)              | Hourly cleanup sweep           |
+| Product / prompt / job metadata      | Postgres / SQLite                 | Indefinite (until manually cleared) |
+| **Generated videos**                 | **Not stored — live in Google Flow** | **n/a**                    |
+| **Generated images**                 | **Not stored — live in Google Flow** | **n/a**                    |
+| Runner debug snapshots               | Runner's own filesystem           | Runner-side; never uploaded    |
+| Backups (Postgres dump + uploads tar) | `./backups/`, off-VPS sync up to you | Run on-demand or via cron  |
+
+When the user creates a batch via Kalodata import:
+
+1. The XLSX bytes arrive as a multipart upload, hit the parser in
+   memory, and are GC'd after the request. No file lands on disk.
+2. For each product row, the SaaS downloads the row's image URL once
+   and writes it under `public/uploads/batches/<batchId>/<productId>_primary.<ext>`.
+3. The image stays for as long as the batch exists. Deleting the batch
+   triggers a Prisma cascade that removes products + jobs; the hourly
+   cleanup picks up the orphan files some time later.
 
 ## Data flow — a generate-images job
 

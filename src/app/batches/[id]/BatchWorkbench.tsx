@@ -214,7 +214,17 @@ export default function BatchWorkbench({
             <div className="section-title">Videos</div>
             <p className="text-xs text-muted mt-1">
               Push each favorited image through the video generator using
-              the blanket video prompt.
+              the blanket video prompt. Generated videos remain in
+              Google Flow — download them from{" "}
+              <a
+                href="https://labs.google/flow"
+                target="_blank"
+                rel="noreferrer"
+                className="text-accent hover:underline"
+              >
+                Flow
+              </a>{" "}
+              when ready.
             </p>
           </div>
           <span className="text-[11px] text-muted">

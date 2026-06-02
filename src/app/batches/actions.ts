@@ -235,6 +235,7 @@ export async function importKalodataXlsx(
     try {
       const dl = await downloadProductImage({
         url: row.imgUrl,
+        workspaceId: workspace.id,
         batchId: batch.id,
         productId: product.id,
         publicDir,

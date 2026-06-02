@@ -98,6 +98,23 @@ export default function VideoFavoritesResult({
         </div>
       </Panel>
 
+      {submitted > 0 && (
+        <div className="rounded-2xl border border-accent/40 bg-accent/[0.06] px-5 py-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
+          <span className="text-text">
+            <strong>Videos submitted in Google Flow.</strong> Generated
+            videos stay in Flow — download them from there when ready.
+          </span>
+          <a
+            href="https://labs.google/flow"
+            target="_blank"
+            rel="noreferrer"
+            className="btn btn-primary text-xs ml-auto"
+          >
+            Open Flow ↗
+          </a>
+        </div>
+      )}
+
       {allSkipped && (
         <div className="rounded-2xl border border-warn/40 bg-warn/[0.06] text-sm text-warn px-5 py-3">
           These favorites were skipped because they were already submitted.

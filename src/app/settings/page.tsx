@@ -4,6 +4,11 @@ import Panel from "@/components/ui/Panel";
 import EmptyState from "@/components/ui/EmptyState";
 import AiProviderSettingsForm from "./AiProviderSettings";
 import { getMaskedAiSettings } from "./actions";
+import {
+  getRunnerMode,
+  runnerModeBlurb,
+  runnerModeLabel,
+} from "@/lib/runner-mode";
 
 export const dynamic = "force-dynamic";
 
@@ -59,6 +64,23 @@ export default async function SettingsPage() {
 
       <Panel title="Runner defaults">
         <dl className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+          <Row
+            k="Runner mode"
+            v={
+              <span>
+                <span className="text-text">{runnerModeLabel()}</span>
+                <span className="block text-[11px] text-muted mt-0.5">
+                  {runnerModeBlurb()}
+                </span>
+                <span className="block text-[11px] text-muted2 mt-0.5">
+                  APP_RUNNER_MODE={process.env.APP_RUNNER_MODE || "(unset)"}
+                  {" · "}NODE_ENV={process.env.NODE_ENV || "(unset)"}
+                  {" · resolved="}
+                  {getRunnerMode()}
+                </span>
+              </span>
+            }
+          />
           <Row
             k="Default runner URL"
             v={<code className="id-mono">{defaultBaseUrl}</code>}

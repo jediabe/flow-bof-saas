@@ -3,7 +3,46 @@
 This skeleton corresponds to Phase 3 of the migration plan in the
 sibling repo: `flow-bof-automation/docs/MIGRATION_PLAN_TO_SAAS.md`.
 
-## Current milestone — AI prompt generation in SaaS
+## Product positioning — automation control dashboard, not a media library
+
+The SaaS is a **lightweight automation control dashboard**. It owns
+the metadata needed to orchestrate work (products, prompts, job
+status, Flow media IDs) but never holds final generated videos.
+Users download finished videos directly from Google Flow.
+
+That means:
+
+- We don't build a media library.
+- We don't proxy or cache Flow's output media.
+- We don't ship signed upload URLs for generated content.
+- Excel imports are temporary (24h sweep).
+- Reference images stick around only while their batch does.
+- The Posting Queue (when it lands) tracks Flow media/edit IDs +
+  caption + status. No `videoFileUrl` requirement.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md#storage-policy-alpha) for the
+deletion table.
+
+## Current milestone — connected runner via outbound polling
+
+Hosted SaaS can't dial the user's localhost, so the runner now dials
+*us*:
+
+- New `Agent` columns: `runnerTokenHash`, `runnerTokenLast4`,
+  `connectedAt`, `lastPollAt`.
+- `/api/runner/{health,jobs/next,jobs/[id]/{events,complete,fail}}` —
+  Bearer-token gated, basic-auth-bypassed.
+- Atomic claim via `UPDATE … WHERE status="queued"` guard.
+- `APP_RUNNER_MODE=polling` makes `createSampleJob` queue rather
+  than dial direct. `direct` mode preserved for local dev.
+- Runner-side `--runner-poll` CLI flag spins up
+  `src/runner_poller.py`: outbound HTTPS, Ctrl-C safe, never
+  forwards keys or browser state.
+
+See [CONNECTED_RUNNER.md](CONNECTED_RUNNER.md) for the route table
+and protocol.
+
+## Previous milestone — AI prompt generation in SaaS
 
 Ported from `flow-bof-automation/ai/`:
 

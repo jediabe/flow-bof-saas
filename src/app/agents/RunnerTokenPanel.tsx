@@ -26,6 +26,7 @@ export default function RunnerTokenPanel({
   connectedAt,
   lastPollAt,
   status,
+  onTokenChange,
 }: {
   agentId: string;
   hasToken: boolean;
@@ -33,6 +34,13 @@ export default function RunnerTokenPanel({
   connectedAt: string | null;
   lastPollAt:  string | null;
   status: string;
+  /**
+   * Optional notifier — called with the full token after a fresh
+   * mint, and with null when the user dismisses the reveal. Lets a
+   * sibling component (RunnerCommands) embed the token in its
+   * copy-paste command without a round-trip to the server.
+   */
+  onTokenChange?: (token: string | null) => void;
 }) {
   const [pending, startTransition] = useTransition();
   const [revealed, setRevealed] = useState<{ token: string; last4: string } | null>(null);
@@ -41,12 +49,14 @@ export default function RunnerTokenPanel({
   function mint() {
     setError(null);
     setRevealed(null);
+    onTokenChange?.(null);
     const fd = new FormData();
     fd.set("id", agentId);
     startTransition(async () => {
       const r = await generateRunnerToken(fd);
       if (r.ok) {
         setRevealed({ token: r.token, last4: r.last4 });
+        onTokenChange?.(r.token);
       } else {
         setError(r.message);
       }
@@ -56,6 +66,7 @@ export default function RunnerTokenPanel({
   function revoke() {
     setError(null);
     setRevealed(null);
+    onTokenChange?.(null);
     if (
       typeof window !== "undefined" &&
       !window.confirm(
@@ -154,7 +165,10 @@ export default function RunnerTokenPanel({
             <button
               type="button"
               className="btn btn-ghost text-[11px] px-2 py-1"
-              onClick={() => setRevealed(null)}
+              onClick={() => {
+                setRevealed(null);
+                onTokenChange?.(null);
+              }}
             >
               I've copied it, hide
             </button>

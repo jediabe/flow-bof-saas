@@ -43,6 +43,10 @@ model User {
   id        String   @id @default(cuid())
   email     String   @unique
   name      String?
+  // bcrypt hash. Nullable so existing dev seed rows (created before
+  // signup landed) still load; new rows always populate it via the
+  // signup flow.
+  passwordHash String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

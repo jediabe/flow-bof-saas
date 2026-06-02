@@ -5,6 +5,7 @@ import { db } from "@/lib/db";
 import { getCurrentWorkspace } from "@/lib/workspace";
 import { getHealth, getJobTypes } from "@/lib/agent-client";
 import { mintRunnerToken } from "@/lib/runner-auth";
+import { getRunnerMode } from "@/lib/runner-mode";
 
 /**
  * Create a new Agent record. Workspace-scoped to the current
@@ -56,8 +57,18 @@ export async function deleteAgent(formData: FormData): Promise<void> {
 }
 
 /**
- * Probe the agent's /health endpoint and persist what we observed
- * onto the Agent row.
+ * Probe an agent's status. Behaviour depends on the runner mode
+ * resolved centrally in src/lib/runner-mode.ts.
+ *
+ * direct  — POST /health on the agent's baseUrl (the original
+ *           local-dev flow). ECONNREFUSED becomes a clean
+ *           "Local runner not reachable" message rather than a
+ *           thrown error.
+ * polling — Never dials the baseUrl. The hosted SaaS can't reach
+ *           the user's localhost; "online" is derived from the
+ *           connected-runner's own /api/runner/health POSTs (which
+ *           update lastPollAt + connectedAt). This action just
+ *           reports back what's in the DB.
  */
 export async function testAgentHealth(formData: FormData): Promise<{
   ok: boolean;
@@ -73,6 +84,30 @@ export async function testAgentHealth(formData: FormData): Promise<{
     where: { id, workspaceId: workspace.id },
   });
   if (!agent) return { ok: false, envelope: null, jobTypes: [], message: "agent not found" };
+
+  // Polling mode: never touch the agent's HTTP API — the hosted SaaS
+  // can't reach the runner's localhost anyway. Surface the DB-side
+  // signal so the user knows whether the connected runner is
+  // currently checked in.
+  if (getRunnerMode() === "polling") {
+    const recently =
+      agent.lastPollAt &&
+      Date.now() - new Date(agent.lastPollAt).getTime() < 5 * 60 * 1000;
+    const message = !agent.runnerTokenHash
+      ? "Polling mode: no runner token generated yet."
+      : recently
+        ? `Polling mode: connected runner last seen ${new Date(agent.lastPollAt!).toLocaleString()}.`
+        : agent.lastPollAt
+          ? `Polling mode: runner has a token but hasn't checked in since ${new Date(agent.lastPollAt).toLocaleString()}.`
+          : "Polling mode: runner has a token but hasn't checked in yet.";
+    revalidatePath("/agents");
+    return {
+      ok: !!recently,
+      envelope: null,
+      jobTypes: [],
+      message,
+    };
+  }
 
   const token = process.env.AGENT_API_TOKEN || undefined;
   let ok = false;
@@ -90,8 +125,11 @@ export async function testAgentHealth(formData: FormData): Promise<{
       // /jobs/types is informational — health is the authoritative signal.
     }
   } catch (err) {
+    // Direct-mode connection failure (ECONNREFUSED on a typical
+    // "local runner is down" condition). Render a calm message
+    // instead of throwing — the action never crashes the page.
     const e = err as Error;
-    message = `${e.name}: ${e.message}`;
+    message = `Local runner not reachable: ${e.name}: ${e.message}`;
   }
 
   await db.agent.update({

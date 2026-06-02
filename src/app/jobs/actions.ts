@@ -11,6 +11,7 @@ import {
   type ProgressEvent,
 } from "@/lib/agent-client";
 import { encodeJson } from "@/lib/json-column";
+import { getRunnerMode } from "@/lib/runner-mode";
 
 /**
  * SQLite-friendly job status strings. Mirrors the values the Postgres
@@ -76,17 +77,12 @@ export async function createSampleJob(input: {
   //   We just leave the row at status="queued"; the connected runner
   //   pulls it via /api/runner/jobs/next. Used for hosted production
   //   (the SaaS can't punch into the user's localhost).
-  // - "direct"   — historical local-dev path. The SaaS calls the
-  //   agent's HTTP API directly and blocks until it returns.
+  // - "direct"   — local-dev path. The SaaS calls the agent's HTTP API
+  //   directly and blocks until it returns.
   //
-  // Per-agent override: if the agent has a runnerTokenHash but the
-  // env is "direct", we still respect direct mode for that call —
-  // the user might be debugging the local agent's HTTP API. Polling
-  // mode never falls back to direct (the agent.baseUrl on a hosted
-  // VPS deploy is "http://127.0.0.1:9444" which the SaaS can't
-  // reach anyway).
-  const mode = (process.env.APP_RUNNER_MODE || "direct").toLowerCase();
-  if (mode === "polling") {
+  // Mode is resolved centrally in src/lib/runner-mode.ts so the
+  // dispatcher, the health probe, and the UI banner all agree.
+  if (getRunnerMode() === "polling") {
     revalidatePath("/jobs");
     revalidatePath(`/jobs/${job.id}`);
     revalidatePath("/dashboard");
@@ -112,11 +108,33 @@ export async function createSampleJob(input: {
 
   const token = process.env.AGENT_API_TOKEN || undefined;
 
+  // Catch direct-mode connection failures (ECONNREFUSED etc.) and
+  // surface them as a clean failed Job. Without this, an offline
+  // local runner crashes the whole server-action with `fetch failed`
+  // and the user sees a 500 instead of a "Local runner not reachable"
+  // result they can act on.
   let envelopeBack: JobEnvelopeResponse;
-  if (STREAMING_JOB_TYPES.has(input.jobType)) {
-    envelopeBack = await dispatchStreaming(job.id, agent.baseUrl, envelope, token);
-  } else {
-    envelopeBack = await runJob(agent.baseUrl, envelope, token);
+  try {
+    if (STREAMING_JOB_TYPES.has(input.jobType)) {
+      envelopeBack = await dispatchStreaming(job.id, agent.baseUrl, envelope, token);
+    } else {
+      envelopeBack = await runJob(agent.baseUrl, envelope, token);
+    }
+  } catch (err) {
+    const e = err as Error;
+    envelopeBack = {
+      protocol_version: "0.1",
+      job_id:   job.id,
+      job_type: input.jobType,
+      status:   "failed",
+      result:   null,
+      error: {
+        code:    "AGENT_UNREACHABLE",
+        message:
+          "Local runner not reachable at " + agent.baseUrl + ": " +
+          `${e.name}: ${String(e.message ?? e).slice(0, 200)}`,
+      },
+    };
   }
 
   const newStatus: JobStatus =

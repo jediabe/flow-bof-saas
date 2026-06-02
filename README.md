@@ -45,19 +45,26 @@ See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what comes next.
 # 1. Install deps.
 npm install
 
-# 2. Copy env template + fill in DATABASE_URL.
+# 2. Copy env template + fill in DATABASE_URL + AUTH_SECRET.
+#    Generate AUTH_SECRET with:  openssl rand -base64 48
 cp .env.example .env
 $EDITOR .env
 
-# 3. Push the schema + seed a default user/workspace.
+# 3. Push the schema.
 npm run db:push
-npm run db:seed
 
 # 4. Run the dev server.
 npm run dev
 ```
 
-Open <http://localhost:3000> — you'll land on `/dashboard`.
+Open <http://localhost:3000>. You'll be redirected to `/signup` —
+create the first account, and you land on `/dashboard`.
+
+Need a quick-and-dirty no-signup dev mode? Set
+`ALLOW_AUTH_BYPASS=true` in `.env` (only honoured outside
+production). The app falls back to the env-driven default user from
+`DEFAULT_USER_EMAIL` / `DEFAULT_USER_NAME`. Don't ship that to a
+real deploy.
 
 ## First-run flow
 

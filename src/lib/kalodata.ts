@@ -214,21 +214,32 @@ export interface DownloadResult {
 }
 
 /**
- * Download `url` and save it as
- * `public/uploads/batches/<batchId>/<productId>_primary.<ext>`.
+ * Download `url` and save it under
+ * `public/uploads/workspaces/<workspaceId>/batches/<batchId>/<productId>_primary.<ext>`.
+ *
+ * The workspace-scoped prefix is a privacy layer: two users in
+ * different workspaces never share a folder, so a stray
+ * `ls`-of-the-uploads tree can't mix one tenant's reference images
+ * with another's. The path still lives under `public/`, so the URL
+ * Next serves is publicly reachable — that's why we don't store
+ * anything sensitive here, and why this layout is documented as
+ * "alpha-grade; move to object storage with signed URLs for real
+ * privacy" in docs/SECURITY.md.
  *
  * Returns both the on-disk path and the public-relative URL the
- * Product row should store (`/uploads/batches/<batchId>/...`). Caller
- * decides what to do on failure — we just raise.
+ * Product row should store (`/uploads/workspaces/.../batches/.../<file>`).
+ * Caller decides what to do on failure — we just raise.
  */
 export async function downloadProductImage({
   url,
+  workspaceId,
   batchId,
   productId,
   publicDir,
   timeoutMs = 20_000,
 }: {
   url: string;
+  workspaceId: string;
   batchId: string;
   productId: string;
   /** Absolute path of the Next "public/" folder. */
@@ -255,14 +266,21 @@ export async function downloadProductImage({
 
   const ext = inferImageExt(ct, url);
   const fname = `${productId}_primary.${ext}`;
-  const dir = path.join(publicDir, "uploads", "batches", batchId);
+  const dir = path.join(
+    publicDir,
+    "uploads",
+    "workspaces",
+    workspaceId,
+    "batches",
+    batchId,
+  );
   await fs.mkdir(dir, { recursive: true });
   const filePath = path.join(dir, fname);
   await fs.writeFile(filePath, buf);
 
   return {
     filePath,
-    relUrl: `/uploads/batches/${batchId}/${fname}`,
+    relUrl: `/uploads/workspaces/${workspaceId}/batches/${batchId}/${fname}`,
     ext,
     size: buf.length,
   };

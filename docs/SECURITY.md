@@ -25,13 +25,53 @@ data back."
 ## What this SaaS DOES hold
 
 - Product metadata, prompts, batch state.
-- Agent registration info: name, base URL, optional bearer token, last
-  seen timestamp.
+- Agent registration info: name, base URL, runner-token **hash**, last
+  seen / last-poll timestamps.
 - Job envelopes: payload, result JSON, error JSON, event timeline.
-- Per-org settings (none defined yet; phase 4+).
+- Per-workspace settings: AI provider key, model, OpenRouter
+  attribution fields.
+- User accounts: email, optional name, **bcrypt-hashed password**.
 
 If a SaaS-side breach happened tomorrow, the worst case is leaked
 product lists + leaked AI prompts. No Google account is compromised.
+
+## User accounts and workspace isolation
+
+Every user record owns exactly one Workspace. Every other row
+(Agent, Batch, Product, Job, JobEvent, WorkspaceSettings, plus the
+runner-token + per-batch uploads) is scoped by `workspaceId`.
+
+- `getCurrentWorkspace()` in `src/lib/workspace.ts` is the only
+  place that resolves "who is the request for." Every server action,
+  page, and API route that touches user data calls it first.
+- Cross-workspace IDs are not enumerable: `db.batch.findFirst({
+  where: { id, workspaceId: workspace.id } })` returns null when
+  a stranger guesses someone else's batch ID, and the page
+  renders a 404.
+- Runner tokens are also workspace-scoped through their owning
+  Agent — `/api/runner/jobs/next` only ever hands back rows where
+  `agentId == this token's agent.id`.
+
+## Authentication
+
+- **App login**: minimal cookie session. HS256 JWT signed with
+  `AUTH_SECRET` (32+ chars; `openssl rand -base64 48` generates one),
+  stored in an HttpOnly + Secure (in production) + SameSite=Lax
+  cookie named `flowbof_session`. 30-day expiry. Middleware verifies
+  the cookie's signature using `jose` so the Edge runtime can gate
+  every request without loading Prisma.
+- **Passwords**: bcryptjs, 10 rounds. Stored on `User.passwordHash`.
+  Never logged. Login failures return the same error string
+  regardless of whether the email exists — no account enumeration.
+- **Optional Basic Auth outer gate**: when `BASIC_AUTH_USER` +
+  `BASIC_AUTH_PASSWORD` are set, the whole app sits behind HTTP
+  Basic. App login still runs on top of it. Set neither for a
+  signup-only deploy.
+- **Runner API**: lives at `/api/runner/*` and bypasses *both* the
+  basic-auth gate and the app-login redirect because the runner
+  authenticates with a per-Agent Bearer token (see runner-auth.ts).
+  Tokens are stored as SHA-256 hex only; the full value is shown
+  to the user exactly once at mint time.
 
 ## Local agent posture
 

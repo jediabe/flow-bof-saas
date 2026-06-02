@@ -88,6 +88,11 @@ COPY --from=builder --chown=nextjs:nodejs /app/node_modules/@prisma/client     .
 COPY --from=builder --chown=nextjs:nodejs /app/node_modules/prisma             ./node_modules/prisma
 COPY --from=builder --chown=nextjs:nodejs /app/node_modules/.bin/prisma        ./node_modules/.bin/prisma
 
+# Hourly cleanup script: removes temp uploads older than 24h and
+# orphaned per-batch reference-image directories. Invoked by cron
+# via `docker compose exec app node scripts/cleanup-uploads.mjs`.
+COPY --from=builder --chown=nextjs:nodejs /app/scripts ./scripts
+
 # Make sure the writable uploads dir exists with the right owner —
 # the compose file mounts a host volume here. Pre-creating prevents
 # permission errors on first boot when the volume is empty.
