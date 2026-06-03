@@ -474,7 +474,6 @@ export default async function BatchDetail({
       </Panel>
 
       {/* ----- Recent activity --------------------------------------- */}
-      <span id="activity" className="sr-only" aria-hidden="true" />
       <Panel
         title={`Activity (${batch.jobs.length})`}
         action={

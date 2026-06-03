@@ -73,7 +73,13 @@ export default function BatchWorkbench({
       // friendly summary; /jobs/[id] is still linked from there for
       // technical drill-down.
       if (r.jobId) {
-        router.push(`/batches/${batchId}?job=${r.jobId}#activity`);
+        // Land at the top of the batch page. The LatestTaskResult
+        // panel (which reads ?job=<id>) renders right under the
+        // header — no fragment needed. Earlier this used #activity,
+        // which anchored the browser at the Activity timeline near
+        // the bottom and made every click feel like a scroll
+        // glitch.
+        router.push(`/batches/${batchId}?job=${r.jobId}`, { scroll: true });
       }
       if (!r.ok) {
         setLastError(r.message);

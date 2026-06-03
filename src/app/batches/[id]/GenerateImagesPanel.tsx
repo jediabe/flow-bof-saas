@@ -132,7 +132,11 @@ export default function GenerateImagesPanel({
       // page is still reachable via "View technical details" for
       // debugging.
       if (r.jobId) {
-        router.push(`/batches/${batchId}?job=${r.jobId}#activity`);
+        // Land at the top of the batch page so the LatestTaskResult
+        // panel (which reads ?job=<id>) is what the user sees
+        // first. Earlier this pushed with #activity which scrolled
+        // the browser to the bottom of the page on every click.
+        router.push(`/batches/${batchId}?job=${r.jobId}`, { scroll: true });
       }
       if (!r.ok) {
         setLastError(r.message);
