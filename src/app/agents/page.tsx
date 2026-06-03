@@ -191,25 +191,44 @@ export default async function RunnerSetupPage() {
       <Panel title="Troubleshooting">
         <ul className="text-sm space-y-2 list-disc pl-5 text-text/85">
           <li>
-            <strong>Docker Desktop</strong> must be running before you
-            execute the command above.
+            <strong>Chrome must be installed.</strong> The runner
+            connects to your existing Google Chrome via CDP and
+            launches a dedicated debug profile for you — Chrome
+            itself isn't bundled.
           </li>
           <li>
-            Run from the <code className="id-mono">flow-bof-automation</code>{" "}
-            repo folder — the runner image's working directory expects
-            its own source tree.
+            <strong>Sign into Google Flow</strong> in the Chrome
+            window the runner opens (it's a separate profile from
+            your normal Chrome). Once signed in, the runner can
+            claim and execute jobs without further input.
           </li>
           <li>
-            <strong>Chrome debug profile</strong> must be started for
-            Flow automation jobs. The runner connects to a separate
-            Chrome instance via CDP; <code className="id-mono">./start.sh</code>{" "}
-            (or <code className="id-mono">start.ps1</code> on Windows)
-            in the runner repo brings it up.
+            <strong>Accidentally closed the Flow window?</strong> In
+            the running runner choose{" "}
+            <code className="id-mono">Open/Reopen Google Flow browser</code>{" "}
+            (or run{" "}
+            <code className="id-mono">FlowBOFRunner --open-browser</code>).
+            It reopens just the dedicated profile — your normal
+            Chrome tabs stay untouched.
           </li>
           <li>
-            <strong>Google Flow</strong> must be open and logged in
-            inside that debug Chrome before queueing scan / video
-            jobs.
+            <strong>Console stays open.</strong> The runner window
+            doesn't auto-close on errors — it pauses with{" "}
+            <code className="id-mono">Press Enter to exit.</code> so
+            you can read what happened.
+          </li>
+          <li>
+            <strong>Diagnose.</strong> Run{" "}
+            <code className="id-mono">FlowBOFRunner.exe --diagnose</code>{" "}
+            (or <code className="id-mono">python runner_app.py --diagnose</code>{" "}
+            from source). It checks SaaS connectivity, the runner
+            token, Chrome installation, the debug port, and prints
+            an actionable report.
+          </li>
+          <li>
+            <strong>Docker isn't needed.</strong> Docker is for
+            contributors iterating on the runner code. End users
+            use the Windows exe.
           </li>
           <li>
             If the runner is polling but never claims jobs, double-check:

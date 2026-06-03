@@ -111,6 +111,50 @@ The SaaS picks queue-vs-direct based on `APP_RUNNER_MODE`:
 Hosted production (`https://app.autobof.xyz`) sets
 `APP_RUNNER_MODE=polling` in `.env.production`.
 
+## Runner browser + console lifecycle
+
+The packaged runner (Windows `.exe` / macOS `.app`+`.command`)
+launches Chrome with a **dedicated `--user-data-dir`** — not the
+user's normal Chrome profile. Two consequences worth surfacing in
+support replies:
+
+- **Closing the user's normal Chrome doesn't stop the runner**, and
+  vice versa. They're separate processes pointing at separate
+  profile directories.
+- **The runner never wholesale-kills Chrome.** It only operates on
+  the dedicated profile it spawned.
+
+If the dedicated Flow window gets closed mid-session, the user can
+reopen it via the runner's `Open/Reopen Google Flow browser` menu
+item (or `FlowBOFRunner --open-browser` from a terminal). The
+helper focuses an existing Flow tab when possible, opens a new tab
+via CDP when one isn't there, and only cold-launches Chrome when
+the dedicated profile's window was fully closed.
+
+The runner is **console mode** on both platforms — the window stays
+open while jobs run, prints live status, and pauses with
+`Press Enter to exit.` on errors so the user can read what
+happened. See
+[`flow-bof-automation/docs/CONNECTED_RUNNER.md`](../../flow-bof-automation/docs/CONNECTED_RUNNER.md#console-lifecycle)
+for the runner-side detail.
+
+## Flow UI prep (centralised, runner-side)
+
+Before every image or video submit, the runner runs a centralised
+prep pass against the dedicated Chrome profile to recover from
+stale Flow UI state — open menus, agent-prompt suggestion pills,
+side panels, leftover Radix dialogs — that would otherwise
+intercept clicks on the prompt input or the Generate button.
+
+The same prep code runs from every dispatch path (Docker / CLI /
+connected polling / standalone exe / .app). See
+[`flow-bof-automation/docs/CONNECTED_RUNNER.md#automatic-flow-ui-prep`](../../flow-bof-automation/docs/CONNECTED_RUNNER.md#automatic-flow-ui-prep)
+for the per-step breakdown and the operator-only env switches.
+
+Each prep pass also lands on the job's event timeline as a
+`flow_ui_prep` JobEvent with a per-step detail blob, so a selector
+regression is easy to spot in the SaaS UI.
+
 ## Boundary guarantees
 
 - **Metadata only.** The runner reports job progress, success /
@@ -137,20 +181,25 @@ On the SaaS side (already done if you followed
 - [ ] App reachable at `https://your-domain/api/health` (returns
       `{"ok": true}`).
 
-On the runner machine:
+On the runner machine (end-user path, recommended):
 
-- [ ] An Agent row exists in the SaaS for this machine (Runner page
-      → Register runner).
-- [ ] Token minted via **Generate runner token**.
-- [ ] Environment:
-      ```bash
-      export SAAS_BASE_URL=https://app.autobof.xyz
-      export RUNNER_TOKEN=runner_xxxxxxxx
-      export RUNNER_POLL_INTERVAL_SECONDS=5    # optional
-      ```
-- [ ] `python main.py --runner-poll` in the runner repo. See
-      [`flow-bof-automation/docs/CONNECTED_RUNNER.md`](../../flow-bof-automation/docs/CONNECTED_RUNNER.md)
-      for the runner-side write-up.
+- [ ] Register a runner in the SaaS Runner Setup page.
+- [ ] Generate a token via **Generate runner token**.
+- [ ] Download `FlowBOFRunner.exe` from GitHub Releases.
+- [ ] Double-click. Paste the SaaS URL and runner token when
+      prompted (or use copy buttons from the Runner Setup page).
+- [ ] A dedicated Chrome window opens; sign into Google Flow inside
+      it. Keep both the runner and that Chrome open.
+
+On the runner machine (developer path):
+
+- [ ] Clone `flow-bof-automation`.
+- [ ] `python runner_app.py` (one-time prompt + same flow as the
+      exe) — or the legacy `python main.py --runner-poll` with
+      env vars.
+- [ ] Docker is optional; see
+      [`flow-bof-automation/docs/RUNNER_PACKAGING.md`](../../flow-bof-automation/docs/RUNNER_PACKAGING.md)
+      for build instructions and the supported developer paths.
 
 After a successful first health POST the SaaS shows the Agent row
 with **online** + **token set (****abcd)** chips and the last-poll

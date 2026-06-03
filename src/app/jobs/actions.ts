@@ -59,6 +59,40 @@ export async function createSampleJob(input: {
     return { ok: false, jobId: "", message: "agent not found in this workspace" };
   }
 
+  // Defensive: catch "user clicked Generate Images with nothing
+  // eligible" before the row hits the DB / runner. Without this
+  // the runner emits a `MISSING_ITEMS` failure from inside
+  // _handle_generate_flow_images and we'd surface a cryptic
+  // 'payload.items must be a non-empty list' message to the UI.
+  //
+  // Only the items-driven types need this gate — health_check,
+  // check_flow_connection, scan_favorited_images, and the
+  // favorites-driven video job all take empty / sparse payloads
+  // on purpose.
+  const ITEM_DRIVEN_JOBS = new Set<string>(["generate_flow_images"]);
+  if (ITEM_DRIVEN_JOBS.has(input.jobType)) {
+    const items = (input.payload as { items?: unknown })?.items;
+    const itemsCount = Array.isArray(items) ? items.length : -1;
+    // Verbose enough to actually answer "what did the SaaS dispatch?"
+    // when the runner returns MISSING_ITEMS. Lands in `docker logs
+    // app` on the VPS. No secrets here — payload items are public
+    // workspace data the runner already sees.
+    console.log(
+      `[jobs.createSampleJob] dispatch type=${input.jobType} agent=${input.agentId} ` +
+        `batch=${input.batchId ?? "-"} items=${itemsCount} keys=${Object.keys(input.payload ?? {}).join(",")}`,
+    );
+    if (!Array.isArray(items) || items.length === 0) {
+      return {
+        ok: false,
+        jobId: "",
+        message:
+          "No products are ready for image generation. Each product needs " +
+          "an imagePrompt and a reference image — use the AI Prompt " +
+          "Generation panel above, then try again.",
+      };
+    }
+  }
+
   // Persist the queued job FIRST so failures still leave a trace.
   const job = await db.job.create({
     data: {
