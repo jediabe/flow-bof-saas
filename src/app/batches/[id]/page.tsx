@@ -214,8 +214,14 @@ export default async function BatchDetail({
     (p) => !p.referenceImageUrl && !p.referenceImagePathLocal,
   ).length;
 
+  // Fallback chain for the URL the runner uses to fetch reference
+  // images: explicit override wins, then the SaaS's public URL
+  // (right answer for hosted prod), then host.docker.internal for
+  // local dev where the runner and SaaS share a Docker Desktop host.
   const agentAssetBaseUrl =
-    process.env.AGENT_ASSET_BASE_URL || "http://host.docker.internal:3000";
+    process.env.AGENT_ASSET_BASE_URL ||
+    process.env.NEXT_PUBLIC_APP_URL ||
+    "http://host.docker.internal:3000";
 
   // AI provider status for the AiPromptsPanel — only the *masked*
   // projection lands on the client (provider key + model only; no

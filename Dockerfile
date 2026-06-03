@@ -94,9 +94,15 @@ COPY --from=builder --chown=nextjs:nodejs /app/node_modules/.bin/prisma        .
 COPY --from=builder --chown=nextjs:nodejs /app/scripts ./scripts
 
 # Make sure the writable uploads dir exists with the right owner —
-# the compose file mounts a host volume here. Pre-creating prevents
-# permission errors on first boot when the volume is empty.
-RUN mkdir -p /app/public/uploads/batches \
+# the compose file mounts a host volume here. Pre-creating every
+# subdir the app might mkdir into prevents EACCES on first boot when
+# the bind mount inherits root ownership. The host-side
+# scripts/fix-upload-perms.sh handles the bind-mount side.
+RUN mkdir -p \
+      /app/public/uploads/workspaces \
+      /app/public/uploads/batches \
+      /app/public/uploads/imports \
+      /app/public/uploads/_tmp \
  && chown -R nextjs:nodejs /app/public/uploads
 
 USER nextjs

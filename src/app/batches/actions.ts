@@ -1,6 +1,5 @@
 "use server";
 
-import path from "node:path";
 import { Buffer } from "node:buffer";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
@@ -151,6 +150,14 @@ export interface KalodataImportReport {
   productsCreated: number;
   imagesDownloaded: number;
   imagesFailed: number;
+  /**
+   * Subset of imagesFailed that hit EACCES / EPERM when the app
+   * tried to mkdir / write into public/uploads. Surfaced
+   * separately so the UI can show an operator-friendly "run
+   * fix-upload-perms.sh" hint instead of N copies of the same
+   * permissions error.
+   */
+  permissionErrors: number;
   failures: Array<{
     productName: string;
     reason: string;
@@ -200,17 +207,18 @@ export async function importKalodataXlsx(
     );
   }
 
-  const publicDir = path.join(process.cwd(), "public");
-
   let imagesDownloaded = 0;
   let imagesFailed = 0;
+  let permissionErrors = 0;
   let productsCreated = 0;
   const failures: KalodataImportReport["failures"] = [];
 
   for (const row of parsed.rows) {
     // Create the Product *first* so we can use its id in the filename.
-    // If the download fails the row still survives — the user can
-    // hand-edit the reference URL later.
+    // If the download fails the row still survives with
+    // referenceImageUrl=null — the user can re-import or hand-edit it
+    // later, and the UI renders a "Image download failed" placeholder
+    // instead of a broken image icon.
     const product = await db.product.create({
       data: {
         batchId: batch.id,
@@ -232,24 +240,45 @@ export async function importKalodataXlsx(
       continue;
     }
 
+    // Server-side log gives us a per-product audit trail without
+    // leaking sensitive payloads — product id, name, and the source
+    // URL are already in the user's own data.
+    console.log(
+      `[kalodata] downloading image for product=${product.id} (${row.productName.slice(0, 60)}) src=${row.imgUrl}`,
+    );
+
     try {
       const dl = await downloadProductImage({
         url: row.imgUrl,
         workspaceId: workspace.id,
         batchId: batch.id,
         productId: product.id,
-        publicDir,
       });
+      // Critical: only set referenceImageUrl AFTER a successful
+      // download. A failed download leaves the column null so the
+      // UI can render a clean placeholder instead of a broken
+      // <img src=…> pointing at a file that never existed.
       await db.product.update({
         where: { id: product.id },
         data: { referenceImageUrl: dl.relUrl },
       });
+      console.log(
+        `[kalodata]   ↳ saved ${dl.size}B as ${dl.relUrl}`,
+      );
       imagesDownloaded += 1;
     } catch (err) {
+      const e = err as Error;
+      const msg = e.message || "download failed";
+      if (msg.includes("Upload directory is not writable")) {
+        permissionErrors += 1;
+      }
       imagesFailed += 1;
+      console.warn(
+        `[kalodata]   ↳ failed: ${msg}`,
+      );
       failures.push({
         productName: row.productName,
-        reason: (err as Error).message || "download failed",
+        reason: msg,
       });
     }
   }
@@ -260,14 +289,18 @@ export async function importKalodataXlsx(
   return {
     ok: true,
     message:
-      productsCreated > 0
-        ? `Imported ${productsCreated} product(s) from "${parsed.sheetName}".`
-        : "No product rows found in the workbook.",
+      permissionErrors > 0
+        ? `Imported ${productsCreated} product(s) but ${permissionErrors} image(s) failed with permission errors. ` +
+            `Run scripts/fix-upload-perms.sh on the server and re-import.`
+        : productsCreated > 0
+          ? `Imported ${productsCreated} product(s) from "${parsed.sheetName}".`
+          : "No product rows found in the workbook.",
     sheetName: parsed.sheetName,
     productsFound: parsed.rows.length,
     productsCreated,
     imagesDownloaded,
     imagesFailed,
+    permissionErrors,
     failures: failures.slice(0, 20),
   };
 }
@@ -281,6 +314,7 @@ function failReport(message: string): KalodataImportReport {
     productsCreated: 0,
     imagesDownloaded: 0,
     imagesFailed: 0,
+    permissionErrors: 0,
     failures: [],
   };
 }

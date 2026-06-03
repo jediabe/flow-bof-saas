@@ -135,7 +135,6 @@ export default function ProductEditor({
       >
         <Thumbnail
           src={product.referenceImageUrl}
-          fallbackSrc={product.imageUrl}
           alt={product.productName}
         />
         <div className="flex-1 min-w-0">
@@ -374,27 +373,40 @@ export default function ProductEditor({
 
 function Thumbnail({
   src,
-  fallbackSrc,
   alt,
 }: {
+  /**
+   * Public URL stored on Product.referenceImageUrl. Null when the
+   * Kalodata download failed (or the row was created manually
+   * without a reference); the placeholder branch renders in that
+   * case. We deliberately do NOT fall back to the original remote
+   * imageUrl — those URLs are CDN-protected and produce broken
+   * image icons when the browser tries to load them; the cleaner
+   * UX is "Image missing" + a chip the user can act on.
+   */
   src: string | null;
-  fallbackSrc?: string | null;
   alt: string;
 }) {
-  const effective = src || fallbackSrc || "";
+  const [broken, setBroken] = useState(false);
+  const showImg = !!src && !broken;
   return (
     <div className="w-14 h-14 shrink-0 rounded-xl border border-border bg-bg overflow-hidden">
-      {effective ? (
+      {showImg ? (
         // eslint-disable-next-line @next/next/no-img-element
         <img
-          src={effective}
+          src={src!}
           alt={alt}
           loading="lazy"
+          decoding="async"
           className="w-full h-full object-cover"
+          onError={() => setBroken(true)}
         />
       ) : (
-        <div className="w-full h-full flex items-center justify-center text-muted2 text-lg">
-          ◇
+        <div
+          className="w-full h-full flex items-center justify-center text-muted2 text-[10px] text-center px-1"
+          title={broken ? "Image failed to load" : "No reference image"}
+        >
+          {broken ? "load\nfailed" : "no\nimage"}
         </div>
       )}
     </div>

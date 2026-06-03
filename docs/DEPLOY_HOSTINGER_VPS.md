@@ -299,6 +299,39 @@ rm -rf uploads
 
 ## 11. Troubleshooting
 
+**`EACCES: permission denied, mkdir '/app/public/uploads/workspaces'`**
+(or any other path under `/app/public/uploads/`). The host-side
+`./uploads` directory is missing or root-owned, so the bind mount
+the app container sees is read-only to the non-root `nextjs` user.
+Fix:
+
+```bash
+./scripts/fix-upload-perms.sh
+docker compose --env-file .env.production -f docker-compose.prod.yml restart app
+```
+
+`scripts/fix-upload-perms.sh` is idempotent and `scripts/deploy-prod.sh`
+calls it for you on every deploy. If you've never run it, the very
+first Kalodata import on a fresh VPS will fail until you do.
+
+**Imported product cards show "no image" or "load failed".** Open
+the URL from one of the failing rows directly in the browser:
+
+```bash
+curl -I https://app.autobof.xyz/uploads/workspaces/<wsId>/batches/<batchId>/<productId>_primary.jpg
+```
+
+Expected: `HTTP/2 200` + `content-type: image/jpeg|png|webp`.
+
+- 404 → the file didn't make it to disk. Re-import after running
+  `fix-upload-perms.sh`.
+- 200 but the UI still shows "load failed" → check the URL the UI
+  rendered (DevTools → Network) matches what you `curl`'d. The
+  Product row stores `referenceImageUrl` as `/uploads/…`; the
+  browser fetches it from the SaaS origin. Mismatches here usually
+  mean the row stored an absolute remote URL by accident — drop
+  the row and re-import.
+
 **`WARN[0000] The "POSTGRES_USER" variable is not set`** (or
 `POSTGRES_DB`, `POSTGRES_PASSWORD`, `APP_DOMAIN`) — you ran
 `docker compose -f docker-compose.prod.yml ...` *without*

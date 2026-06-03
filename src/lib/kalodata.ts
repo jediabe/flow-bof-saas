@@ -171,6 +171,21 @@ export function parseKalodataWorkbook(bytes: Buffer): KalodataParseResult {
 // ---------------------------------------------------------------------
 // Image download helpers
 // ---------------------------------------------------------------------
+//
+// Reads the CONTENT_TYPE_TO_EXT / magic-byte tables in tandem so a
+// Kalodata CDN that lies about its Content-Type still produces a
+// correct filename. Order:
+//
+//   1. Content-Type response header (most authoritative when present)
+//   2. First few bytes of the body (deterministic when content-type
+//      is wrong or absent)
+//   3. URL path suffix (least authoritative — many CDN URLs end .php)
+//   4. Default jpg.
+//
+// `jpeg` is normalised to `jpg` so all stored URLs share one
+// extension family. Supported: jpg, png, webp, gif, bmp.
+
+import { getBatchUploadDir, publicUploadUrlFor } from "@/lib/uploads";
 
 const CONTENT_TYPE_TO_EXT: Record<string, string> = {
   "image/jpeg":  "jpg",
@@ -182,30 +197,66 @@ const CONTENT_TYPE_TO_EXT: Record<string, string> = {
   "image/bmp":   "bmp",
 };
 
+/** Returns the canonical extension if `body` starts with a known
+ *  image magic prefix; "" otherwise. */
+function sniffImageMagic(body: Buffer): string {
+  if (body.length < 4) return "";
+  if (body[0] === 0xff && body[1] === 0xd8 && body[2] === 0xff) return "jpg";
+  if (
+    body[0] === 0x89 && body[1] === 0x50 && body[2] === 0x4e && body[3] === 0x47
+  ) return "png";
+  if (body[0] === 0x47 && body[1] === 0x49 && body[2] === 0x46) return "gif";
+  if (body[0] === 0x42 && body[1] === 0x4d) return "bmp";
+  // WEBP: "RIFF<size>WEBP"
+  if (
+    body.length >= 12 &&
+    body[0] === 0x52 && body[1] === 0x49 && body[2] === 0x46 && body[3] === 0x46 &&
+    body[8] === 0x57 && body[9] === 0x45 && body[10] === 0x42 && body[11] === 0x50
+  ) return "webp";
+  return "";
+}
+
 /**
- * Best-effort extension inference. Same order the runner uses on its
- * side: header → URL suffix → "jpg" fallback.
+ * Best-effort extension inference: content-type → magic bytes → URL
+ * suffix → jpg fallback. Returns the canonical (jpeg→jpg) form.
  */
-function inferImageExt(contentType: string | null, url: string): string {
+function inferImageExt(
+  contentType: string | null,
+  body: Buffer,
+  url: string,
+): string {
   if (contentType) {
     const ct = contentType.split(";", 1)[0].trim().toLowerCase();
     if (CONTENT_TYPE_TO_EXT[ct]) return CONTENT_TYPE_TO_EXT[ct];
   }
+  const magic = sniffImageMagic(body);
+  if (magic) return magic;
   try {
     const u = new URL(url);
     const suffix = path.extname(u.pathname).toLowerCase().replace(/^\./, "");
     if (suffix === "jpeg") return "jpg";
     if (["jpg", "png", "webp", "gif", "bmp"].includes(suffix)) return suffix;
   } catch {
-    // ignore malformed URLs; caller has surfaced the original anyway
+    // malformed URL — fall through to jpg
   }
   return "jpg";
+}
+
+/** Loose "is this image-ish" sniff used to reject obvious junk
+ *  payloads (HTML error pages, redirects to login walls, etc.). */
+function looksLikeImage(contentType: string | null, body: Buffer): boolean {
+  if (contentType) {
+    const ct = contentType.split(";", 1)[0].trim().toLowerCase();
+    if (ct.startsWith("image/")) return true;
+  }
+  return sniffImageMagic(body).length > 0;
 }
 
 export interface DownloadResult {
   /** Absolute on-disk path of the saved file. */
   filePath: string;
-  /** Public URL prefix to store on the Product row, e.g. `/uploads/batches/<id>/<file>`. */
+  /** Public URL stored on Product.referenceImageUrl, e.g.
+   *  `/uploads/workspaces/<ws>/batches/<b>/<p>_primary.jpg`. */
   relUrl: string;
   /** Detected extension (without leading dot). */
   ext: string;
@@ -213,37 +264,38 @@ export interface DownloadResult {
   size: number;
 }
 
+/** Default max image size before we refuse to keep buffering. 20MB
+ *  is comfortably above any reasonable product hero shot. */
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+
 /**
- * Download `url` and save it under
- * `public/uploads/workspaces/<workspaceId>/batches/<batchId>/<productId>_primary.<ext>`.
+ * Download a Kalodata product image into
+ * `public/uploads/workspaces/<wsId>/batches/<batchId>/<productId>_primary.<ext>`
+ * and return the on-disk path + the public URL the Product row should
+ * store. Hard guarantees on the return value:
  *
- * The workspace-scoped prefix is a privacy layer: two users in
- * different workspaces never share a folder, so a stray
- * `ls`-of-the-uploads tree can't mix one tenant's reference images
- * with another's. The path still lives under `public/`, so the URL
- * Next serves is publicly reachable — that's why we don't store
- * anything sensitive here, and why this layout is documented as
- * "alpha-grade; move to object storage with signed URLs for real
- * privacy" in docs/SECURITY.md.
+ *   - The file at `filePath` exists, has size > 0, and looks like
+ *     a real image (content-type starts with `image/` OR magic bytes
+ *     match a known format).
+ *   - `relUrl` is a relative `/uploads/…` path. Never a filesystem
+ *     path, never null on success.
  *
- * Returns both the on-disk path and the public-relative URL the
- * Product row should store (`/uploads/workspaces/.../batches/.../<file>`).
- * Caller decides what to do on failure — we just raise.
+ * On any failure (bad HTTP status, non-image body, EACCES, write
+ * failure) we throw with a message safe to render to the user. The
+ * caller is responsible for the per-product retry / "set
+ * referenceImageUrl to null" decision.
  */
 export async function downloadProductImage({
   url,
   workspaceId,
   batchId,
   productId,
-  publicDir,
   timeoutMs = 20_000,
 }: {
   url: string;
   workspaceId: string;
   batchId: string;
   productId: string;
-  /** Absolute path of the Next "public/" folder. */
-  publicDir: string;
   timeoutMs?: number;
 }): Promise<DownloadResult> {
   const controller = new AbortController();
@@ -252,7 +304,18 @@ export async function downloadProductImage({
   try {
     resp = await fetch(url, {
       signal: controller.signal,
-      headers: { "User-Agent": "flow-bof-saas/0.1 (kalodata-import)" },
+      // Some CDNs reject our naked default UA + return a 403/HTML
+      // login wall. The header set below is what a vanilla Chrome
+      // sends for a direct image GET — friendly to most CDNs without
+      // pretending to be a full browser.
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 " +
+          "(KHTML, like Gecko) Chrome/125.0 Safari/537.36",
+        Accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+      },
+      redirect: "follow",
     });
   } finally {
     clearTimeout(timer);
@@ -260,48 +323,72 @@ export async function downloadProductImage({
   if (!resp.ok) {
     throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
   }
-  const ct = resp.headers.get("content-type");
-  const buf = Buffer.from(await resp.arrayBuffer());
-  if (buf.length === 0) throw new Error("empty response body");
 
-  const ext = inferImageExt(ct, url);
+  const ct = resp.headers.get("content-type");
+  const ab = await resp.arrayBuffer();
+  if (ab.byteLength === 0) throw new Error("empty response body");
+  if (ab.byteLength > MAX_IMAGE_BYTES) {
+    throw new Error(
+      `image too large (${ab.byteLength} bytes, max ${MAX_IMAGE_BYTES})`,
+    );
+  }
+  const buf = Buffer.from(ab);
+  if (!looksLikeImage(ct, buf)) {
+    throw new Error(
+      `response does not look like an image (content-type=${ct ?? "?"})`,
+    );
+  }
+
+  const ext = inferImageExt(ct, buf, url);
   const fname = `${productId}_primary.${ext}`;
-  const dir = path.join(
-    publicDir,
-    "uploads",
-    "workspaces",
-    workspaceId,
-    "batches",
-    batchId,
-  );
-  await fs.mkdir(dir, { recursive: true });
+  const dir = getBatchUploadDir(workspaceId, batchId);
+
+  try {
+    await fs.mkdir(dir, { recursive: true });
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException;
+    if (e?.code === "EACCES" || e?.code === "EPERM") {
+      throw new Error(
+        "Upload directory is not writable. " +
+          "Run scripts/fix-upload-perms.sh on the server.",
+      );
+    }
+    throw err;
+  }
+
   const filePath = path.join(dir, fname);
-  await fs.writeFile(filePath, buf);
+  try {
+    await fs.writeFile(filePath, buf);
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException;
+    if (e?.code === "EACCES" || e?.code === "EPERM") {
+      throw new Error(
+        "Upload directory is not writable. " +
+          "Run scripts/fix-upload-perms.sh on the server.",
+      );
+    }
+    throw err;
+  }
+
+  // Belt-and-suspenders: confirm the file actually ended up where
+  // we said it did before we hand the URL back to the caller. A
+  // disk-full or filesystem-quota issue can swallow the write
+  // silently in older Node versions; stat surfaces it.
+  const st = await fs.stat(filePath);
+  if (!st.isFile() || st.size === 0) {
+    throw new Error("post-write stat reported zero-size or non-file");
+  }
 
   return {
     filePath,
-    relUrl: `/uploads/workspaces/${workspaceId}/batches/${batchId}/${fname}`,
+    relUrl: publicUploadUrlFor(
+      "workspaces",
+      workspaceId,
+      "batches",
+      batchId,
+      fname,
+    ),
     ext,
-    size: buf.length,
+    size: st.size,
   };
-}
-
-/**
- * Resolve the URL the local runner uses to fetch a reference image
- * stored under `/uploads/...`. The runner runs in a Docker container
- * (or as a sibling process on a separate machine), so the SaaS-internal
- * relative URL needs an externally-reachable prefix.
- *
- * Configurable via env: AGENT_ASSET_BASE_URL.
- *   Default: http://host.docker.internal:3000
- *
- * Pass-through for already-absolute URLs so we don't double-prefix
- * future signed URLs.
- */
-export function agentAssetUrl(relUrl: string): string {
-  if (/^https?:\/\//i.test(relUrl)) return relUrl;
-  const base = (process.env.AGENT_ASSET_BASE_URL || "http://host.docker.internal:3000")
-    .replace(/\/+$/, "");
-  if (!relUrl.startsWith("/")) return `${base}/${relUrl}`;
-  return `${base}${relUrl}`;
 }

@@ -32,8 +32,19 @@ COMPOSE="docker compose --env-file $ENV_FILE -f $COMPOSE_FILE"
 echo "▶ git pull"
 git pull --ff-only
 
+# Make sure the host uploads tree exists and is owned by the
+# container's nextjs user BEFORE the bind mount goes live. Without
+# this, the first Kalodata import hits EACCES on
+# /app/public/uploads/workspaces because the host path is root-owned.
+echo "▶ fix-upload-perms (host-side)"
+./scripts/fix-upload-perms.sh
+
 echo "▶ docker compose up -d --build (this can take a few minutes)"
 $COMPOSE up -d --build
+
+# Re-run after `up -d` in case docker recreated the host dir with
+# different ownership during volume init. Idempotent.
+./scripts/fix-upload-perms.sh
 
 echo "▶ pushing Prisma schema to Postgres..."
 # Don't try `compose exec app prisma db push` — the standalone

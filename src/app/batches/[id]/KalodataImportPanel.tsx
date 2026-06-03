@@ -116,6 +116,19 @@ export default function KalodataImportPanel({
               tone={report.imagesFailed > 0 ? "bad" : "muted"}
             />
           </div>
+          {report.permissionErrors > 0 && (
+            <div className="rounded-xl border border-bad/40 bg-bad/[0.06] text-xs text-bad px-3 py-2">
+              <strong>{report.permissionErrors} permission error(s).</strong>{" "}
+              The app container can't write into{" "}
+              <code className="id-mono">public/uploads/</code>. On the VPS,
+              run:
+              <pre className="mt-1 text-[11px] font-mono whitespace-pre-wrap">
+{`./scripts/fix-upload-perms.sh
+docker compose --env-file .env.production -f docker-compose.prod.yml restart app`}
+              </pre>
+              Then re-import the workbook.
+            </div>
+          )}
           {report.failures.length > 0 && (
             <details className="text-[11px]">
               <summary className="cursor-pointer text-muted hover:text-text transition-colors">
