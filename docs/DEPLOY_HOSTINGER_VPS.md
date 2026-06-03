@@ -314,23 +314,53 @@ docker compose --env-file .env.production -f docker-compose.prod.yml restart app
 calls it for you on every deploy. If you've never run it, the very
 first Kalodata import on a fresh VPS will fail until you do.
 
-**Imported product cards show "no image" or "load failed".** Open
-the URL from one of the failing rows directly in the browser:
+**Imported product cards show "load failed" and `/uploads/...`
+returns 404 with `Content-Type: text/html` + `Vary: rsc, …`.**
+That's Next.js standalone refusing to serve runtime-added
+`public/` files. The standalone server bakes its public-asset
+manifest at *build* time, the Kalodata importer writes images at
+*runtime*, so the request falls through to the App Router and
+404s as an HTML page (the `Vary: rsc` header is the giveaway).
+
+Fix (one-time, already applied in the repo): the Caddyfile has a
+`@uploads` block that serves `/uploads/*` directly from
+`/srv/uploads`, which the compose file mounts read-only from the
+same host `./uploads/` the app writes into. If your deploy
+pre-dates that change, redeploy:
+
+```bash
+git pull
+./scripts/deploy-prod.sh
+```
+
+After redeploy, a direct curl returns the bytes (note `server: Caddy`,
+not `x-powered-by: Next.js`):
 
 ```bash
 curl -I https://app.autobof.xyz/uploads/workspaces/<wsId>/batches/<batchId>/<productId>_primary.jpg
+# HTTP/2 200
+# content-type: image/jpeg
+# server: Caddy
 ```
 
-Expected: `HTTP/2 200` + `content-type: image/jpeg|png|webp`.
+If you instead see 404 *without* `Vary: rsc` — i.e. a plain
+file-not-found from Caddy's file_server — the import hasn't
+actually written the file. Diagnose:
 
-- 404 → the file didn't make it to disk. Re-import after running
-  `fix-upload-perms.sh`.
-- 200 but the UI still shows "load failed" → check the URL the UI
-  rendered (DevTools → Network) matches what you `curl`'d. The
-  Product row stores `referenceImageUrl` as `/uploads/…`; the
-  browser fetches it from the SaaS origin. Mismatches here usually
-  mean the row stored an absolute remote URL by accident — drop
-  the row and re-import.
+```bash
+# 1. Confirm the file isn't on disk:
+docker compose --env-file .env.production -f docker-compose.prod.yml \
+  exec app ls -la /app/public/uploads/workspaces/<wsId>/batches/<batchId>/
+
+# 2. Run the API debug endpoint while signed in:
+#    /api/debug/uploads?batchId=<id>
+#    Reports referenceImageUrl + on-disk presence per product.
+
+# 3. Fix perms and re-import:
+./scripts/fix-upload-perms.sh
+docker compose --env-file .env.production -f docker-compose.prod.yml \
+  restart app
+```
 
 **`WARN[0000] The "POSTGRES_USER" variable is not set`** (or
 `POSTGRES_DB`, `POSTGRES_PASSWORD`, `APP_DOMAIN`) — you ran

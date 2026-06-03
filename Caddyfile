@@ -12,9 +12,37 @@
 {$APP_DOMAIN} {
 	encode gzip zstd
 
-	# Forward everything to the Next.js app container. Caddy talks to
-	# `app` by Docker service name; the app expects to see real client
-	# IPs / proto in X-Forwarded-* headers, which Caddy sets by default.
+	# Serve runtime-added reference images straight from the bind-
+	# mounted host directory. Why this needs special handling:
+	#
+	# Next.js with `output: "standalone"` snapshots its `public/`
+	# manifest at *build* time. The Kalodata importer writes files
+	# into `public/uploads/...` at *runtime*; those files are not
+	# in the snapshot, and the standalone server passes the request
+	# to the App Router, which 404s with a `Vary: rsc, …` HTML
+	# response (that's how we found this bug — see the response
+	# headers in DevTools on any "load failed" thumbnail).
+	#
+	# Solution: short-circuit /uploads/* at the proxy. Caddy serves
+	# the file straight off disk; Next never sees the request. The
+	# `./uploads:/srv/uploads:ro` mount on the caddy service (see
+	# docker-compose.prod.yml) hands Caddy the same host directory
+	# the app container writes into.
+	@uploads path /uploads/*
+	handle @uploads {
+		root * /srv
+		file_server {
+			# Don't bother serving directory listings; the only
+			# legitimate request is for a specific file the SaaS
+			# wrote and references by exact URL.
+			hide .htaccess
+		}
+	}
+
+	# Forward everything else to the Next.js app container. Caddy talks
+	# to `app` by Docker service name; the app expects to see real
+	# client IPs / proto in X-Forwarded-* headers, which Caddy sets
+	# by default.
 	reverse_proxy app:3000
 
 	# Caps an inbound request body. The Kalodata XLSX importer is the

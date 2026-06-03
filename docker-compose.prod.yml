@@ -74,6 +74,11 @@ services:
       APP_DOMAIN: ${APP_DOMAIN}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # SAME host directory the app writes uploaded images into,
+      # mounted read-only so Caddy can serve /uploads/* directly
+      # (Next.js standalone won't serve runtime-added public/ files;
+      # see the @uploads block in Caddyfile for the why).
+      - ./uploads:/srv/uploads:ro
       - caddy_data:/data
       - caddy_config:/config
     depends_on:
