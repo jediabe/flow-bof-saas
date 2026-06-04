@@ -41,7 +41,7 @@ const LATEST_RUNNER_TAG_HINT = "the latest release";
 //     still want a "browse releases" landing page.
 const RELEASES_URL =
   process.env.NEXT_PUBLIC_RUNNER_RELEASES_URL ||
-  "https://github.com/anmekhel/flow-bof-automation/releases";
+  "https://github.com/jediabe/flow-bof-automation/releases";
 const WINDOWS_RELEASE_URL =
   process.env.NEXT_PUBLIC_RUNNER_WINDOWS_RELEASE_URL || RELEASES_URL;
 const MAC_RELEASE_URL =
@@ -204,8 +204,10 @@ function WindowsRunner({
       </ol>
 
       <p className="text-[11px] text-muted">
-        Future builds will be code-signed and auto-update; macOS{" "}
-        <code className="id-mono">.dmg</code> is on the roadmap.
+        Auto-update is built into the GUI — click{" "}
+        <strong>Check for updates</strong> any time to install a newer
+        version. Future builds will be code-signed so the SmartScreen
+        warning above goes away.
       </p>
     </div>
   );
@@ -325,7 +327,7 @@ function MacRunner({
           <p className="text-xs text-muted mt-1">
             {available
               ? "Drag into Applications, then double-click."
-              : "Build is in progress — Windows is the recommended path for alpha."}
+              : "Mac build is available — set NEXT_PUBLIC_RUNNER_MAC_RELEASE_URL in the SaaS env to enable this download button."}
           </p>
         </div>
         {available ? (
@@ -358,14 +360,13 @@ function MacRunner({
           </li>
           <li>
             Open the .dmg. Drag <strong>Flow BOF Runner</strong> into{" "}
-            <code className="id-mono">Applications</code> (or run it
-            from inside the mounted disk image).
+            <code className="id-mono">Applications</code>.
           </li>
           <li>
-            Double-click <strong>Run Flow BOF Runner.command</strong>{" "}
-            to start it in a Terminal window. Unsigned alpha builds
-            may require <strong>right-click → Open</strong> the first
-            time (Gatekeeper).
+            Open Applications, <strong>right-click → Open</strong> the
+            first time (Gatekeeper bypass — only needed once because
+            the alpha builds aren&apos;t code-signed yet). The GUI
+            window will open within a few seconds.
           </li>
           <li>
             When prompted, paste your SaaS URL and runner token:
