@@ -215,6 +215,10 @@ export default function BatchWorkbench({
               </a>{" "}
               when ready.
             </p>
+            <p className="text-[11px] text-muted mt-1.5">
+              <span className="text-ok">Auto-scans your current Flow favorites on each run</span>
+              {" "}— you don&apos;t need to click <em>Scan favorites</em> first.
+            </p>
           </div>
           <span className="text-[11px] text-muted">
             generate_flow_videos_from_favorites

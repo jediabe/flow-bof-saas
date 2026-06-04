@@ -160,6 +160,11 @@ export default async function BatchDetail({
         submitted?: number;
         skipped_already_submitted?: number;
         failed?: number;
+        // Generate Videos scans Flow's grid itself before animating
+        // — the runner returns the live count here so the page can
+        // show fresh "favorited" numbers without requiring a
+        // separate scan_favorited_images run.
+        favorited_images_found?: number;
       } | null)
     : null;
   const imageSummary = lastImageRun?.result
@@ -170,6 +175,26 @@ export default async function BatchDetail({
         items?: { item_id?: string; status?: string }[];
       } | null)
     : null;
+
+  // Live "favorited images" count for the metric card + workbench.
+  // The runner's generate_flow_videos_from_favorites job ALSO scans
+  // the Flow grid before animating, and returns favorited_images_found
+  // in its result envelope. Whichever job ran most recently has the
+  // freshest number — typically that's the video job right after the
+  // user favorites a new image. Falls back through (newer source →
+  // scan → video → null) so a user who has only ever clicked
+  // "Generate Videos" still sees a meaningful count.
+  const videoNewerThanScan =
+    !!lastVideoRun &&
+    (!lastScan || lastVideoRun.createdAt > lastScan.createdAt);
+  const favoritedImagesLive: number | null =
+    videoNewerThanScan
+      ? (videoSummary?.favorited_images_found ?? scanSummary?.favorited_images_count ?? null)
+      : (scanSummary?.favorited_images_count ?? videoSummary?.favorited_images_found ?? null);
+  const favoritedImagesAsOf: Date | null =
+    videoNewerThanScan
+      ? (lastVideoRun?.createdAt ?? lastScan?.createdAt ?? null)
+      : (lastScan?.createdAt ?? lastVideoRun?.createdAt ?? null);
 
   // Build a Map<productId → SubmittedStatus> from the latest image
   // job's items so the product cards can show their per-row status.
@@ -295,8 +320,8 @@ export default async function BatchDetail({
         />
         <MetricCard
           label="Favorited images"
-          value={scanSummary?.favorited_images_count ?? "—"}
-          tone={scanSummary?.favorited_images_count ? "ok" : "muted"}
+          value={favoritedImagesLive ?? "—"}
+          tone={favoritedImagesLive ? "ok" : "muted"}
         />
         <MetricCard
           label="Videos submitted"
@@ -407,10 +432,10 @@ export default async function BatchDetail({
           batchId={batch.id}
           agents={agents}
           scanSummary={{
-            favoritedImages: scanSummary?.favorited_images_count ?? null,
+            favoritedImages: favoritedImagesLive,
             tilesScanned: scanSummary?.tiles_scanned ?? null,
             lastScanJobId: lastScan?.id ?? null,
-            lastScanAt: lastScan?.createdAt?.toISOString() ?? null,
+            lastScanAt: favoritedImagesAsOf?.toISOString() ?? null,
           }}
           videoSummary={{
             submitted: videoSummary?.submitted ?? null,
