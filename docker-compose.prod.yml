@@ -22,6 +22,17 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # Build-time args. NEXT_PUBLIC_* env vars must be present when
+      # `next build` runs (they're inlined into the client bundle as
+      # string literals). env_file: alone only sets them at RUNTIME
+      # for the container, which is too late — by then `next build`
+      # has already produced the static JS with empty placeholders.
+      # The interpolation `${VAR}` reads from the .env file passed
+      # via `docker compose --env-file .env.production`.
+      args:
+        NEXT_PUBLIC_RUNNER_WINDOWS_RELEASE_URL: ${NEXT_PUBLIC_RUNNER_WINDOWS_RELEASE_URL:-}
+        NEXT_PUBLIC_RUNNER_MAC_RELEASE_URL: ${NEXT_PUBLIC_RUNNER_MAC_RELEASE_URL:-}
+        NEXT_PUBLIC_RUNNER_RELEASES_URL: ${NEXT_PUBLIC_RUNNER_RELEASES_URL:-}
     container_name: flow-bof-saas
     restart: unless-stopped
     env_file:

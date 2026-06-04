@@ -50,6 +50,24 @@ RUN cp prisma/schema.postgres.prisma prisma/schema.prisma
 # schema), but Prisma still complains if it's empty — supply a dummy.
 ENV DATABASE_URL="postgresql://placeholder:placeholder@localhost:5432/placeholder"
 ENV NEXT_TELEMETRY_DISABLED=1
+
+# NEXT_PUBLIC_* env vars must be in the environment when `next build`
+# runs so they get inlined into the client JS bundle as string
+# literals. Setting them via the container's env_file at runtime is
+# TOO LATE — by then the JS has already been built with empty
+# placeholders.
+#
+# docker-compose passes these as --build-arg, which lands here. The
+# defaults are empty so a local `docker build` (no compose) still
+# works; the runtime container behavior is unchanged when these are
+# blank.
+ARG NEXT_PUBLIC_RUNNER_WINDOWS_RELEASE_URL=""
+ARG NEXT_PUBLIC_RUNNER_MAC_RELEASE_URL=""
+ARG NEXT_PUBLIC_RUNNER_RELEASES_URL=""
+ENV NEXT_PUBLIC_RUNNER_WINDOWS_RELEASE_URL=$NEXT_PUBLIC_RUNNER_WINDOWS_RELEASE_URL
+ENV NEXT_PUBLIC_RUNNER_MAC_RELEASE_URL=$NEXT_PUBLIC_RUNNER_MAC_RELEASE_URL
+ENV NEXT_PUBLIC_RUNNER_RELEASES_URL=$NEXT_PUBLIC_RUNNER_RELEASES_URL
+
 RUN npx prisma generate
 RUN npm run build
 
