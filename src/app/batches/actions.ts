@@ -46,6 +46,23 @@ function nullable(v: FormDataEntryValue | null): string | null {
   return s ? s : null;
 }
 
+/**
+ * Trim the query string out of a URL for logging. Kalodata's image
+ * URLs are public CDN today, but the source feed may switch to signed
+ * URLs at any time; logging them verbatim into stdout makes those
+ * signatures fish-able from container logs / log aggregators forever.
+ * Preserve scheme/host/path so the log is still actionable; replace
+ * the query with a sentinel so the reader knows it existed.
+ */
+function redactUrlForLog(url: string): string {
+  try {
+    const u = new URL(url);
+    return `${u.protocol}//${u.host}${u.pathname}${u.search ? "?<redacted>" : ""}`;
+  } catch {
+    return "<invalid-url>";
+  }
+}
+
 export async function addProduct(formData: FormData): Promise<void> {
   const batchId = String(formData.get("batchId") || "");
   const productName = String(formData.get("productName") || "").trim();
@@ -244,7 +261,7 @@ export async function importKalodataXlsx(
     // leaking sensitive payloads — product id, name, and the source
     // URL are already in the user's own data.
     console.log(
-      `[kalodata] downloading image for product=${product.id} (${row.productName.slice(0, 60)}) src=${row.imgUrl}`,
+      `[kalodata] downloading image for product=${product.id} (${row.productName.slice(0, 60)}) src=${redactUrlForLog(row.imgUrl)}`,
     );
 
     try {

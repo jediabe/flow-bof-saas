@@ -28,10 +28,13 @@ interface VideoSummary {
 }
 
 /**
- * The "workbench" sections of a batch detail page — image gen, scan
- * favorites, generate videos. Each is its own labeled panel so the
- * user can see the pipeline as a sequence of stages, not a row of
- * unmoored buttons.
+ * The "workbench" sections of a batch detail page — scan favorites and
+ * generate videos. Image generation lives in `GenerateImagesPanel`
+ * because it builds the runner-compatible `items[]` payload (one entry
+ * per product with prompt + reference URL/path) that the
+ * `generate_flow_images` job type requires. A second image-gen button
+ * here would only be able to enqueue an empty `{ regenerate: true }`
+ * payload, which the runner rejects as `MISSING_ITEMS`.
  *
  * The actual job-submit path goes through createSampleJob (same as
  * before); the only thing this component owns is the surface.
@@ -131,30 +134,10 @@ export default function BatchWorkbench({
         </div>
       </section>
 
-      {/* Image generation -------------------------------------------- */}
-      <section className="panel p-5 space-y-3">
-        <div className="flex items-baseline justify-between gap-2">
-          <div>
-            <div className="section-title">Image generation</div>
-            <p className="text-xs text-muted mt-1">
-              Submit reference images for every pending product so Flow
-              renders fresh hero shots.
-            </p>
-          </div>
-          <span className="text-[11px] text-muted">
-            generate_flow_images
-          </span>
-        </div>
-        <button
-          className="btn btn-primary"
-          disabled={disabled}
-          onClick={() => submit("generate_flow_images", { regenerate: true })}
-        >
-          {pending && activeJob === "generate_flow_images"
-            ? "Submitting…"
-            : "Generate images in Flow"}
-        </button>
-      </section>
+      {/* Image generation lives in GenerateImagesPanel — it owns the
+          per-product items[] payload the runner expects. Don't add a
+          duplicate button here; an empty payload triggers MISSING_ITEMS
+          on the runner side. */}
 
       {/* Favorites ---------------------------------------------------- */}
       <section className="panel p-5 space-y-3">
