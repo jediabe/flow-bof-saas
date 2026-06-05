@@ -108,11 +108,24 @@ export default function LatestTaskResult({ job }: { job: LatestTaskJob }) {
   const parsedResult = parseJson(job.result);
   const parsedError =
     job.error && job.status === "failed"
-      ? (parseJson(job.error) as { code?: string; message?: string } | null)
+      ? (parseJson(job.error) as {
+          code?: string;
+          message?: string;
+          details?: Record<string, unknown> | null;
+        } | null)
       : null;
 
   const elapsed = ((job.updatedAt.getTime() - job.createdAt.getTime()) / 1000);
   const summary = summarize(job.jobType, parsedResult);
+
+  // Phase-7 rate-limit cooldown banner. Renders a prominent panel
+  // above the normal task-result row when the runner reports that
+  // Google Flow's risk engine flagged the session. End-user copy
+  // explains the cooldown + what stopped vs what's left, since the
+  // generic "failed" chip alone doesn't tell them they can recover
+  // by just waiting.
+  const isRateLimit =
+    parsedError?.code === "FLOW_RATE_LIMIT_OR_SUSPICIOUS_ACTIVITY";
 
   return (
     <Panel
@@ -127,6 +140,9 @@ export default function LatestTaskResult({ job }: { job: LatestTaskJob }) {
         </Link>
       }
     >
+      {isRateLimit && (
+        <RateLimitBanner details={parsedError?.details ?? null} />
+      )}
       <div className="flex flex-wrap items-center gap-2.5">
         <span className="text-base font-medium text-text">
           {friendlyJobType(job.jobType)}
@@ -144,12 +160,90 @@ export default function LatestTaskResult({ job }: { job: LatestTaskJob }) {
           </span>
         )}
       </div>
-      {parsedError?.message && (
+      {parsedError?.message && !isRateLimit && (
+        // Suppress the small text-bad row when the rate-limit banner
+        // is shown — the banner already carries the same info in a
+        // much more readable form.
         <div className="mt-2 text-xs text-bad">
           {parsedError.code ? `${parsedError.code}: ` : ""}
           {parsedError.message}
         </div>
       )}
     </Panel>
+  );
+}
+
+/**
+ * Prominent banner shown when the runner reports
+ * FLOW_RATE_LIMIT_OR_SUSPICIOUS_ACTIVITY — Google Flow's risk
+ * engine flagged the session and refused to keep generating. End
+ * users see this as a clear, actionable message instead of a
+ * generic "failed" chip.
+ */
+function RateLimitBanner({
+  details,
+}: {
+  details: Record<string, unknown> | null;
+}) {
+  // Pull the numeric details safely. Runner sets all of these on
+  // the failure envelope but coerce defensively in case the schema
+  // ever changes.
+  const num = (k: string): number | null =>
+    typeof details?.[k] === "number" ? (details![k] as number) : null;
+  const submitted = num("submitted");
+  const unsubmitted = num("unsubmitted");
+  const stoppedAfter = num("stopped_after_item");
+  const riskPhrase =
+    typeof details?.["risk_phrase"] === "string"
+      ? (details!["risk_phrase"] as string)
+      : null;
+
+  return (
+    <div className="mb-3 rounded-2xl border border-warn/40 bg-warn/[0.08] px-4 py-3">
+      <div className="flex items-baseline gap-2">
+        <span className="text-warn font-medium">⏸ Google Flow rate-limited this session</span>
+        {riskPhrase && (
+          <span className="text-[11px] text-muted">
+            (detected: <code className="id-mono">{riskPhrase}</code>)
+          </span>
+        )}
+      </div>
+      <p className="text-xs text-text/85 mt-1.5">
+        Flow&apos;s anti-abuse risk engine flagged the session and
+        started rejecting submits. The runner stopped to avoid
+        raising the risk score further.
+      </p>
+      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs">
+        {submitted !== null && (
+          <span>
+            <span className="text-ok font-medium">{submitted}</span>{" "}
+            <span className="text-muted">submitted before stop</span>
+          </span>
+        )}
+        {stoppedAfter !== null && (
+          <span>
+            <span className="text-warn font-medium">item {stoppedAfter}</span>{" "}
+            <span className="text-muted">was the last attempted</span>
+          </span>
+        )}
+        {unsubmitted !== null && unsubmitted > 0 && (
+          <span>
+            <span className="text-bad font-medium">{unsubmitted}</span>{" "}
+            <span className="text-muted">unsubmitted — retry after cooldown</span>
+          </span>
+        )}
+      </div>
+      <div className="mt-3 rounded-xl bg-bg/40 px-3 py-2 text-[11px] text-muted leading-relaxed">
+        <span className="text-text font-medium">What to do:</span>{" "}
+        wait 30-60 minutes before re-running this batch. To reduce
+        the chance of it happening again, try smaller batches
+        (10-15 products), longer between-product delays
+        (<code className="id-mono">IMAGE_BETWEEN_PRODUCTS_MS</code>{" "}
+        env on the runner), or spread runs across the day. The
+        runner now adds random jitter to inter-item delays
+        automatically — older builds were faster and tripped this
+        more often.
+      </div>
+    </div>
   );
 }
