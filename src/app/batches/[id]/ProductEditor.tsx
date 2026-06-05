@@ -14,6 +14,9 @@ import {
   restoreProduct,
   setProductReviewStatus,
 } from "../actions";
+import ProductImageStack, {
+  type ProductImageRow,
+} from "./ProductImageStack";
 
 export interface ProductRow {
   id: string;
@@ -42,6 +45,9 @@ export interface ProductRow {
    *  reaches the editor when the page explicitly fetches deleted
    *  rows (Phase-7 follow-up). */
   deletedAt: string | null;
+  /** Phase-3 multi-reference images. Up to 3 rows (primary / ref2 /
+   *  ref3). Empty list when the product has no images yet. */
+  images: ProductImageRow[];
 }
 
 export type ReviewStatus =
@@ -218,17 +224,22 @@ export default function ProductEditor({
         expanded ? "border-accent/50" : "border-border"
       }`}
     >
-      {/* Thumbnail + summary header ---------------------------------- */}
-      <button
-        type="button"
-        className="w-full text-left flex gap-3 p-3 group"
-        onClick={() => setExpanded((v) => !v)}
-      >
-        <Thumbnail
-          src={product.referenceImageUrl}
-          alt={product.productName}
+      {/* Image stack + summary header. NOT wrapped in a <button>
+          because the stack has its own interactive controls (remove /
+          promote / paste). Instead, the text area is the toggle and
+          the chevron button on the right is a secondary affordance. */}
+      <div className="flex gap-3 p-3 group">
+        <ProductImageStack
+          productId={product.id}
+          batchId={batchId}
+          images={product.images}
         />
-        <div className="flex-1 min-w-0">
+        <button
+          type="button"
+          className="flex-1 min-w-0 text-left"
+          onClick={() => setExpanded((v) => !v)}
+          aria-expanded={expanded}
+        >
           <div className="font-medium text-text truncate group-hover:text-accent transition-colors">
             {product.productName}
           </div>
@@ -269,11 +280,16 @@ export default function ProductEditor({
               <StatusChip label="AI error" variant="bad" />
             )}
           </div>
-        </div>
-        <span className="text-[11px] text-muted2 self-start mt-1 select-none">
+        </button>
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          className="text-[11px] text-muted2 self-start mt-1 select-none hover:text-text transition-colors"
+          aria-label={expanded ? "Collapse" : "Expand"}
+        >
           {expanded ? "▲" : "▼"}
-        </span>
-      </button>
+        </button>
+      </div>
 
       {/* Expanded editor --------------------------------------------- */}
       {expanded && (
@@ -330,11 +346,14 @@ export default function ProductEditor({
                 ))}
               </select>
             </Field>
-            <Field label="Reference image URL">
-              <div className="field opacity-80 text-[12px] break-all">
-                {product.referenceImageUrl || (
-                  <span className="text-muted">
-                    Imported from Kalodata or pasted manually
+            <Field label="Reference images">
+              <div className="text-[12px] text-muted leading-snug px-1 py-2">
+                Managed via the image stack on the left. Paste an image
+                directly onto this card (Ctrl-V), drop a file, or click
+                an empty slot to add up to 3 references.
+                {product.images.length > 0 && (
+                  <span className="text-text">
+                    {" "}{product.images.length} attached.
                   </span>
                 )}
               </div>
@@ -512,48 +531,6 @@ export default function ProductEditor({
               </button>
             )}
           </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function Thumbnail({
-  src,
-  alt,
-}: {
-  /**
-   * Public URL stored on Product.referenceImageUrl. Null when the
-   * Kalodata download failed (or the row was created manually
-   * without a reference); the placeholder branch renders in that
-   * case. We deliberately do NOT fall back to the original remote
-   * imageUrl — those URLs are CDN-protected and produce broken
-   * image icons when the browser tries to load them; the cleaner
-   * UX is "Image missing" + a chip the user can act on.
-   */
-  src: string | null;
-  alt: string;
-}) {
-  const [broken, setBroken] = useState(false);
-  const showImg = !!src && !broken;
-  return (
-    <div className="w-14 h-14 shrink-0 rounded-xl border border-border bg-bg overflow-hidden">
-      {showImg ? (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
-          src={src!}
-          alt={alt}
-          loading="lazy"
-          decoding="async"
-          className="w-full h-full object-cover"
-          onError={() => setBroken(true)}
-        />
-      ) : (
-        <div
-          className="w-full h-full flex items-center justify-center text-muted2 text-[10px] text-center px-1"
-          title={broken ? "Image failed to load" : "No reference image"}
-        >
-          {broken ? "load\nfailed" : "no\nimage"}
         </div>
       )}
     </div>

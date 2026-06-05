@@ -111,6 +111,12 @@ export default async function BatchDetail({
       products: {
         where: { deletedAt: null },
         orderBy: { createdAt: "asc" },
+        include: {
+          // Phase 3 — multi-reference images. Ordered by role
+          // alphabetically ("primary" < "ref2" < "ref3") so the
+          // client always sees them in the canonical order.
+          images: { orderBy: { role: "asc" } },
+        },
       },
       jobs: { orderBy: { createdAt: "desc" }, take: 12 },
     },
@@ -259,6 +265,22 @@ export default async function BatchDetail({
     // ReviewStatus values; ProductEditor casts to its union type.
     reviewStatus:            (p.reviewStatus as "needs_review" | "approved" | "rejected" | "maybe"),
     deletedAt:               p.deletedAt?.toISOString() ?? null,
+    // Phase-3 multi-reference images. Filter to the three valid
+    // roles to be defensive against any stray rows the DB might
+    // have (no path is expected to write them but it's free to
+    // guard here).
+    images: p.images
+      .filter(
+        (i): i is typeof i & {
+          role: "primary" | "ref2" | "ref3";
+        } => i.role === "primary" || i.role === "ref2" || i.role === "ref3",
+      )
+      .map((i) => ({
+        id: i.id,
+        role: i.role,
+        url: i.url,
+        source: i.source,
+      })),
   }));
 
   // "Ready" = has both a reference (URL or local override) AND a prompt.
