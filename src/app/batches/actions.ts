@@ -2,6 +2,8 @@
 
 import { Buffer } from "node:buffer";
 import { randomBytes } from "node:crypto";
+import { promises as fs } from "node:fs";
+import path from "node:path";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { db } from "@/lib/db";
@@ -18,7 +20,15 @@ import {
 import { callProvider } from "@/lib/ai/providers";
 import { encodeJson } from "@/lib/json-column";
 import type { AiOverwriteMode } from "@/lib/ai/types";
-import { upsertProductImage } from "@/lib/product-images";
+import {
+  upsertProductImage,
+  removeProductImage,
+  pickNextAvailableRole,
+  publicUrlToDiskPath,
+  tryDeleteFile,
+} from "@/lib/product-images";
+import { getBatchUploadDir, publicUploadUrlFor } from "@/lib/uploads";
+import { inferImageExt, looksLikeImage } from "@/lib/image-sniff";
 
 export async function createBatch(formData: FormData): Promise<void> {
   const name = String(formData.get("name") || "").trim();
@@ -172,6 +182,311 @@ export async function deleteProduct(formData: FormData): Promise<void> {
     data: { deletedAt: new Date() },
   });
   revalidatePath(`/batches/${batchId}`);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 — multi-reference image attach / remove / promote
+// ---------------------------------------------------------------------------
+//
+// These actions back the paste-anywhere / drag-drop / file-picker UX
+// on the product card. The blob arrives via FormData (a Server Action
+// can carry binary files in FormData natively in Next 15). We sniff
+// the bytes for an image-ish content type, save to the existing
+// per-batch upload tree, and write through the ProductImage helper
+// so the denormalised Product.referenceImageUrl cache stays in sync.
+
+/** Max bytes accepted for a single pasted/uploaded reference image.
+ *  20 MiB matches the Kalodata downloader's cap — comfortably above
+ *  any reasonable phone photo or full-res product shot. */
+const MAX_PRODUCT_IMAGE_BYTES = 20 * 1024 * 1024;
+
+/** Allowed roles. Mirrors REFERENCE_ROLES on the runner side; we
+ *  re-export the set here so this file doesn't have to import the
+ *  helper just for a runtime check. */
+const PRODUCT_IMAGE_ROLES = new Set(["primary", "ref2", "ref3"] as const);
+type ProductImageRole = "primary" | "ref2" | "ref3";
+
+const PRODUCT_IMAGE_SOURCES = new Set(["kalodata", "paste", "upload"] as const);
+type ProductImageSource = "kalodata" | "paste" | "upload";
+
+export interface AttachProductImageResult {
+  ok: boolean;
+  message: string;
+  /** When ok, the role the image was written to (caller may have
+   *  asked for "auto" and we picked the first available). */
+  role?: ProductImageRole;
+  /** When ok, the public /uploads/... URL the row now points at. */
+  url?: string;
+}
+
+/**
+ * Save a pasted/uploaded image blob to disk and write the
+ * ProductImage row. The client calls this from the paste-anywhere /
+ * drop-zone / file-picker handler on the product card.
+ *
+ * FormData fields:
+ *   - productId  (required)
+ *   - batchId    (required, for workspace scope check + revalidate)
+ *   - role       (optional: "primary" | "ref2" | "ref3" | "auto").
+ *                 "auto" picks the first empty role in REFERENCE_ROLES
+ *                 order; useful for the paste handler when the user
+ *                 hasn't aimed at a specific slot.
+ *   - source     (optional: "paste" | "upload" — defaults to "upload")
+ *   - image      (required: a File / Blob of the image bytes)
+ *
+ * Throws nothing — returns a structured result so the client can
+ * render an inline error without a try/catch.
+ */
+export async function attachProductImageFromBlob(
+  formData: FormData,
+): Promise<AttachProductImageResult> {
+  const productId = String(formData.get("productId") || "");
+  const batchId = String(formData.get("batchId") || "");
+  const roleRaw = String(formData.get("role") || "auto");
+  const sourceRaw = String(formData.get("source") || "upload");
+  const blob = formData.get("image");
+
+  if (!productId || !batchId) {
+    return { ok: false, message: "Missing productId or batchId" };
+  }
+  if (!(blob instanceof Blob) || blob.size === 0) {
+    return { ok: false, message: "No image attached" };
+  }
+  if (blob.size > MAX_PRODUCT_IMAGE_BYTES) {
+    return {
+      ok: false,
+      message: `Image too large (${blob.size} bytes, max ${MAX_PRODUCT_IMAGE_BYTES})`,
+    };
+  }
+
+  const source = PRODUCT_IMAGE_SOURCES.has(sourceRaw as ProductImageSource)
+    ? (sourceRaw as ProductImageSource)
+    : "upload";
+
+  // Workspace scope check via batch — re-resolves on every call so a
+  // stale client can't write images to another tenant's product.
+  const { workspace } = await getCurrentWorkspace();
+  const batch = await db.batch.findFirst({
+    where: { id: batchId, workspaceId: workspace.id },
+    select: { id: true },
+  });
+  if (!batch) return { ok: false, message: "Batch not found" };
+
+  const product = await db.product.findFirst({
+    where: { id: productId, batchId: batch.id },
+    select: { id: true },
+  });
+  if (!product) return { ok: false, message: "Product not found" };
+
+  // Resolve the role. "auto" → first available; otherwise validate.
+  let role: ProductImageRole;
+  if (roleRaw === "auto") {
+    const next = await pickNextAvailableRole(productId);
+    if (!next) {
+      return {
+        ok: false,
+        message: "All 3 reference image slots are full",
+      };
+    }
+    role = next;
+  } else if (PRODUCT_IMAGE_ROLES.has(roleRaw as ProductImageRole)) {
+    role = roleRaw as ProductImageRole;
+  } else {
+    return { ok: false, message: `Invalid role: ${roleRaw}` };
+  }
+
+  // Read + sniff. Reject non-image blobs at the boundary — a stray
+  // text or video paste should fail loudly, not save garbage.
+  const ab = await blob.arrayBuffer();
+  const buf = Buffer.from(ab);
+  const ct = blob.type || null;
+  if (!looksLikeImage(ct, buf)) {
+    return {
+      ok: false,
+      message: `Blob doesn't look like an image (content-type=${ct ?? "?"})`,
+    };
+  }
+  const ext = inferImageExt(ct, buf, null);
+
+  // Save to the existing per-batch upload directory. Filename is
+  // <productId>_<role>.<ext> — overwrites on re-attach with the same
+  // role, which is the right behaviour (rotate paste, etc.).
+  const dir = getBatchUploadDir(workspace.id, batch.id);
+  await fs.mkdir(dir, { recursive: true });
+  const fname = `${productId}_${role}.${ext}`;
+  const filePath = path.join(dir, fname);
+  try {
+    await fs.writeFile(filePath, buf);
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException;
+    if (e?.code === "EACCES" || e?.code === "EPERM") {
+      return {
+        ok: false,
+        message:
+          "Upload directory is not writable. Run scripts/fix-upload-perms.sh on the server.",
+      };
+    }
+    return { ok: false, message: e.message || "write failed" };
+  }
+  const relUrl = publicUploadUrlFor(
+    "workspaces",
+    workspace.id,
+    "batches",
+    batch.id,
+    fname,
+  );
+
+  await upsertProductImage({
+    productId,
+    role,
+    url: relUrl,
+    source,
+    bytes: buf.length,
+  });
+
+  revalidatePath(`/batches/${batchId}`);
+  return { ok: true, message: `Attached as ${role}`, role, url: relUrl };
+}
+
+/**
+ * Remove a ProductImage row by role, including its on-disk file.
+ * When the deleted row was the primary, removeProductImage() in
+ * lib/product-images.ts auto-promotes the next available role to
+ * primary and syncs the denormalised Product cache.
+ *
+ * Returns ok + the new primary role (or null if the product has no
+ * images left).
+ */
+export async function removeProductImageByRole(
+  formData: FormData,
+): Promise<{ ok: boolean; message: string; newPrimaryRole?: string | null }> {
+  const productId = String(formData.get("productId") || "");
+  const batchId = String(formData.get("batchId") || "");
+  const roleRaw = String(formData.get("role") || "");
+
+  if (!productId || !batchId) {
+    return { ok: false, message: "Missing productId or batchId" };
+  }
+  if (!PRODUCT_IMAGE_ROLES.has(roleRaw as ProductImageRole)) {
+    return { ok: false, message: `Invalid role: ${roleRaw}` };
+  }
+  const role = roleRaw as ProductImageRole;
+
+  const { workspace } = await getCurrentWorkspace();
+  const batch = await db.batch.findFirst({
+    where: { id: batchId, workspaceId: workspace.id },
+    select: { id: true },
+  });
+  if (!batch) return { ok: false, message: "Batch not found" };
+
+  // Get the row before we delete it so we can clean up the file.
+  const existing = await db.productImage.findUnique({
+    where: { productId_role: { productId, role } },
+    select: { url: true },
+  });
+  if (existing) {
+    await tryDeleteFile(publicUrlToDiskPath(existing.url));
+  }
+
+  const { newPrimaryRole } = await removeProductImage({
+    productId,
+    role,
+    promoteNext: true,
+  });
+
+  revalidatePath(`/batches/${batchId}`);
+  return { ok: true, message: `Removed ${role}`, newPrimaryRole };
+}
+
+/**
+ * Promote a non-primary image to primary; demote the current primary
+ * (if any) into the now-empty role. This is the "right-click → Make
+ * primary" UX on the image stack.
+ *
+ * No-op if `role` is already primary.
+ */
+export async function promoteProductImageRole(
+  formData: FormData,
+): Promise<{ ok: boolean; message: string }> {
+  const productId = String(formData.get("productId") || "");
+  const batchId = String(formData.get("batchId") || "");
+  const roleRaw = String(formData.get("role") || "");
+
+  if (!productId || !batchId) {
+    return { ok: false, message: "Missing productId or batchId" };
+  }
+  if (!PRODUCT_IMAGE_ROLES.has(roleRaw as ProductImageRole)) {
+    return { ok: false, message: `Invalid role: ${roleRaw}` };
+  }
+  const role = roleRaw as ProductImageRole;
+  if (role === "primary") {
+    return { ok: true, message: "Already primary" };
+  }
+
+  const { workspace } = await getCurrentWorkspace();
+  const batch = await db.batch.findFirst({
+    where: { id: batchId, workspaceId: workspace.id },
+    select: { id: true },
+  });
+  if (!batch) return { ok: false, message: "Batch not found" };
+
+  // Workspace scope: verify the product belongs to this batch before
+  // we shuffle its images.
+  const product = await db.product.findFirst({
+    where: { id: productId, batchId: batch.id },
+    select: { id: true },
+  });
+  if (!product) return { ok: false, message: "Product not found" };
+
+  // The unique constraint on (productId, role) means a straight swap
+  // would conflict with itself. We do it in three steps inside a
+  // transaction:
+  //   1. Park the row we're promoting at a temporary role.
+  //   2. Move the existing primary (if any) to the freed role.
+  //   3. Move the parked row to primary, then sync the Product cache.
+  const TEMP_ROLE = "__swap__";
+  const targetRole = role;
+  await db.$transaction(async (tx) => {
+    const promoting = await tx.productImage.findUnique({
+      where: { productId_role: { productId, role: targetRole } },
+    });
+    if (!promoting) {
+      throw new Error(`No image at role ${targetRole}`);
+    }
+    const currentPrimary = await tx.productImage.findUnique({
+      where: { productId_role: { productId, role: "primary" } },
+    });
+
+    // Step 1 — park the row we're promoting under a temp role.
+    await tx.productImage.update({
+      where: { id: promoting.id },
+      data: { role: TEMP_ROLE },
+    });
+
+    // Step 2 — move the existing primary into the freed slot.
+    if (currentPrimary) {
+      await tx.productImage.update({
+        where: { id: currentPrimary.id },
+        data: { role: targetRole },
+      });
+    }
+
+    // Step 3 — promote the parked row to primary, sync Product cache.
+    await tx.productImage.update({
+      where: { id: promoting.id },
+      data: { role: "primary" },
+    });
+    await tx.product.update({
+      where: { id: productId },
+      data: {
+        referenceImageUrl: promoting.url,
+        referenceImagePathLocal: promoting.pathLocal,
+      },
+    });
+  });
+
+  revalidatePath(`/batches/${batchId}`);
+  return { ok: true, message: `Promoted ${role} to primary` };
 }
 
 /** Reverse `deleteProduct`. Clears `deletedAt`. */
