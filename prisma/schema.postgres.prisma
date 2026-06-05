@@ -152,6 +152,17 @@ model Batch {
   workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   name        String
   status      String    @default("draft")
+  // Which TikTok Shop market this batch targets. Drives the prompt
+  // template (UK retail vs US retail), hook/caption/hashtag style,
+  // and posting-assist copy. Existing rows backfill to "uk".
+  market      String    @default("uk")
+  // Optional preset name. Per-batch tweaks like "uk-fashion-boutique"
+  // without inventing a new model.
+  promptPreset String?
+  // Long random URL-safe token for the phone product-review page
+  // (Phase 4 mobile QR). Anyone-with-URL auth.
+  reviewToken  String? @unique
+  postingToken String? @unique
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
@@ -184,7 +195,8 @@ model Product {
   // generateAiPrompts; manual / deterministic fallback leaves them null.
   hook               String?
   caption            String?
-  // JSON-encoded string[] (SQLite has no array type). Read with
+  // JSON-encoded string[] (SQLite has no array type, kept JSON for
+  // schema parity across both engines). Read with
   // parseJson<string[]>(p.hashtags) on the consumer side.
   hashtags           String?
   // Per-product error from the last AI prompt-gen attempt. Cleared on
@@ -192,10 +204,28 @@ model Product {
   // product blew up without having to open every job.
   aiPromptError      String?
   aiPromptGeneratedAt DateTime?
+  // Long-form product blurb shown on the posting-assist QR page.
+  productDescription String?
+  // Mobile-review workflow status. Defaults to "needs_review" for
+  // every newly imported row so the user explicitly approves before
+  // burning generations on it. Values:
+  //   needs_review | approved | rejected | maybe
+  // Image / video generation queries filter to reviewStatus="approved"
+  // by default; GenerateImagesPanel exposes an override.
+  reviewStatus       String   @default("needs_review")
+  // Soft delete. Non-null means hidden from default queries. Never
+  // hard-delete a Product row so that linked Job/JobEvent rows and
+  // the audit trail stay intact.
+  deletedAt          DateTime?
+  // Optional per-product override of the batch's market / preset.
+  market             String?
+  promptPreset       String?
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 
   @@index([batchId])
+  @@index([reviewStatus])
+  @@index([deletedAt])
 }
 
 // ---------------------------------------------------------------------------

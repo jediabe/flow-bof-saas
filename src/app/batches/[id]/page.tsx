@@ -14,7 +14,7 @@ import {
   toMaskedSettings,
 } from "@/lib/workspace-settings";
 import { DEFAULT_MODELS } from "@/lib/ai/types";
-import { addProduct, deleteBatch } from "../actions";
+import { addProduct, deleteBatch, setBatchMarket } from "../actions";
 import BatchWorkbench from "./BatchWorkbench";
 import GenerateImagesPanel from "./GenerateImagesPanel";
 import KalodataImportPanel from "./KalodataImportPanel";
@@ -80,7 +80,15 @@ export default async function BatchDetail({
   const batch = await db.batch.findFirst({
     where: { id, workspaceId: workspace.id },
     include: {
-      products: { orderBy: { createdAt: "asc" } },
+      // Hide soft-deleted products from every default view. The
+      // batch detail page, generation eligibility, and product
+      // counts all consume this list, so filtering here is the
+      // single chokepoint. A future "Show deleted (N)" toggle
+      // could broaden the where clause — Phase 7 follow-up.
+      products: {
+        where: { deletedAt: null },
+        orderBy: { createdAt: "asc" },
+      },
       jobs: { orderBy: { createdAt: "desc" }, take: 12 },
     },
   });
@@ -224,6 +232,10 @@ export default async function BatchDetail({
     aiPromptError:           p.aiPromptError,
     aiPromptGeneratedAt:     p.aiPromptGeneratedAt?.toISOString() ?? null,
     submittedStatus:         submittedStatusByProduct.get(p.id) ?? null,
+    // Phase-1 review workflow. The string is one of the four
+    // ReviewStatus values; ProductEditor casts to its union type.
+    reviewStatus:            (p.reviewStatus as "needs_review" | "approved" | "rejected" | "maybe"),
+    deletedAt:               p.deletedAt?.toISOString() ?? null,
   }));
 
   // "Ready" = has both a reference (URL or local override) AND a prompt.
@@ -280,11 +292,39 @@ export default async function BatchDetail({
           </Link>
           <h1 className="h-page mt-1">{batch.name}</h1>
           <div className="flex flex-wrap items-center gap-2 mt-2">
+            <StatusChip
+              label={batch.market === "us" ? "US TikTok Shop" : "UK TikTok Shop"}
+              variant={batch.market === "us" ? "accent" : "ok"}
+            />
             <StatusChip label={batch.status} variant="muted" />
             <span className="text-xs text-muted">
               {batch.products.length} products · created{" "}
               {new Date(batch.createdAt).toLocaleDateString()}
             </span>
+            {/* Phase-1 market switcher. Lives inline next to the
+                batch metadata so it's available without scrolling.
+                Submits via the server action; page revalidates after. */}
+            <form
+              action={setBatchMarket}
+              className="inline-flex items-center gap-1.5"
+            >
+              <input type="hidden" name="batchId" value={batch.id} />
+              <span className="text-[11px] text-muted">switch:</span>
+              <select
+                name="market"
+                defaultValue={batch.market}
+                className="field-inline text-xs px-2 py-0.5"
+              >
+                <option value="uk">UK</option>
+                <option value="us">US</option>
+              </select>
+              <button
+                type="submit"
+                className="text-[11px] text-accent hover:underline"
+              >
+                Apply
+              </button>
+            </form>
           </div>
         </div>
         <form action={deleteBatch}>
@@ -404,12 +444,17 @@ export default async function BatchDetail({
             name:   a.name,
             status: a.status,
           }))}
-          products={productRows.map((p) => ({
+          products={batch.products.map((p) => ({
             id:                      p.id,
             productName:             p.productName,
             referenceImageUrl:       p.referenceImageUrl,
             referenceImagePathLocal: p.referenceImagePathLocal,
             imagePrompt:             p.imagePrompt,
+            // Phase 1: eligibility filter now defaults to
+            // reviewStatus=="approved". Carry the field through so
+            // the panel can apply the filter (and show an override
+            // checkbox for "include not-approved").
+            reviewStatus:            p.reviewStatus,
           }))}
           agentAssetBaseUrl={agentAssetBaseUrl}
           lastJob={

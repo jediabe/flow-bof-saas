@@ -21,9 +21,16 @@ import type { AiOverwriteMode } from "@/lib/ai/types";
 export async function createBatch(formData: FormData): Promise<void> {
   const name = String(formData.get("name") || "").trim();
   if (!name) return;
+  // Market is optional on the form for backward compat with any
+  // older client that doesn't surface the selector — defaults to
+  // "uk" (the workflow we shipped first). Anything not in MARKETS
+  // also collapses to "uk" rather than erroring, so a stale client
+  // can't break batch creation.
+  const marketRaw = String(formData.get("market") || "").trim().toLowerCase();
+  const market = MARKETS.has(marketRaw as "uk" | "us") ? marketRaw : "uk";
   const { workspace } = await getCurrentWorkspace();
   const batch = await db.batch.create({
-    data: { workspaceId: workspace.id, name },
+    data: { workspaceId: workspace.id, name, market },
   });
   revalidatePath("/batches");
   revalidatePath("/dashboard");
@@ -141,6 +148,13 @@ export async function updateProduct(formData: FormData): Promise<void> {
   revalidatePath(`/batches/${batchId}`);
 }
 
+/**
+ * Soft-delete a product. Sets `deletedAt = now` so the row stays in
+ * the DB (preserves linked Job / JobEvent audit trail) but disappears
+ * from default queries and from generation eligibility.
+ *
+ * Use `restoreProduct` to undo.
+ */
 export async function deleteProduct(formData: FormData): Promise<void> {
   const id = String(formData.get("id") || "");
   const batchId = String(formData.get("batchId") || "");
@@ -151,8 +165,120 @@ export async function deleteProduct(formData: FormData): Promise<void> {
     select: { id: true },
   });
   if (!batch) return;
-  await db.product.deleteMany({ where: { id, batchId: batch.id } });
+  await db.product.updateMany({
+    where: { id, batchId: batch.id },
+    data: { deletedAt: new Date() },
+  });
   revalidatePath(`/batches/${batchId}`);
+}
+
+/** Reverse `deleteProduct`. Clears `deletedAt`. */
+export async function restoreProduct(formData: FormData): Promise<void> {
+  const id = String(formData.get("id") || "");
+  const batchId = String(formData.get("batchId") || "");
+  if (!id || !batchId) return;
+  const { workspace } = await getCurrentWorkspace();
+  const batch = await db.batch.findFirst({
+    where: { id: batchId, workspaceId: workspace.id },
+    select: { id: true },
+  });
+  if (!batch) return;
+  await db.product.updateMany({
+    where: { id, batchId: batch.id },
+    data: { deletedAt: null },
+  });
+  revalidatePath(`/batches/${batchId}`);
+}
+
+const REVIEW_STATUSES = new Set([
+  "needs_review",
+  "approved",
+  "rejected",
+  "maybe",
+] as const);
+type ReviewStatus = "needs_review" | "approved" | "rejected" | "maybe";
+
+/**
+ * Set the review status on a single product. Used by the Approve /
+ * Reject / Maybe / Reset buttons on the batch page and on the
+ * Phase-4 mobile review page.
+ *
+ * Workspace-scoped: re-resolves the batch on every call so a stale
+ * client can't flip status on a row in another tenant.
+ */
+export async function setProductReviewStatus(formData: FormData): Promise<void> {
+  const id = String(formData.get("id") || "");
+  const batchId = String(formData.get("batchId") || "");
+  const status = String(formData.get("status") || "");
+  if (!id || !batchId) return;
+  if (!REVIEW_STATUSES.has(status as ReviewStatus)) return;
+
+  const { workspace } = await getCurrentWorkspace();
+  const batch = await db.batch.findFirst({
+    where: { id: batchId, workspaceId: workspace.id },
+    select: { id: true },
+  });
+  if (!batch) return;
+  await db.product.updateMany({
+    where: { id, batchId: batch.id },
+    data: { reviewStatus: status },
+  });
+  revalidatePath(`/batches/${batchId}`);
+}
+
+/**
+ * Bulk-set review status on multiple products. `productIds` arrives
+ * as a single comma-separated string on the form so the action can
+ * be called from a plain `<form>` without JS.
+ */
+export async function bulkSetReviewStatus(formData: FormData): Promise<void> {
+  const batchId = String(formData.get("batchId") || "");
+  const status = String(formData.get("status") || "");
+  const productIdsRaw = String(formData.get("productIds") || "");
+  if (!batchId || !productIdsRaw) return;
+  if (!REVIEW_STATUSES.has(status as ReviewStatus)) return;
+
+  const productIds = productIdsRaw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (productIds.length === 0) return;
+
+  const { workspace } = await getCurrentWorkspace();
+  const batch = await db.batch.findFirst({
+    where: { id: batchId, workspaceId: workspace.id },
+    select: { id: true },
+  });
+  if (!batch) return;
+  await db.product.updateMany({
+    where: { id: { in: productIds }, batchId: batch.id },
+    data: { reviewStatus: status },
+  });
+  revalidatePath(`/batches/${batchId}`);
+}
+
+const MARKETS = new Set(["uk", "us"] as const);
+
+/**
+ * Change the batch's market (UK vs US). Drives which prompt template
+ * the AI generator uses (Phase 2) and which copy the posting-assist
+ * page shows (Phase 5). Per-product overrides win when set.
+ */
+export async function setBatchMarket(formData: FormData): Promise<void> {
+  const batchId = String(formData.get("batchId") || "");
+  const market = String(formData.get("market") || "");
+  if (!batchId || !MARKETS.has(market as "uk" | "us")) return;
+
+  const { workspace } = await getCurrentWorkspace();
+  const updated = await db.batch.updateMany({
+    where: { id: batchId, workspaceId: workspace.id },
+    data: { market },
+  });
+  if (updated.count > 0) {
+    revalidatePath(`/batches/${batchId}`);
+    revalidatePath("/batches");
+    revalidatePath("/dashboard");
+  }
 }
 
 // ---------------------------------------------------------------------

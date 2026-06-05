@@ -20,6 +20,14 @@ export interface ImageGenProduct {
   /** Local override path (debug/fallback only). */
   referenceImagePathLocal: string | null;
   imagePrompt: string | null;
+  /**
+   * Phase 1 mobile-review status. Default eligibility now filters
+   * to "approved" only; the panel exposes a checkbox to override
+   * for the "I want to generate before doing the phone review"
+   * workflow. Values: "needs_review" | "approved" | "rejected"
+   * | "maybe".
+   */
+  reviewStatus: string;
 }
 
 export interface LastImageJobSummary {
@@ -68,19 +76,41 @@ export default function GenerateImagesPanel({
   const [automationMode, setAutomationMode] = useState<AutomationMode>("balanced");
   const [limit, setLimit] = useState<number>(30);
   const [lastError, setLastError] = useState<string | null>(null);
+  // Phase 1: default to approved-only generation. Checkbox below
+  // lets the user bypass when they want to test prompts before
+  // doing the phone-review pass.
+  const [includeNotApproved, setIncludeNotApproved] = useState(false);
 
-  // Eligible = a prompt + at least one reference source (URL or
-  // local-override path). The runner can resolve either; we ship
-  // both when both are set and let the runner prefer the URL.
+  // Phase-1 eligibility:
+  //   - has an imagePrompt
+  //   - has a reference source (URL or local-override path)
+  //   - reviewStatus is "approved", OR the override is on
+  const hasUsableRefAndPrompt = (p: ImageGenProduct) =>
+    !!p.imagePrompt &&
+    (!!p.referenceImageUrl || !!p.referenceImagePathLocal);
+
   const eligible = useMemo(
     () =>
       products.filter(
         (p) =>
-          !!p.imagePrompt &&
-          (!!p.referenceImageUrl || !!p.referenceImagePathLocal),
+          hasUsableRefAndPrompt(p) &&
+          (includeNotApproved || p.reviewStatus === "approved"),
       ),
-    [products],
+    [products, includeNotApproved],
   );
+
+  // Counts shown next to the eligibility chip so the user sees
+  // *why* the eligible count is what it is.
+  const approvedCount = products.filter(
+    (p) => p.reviewStatus === "approved",
+  ).length;
+  const needsReviewCount = products.filter(
+    (p) => p.reviewStatus === "needs_review",
+  ).length;
+  const heldByReviewCount = products.filter(
+    (p) =>
+      hasUsableRefAndPrompt(p) && p.reviewStatus !== "approved",
+  ).length;
 
   const missingPrompt = products.filter((p) => !p.imagePrompt).length;
   const missingRef = products.filter(
@@ -166,6 +196,16 @@ export default function GenerateImagesPanel({
           label={`${eligible.length} ready`}
           variant={eligible.length > 0 ? "ok" : "muted"}
         />
+        <StatusChip
+          label={`${approvedCount} approved`}
+          variant={approvedCount > 0 ? "ok" : "muted"}
+        />
+        {needsReviewCount > 0 && (
+          <StatusChip
+            label={`${needsReviewCount} need review`}
+            variant="warn"
+          />
+        )}
         {missingPrompt > 0 && (
           <StatusChip label={`${missingPrompt} missing prompt`} variant="warn" />
         )}
@@ -184,6 +224,26 @@ export default function GenerateImagesPanel({
           </Link>
         )}
       </div>
+
+      {/* Approved-only override -------------------------------------- */}
+      <label className="flex items-start gap-2 text-xs text-text cursor-pointer">
+        <input
+          type="checkbox"
+          className="mt-0.5"
+          checked={includeNotApproved}
+          onChange={(e) => setIncludeNotApproved(e.target.checked)}
+        />
+        <span>
+          <span className="font-medium">
+            Include products that have not been approved yet
+          </span>
+          <span className="block text-muted mt-0.5">
+            {includeNotApproved
+              ? `Off-default: also queuing ${heldByReviewCount} non-approved product(s) that have a prompt + reference.`
+              : `Default: only approved products generate. ${heldByReviewCount} eligible product(s) are currently held by the review gate.`}
+          </span>
+        </span>
+      </label>
 
       {/* Controls --------------------------------------------------- */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-3">

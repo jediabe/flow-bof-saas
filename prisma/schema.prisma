@@ -29,15 +29,15 @@ datasource db {
 // ---------------------------------------------------------------------------
 
 model User {
-  id        String   @id @default(cuid())
-  email     String   @unique
-  name      String?
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String?
   // bcrypt hash. Nullable so existing dev seed rows (created before
   // signup landed) still load; new rows always populate it via the
   // signup flow.
   passwordHash String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
   workspaces Workspace[] @relation("WorkspaceOwner")
 }
@@ -69,26 +69,26 @@ model Workspace {
 // ---------------------------------------------------------------------------
 
 model WorkspaceSettings {
-  id          String   @id @default(cuid())
-  workspaceId String   @unique
+  id          String    @id @default(cuid())
+  workspaceId String    @unique
   workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
   // One of: "manual" | "openai" | "anthropic" | "openrouter".
-  aiProvider  String   @default("manual")
+  aiProvider String @default("manual")
 
-  openaiApiKey        String?
-  openaiModel         String?
+  openaiApiKey String?
+  openaiModel  String?
 
-  anthropicApiKey     String?
-  anthropicModel      String?
+  anthropicApiKey String?
+  anthropicModel  String?
 
-  openrouterApiKey    String?
-  openrouterModel     String?
-  openrouterSiteUrl   String?
-  openrouterAppName   String?
+  openrouterApiKey  String?
+  openrouterModel   String?
+  openrouterSiteUrl String?
+  openrouterAppName String?
 
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 // ---------------------------------------------------------------------------
@@ -100,11 +100,11 @@ model WorkspaceSettings {
 // TypeScript layer in src/lib/agent-client.ts + the page renderers
 // know the valid set.)
 model Agent {
-  id          String   @id @default(cuid())
+  id          String    @id @default(cuid())
   workspaceId String
   workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   name        String
-  status      String   @default("unknown")
+  status      String    @default("unknown")
   baseUrl     String
   lastSeenAt  DateTime?
 
@@ -123,8 +123,8 @@ model Agent {
   // event, complete, fail. Used to detect "runner is online right now".
   lastPollAt       DateTime?
 
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   jobs Job[]
 
@@ -136,13 +136,28 @@ model Agent {
 // ---------------------------------------------------------------------------
 
 model Batch {
-  id          String    @id @default(cuid())
-  workspaceId String
-  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  name        String
-  status      String    @default("draft")
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
+  id           String    @id @default(cuid())
+  workspaceId  String
+  workspace    Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  name         String
+  status       String    @default("draft")
+  // Which TikTok Shop market this batch targets. Drives the prompt
+  // template (UK retail vs US retail), hook/caption/hashtag style,
+  // and posting-assist copy. Existing rows backfill to "uk" — the
+  // workflow we shipped first.
+  market       String    @default("uk")
+  // Optional preset name. Leaves room for per-batch tweaks like
+  // "uk-fashion-boutique" without inventing a new model.
+  promptPreset String?
+  // Long random URL-safe token for the phone product-review page
+  // (Phase 4 mobile QR). Anyone-with-URL auth — token is generated
+  // lazily the first time the user requests the QR, rotates on
+  // demand. Null until then.
+  reviewToken  String?   @unique
+  // Same idea for the phone posting-assist page (Phase 5).
+  postingToken String?   @unique
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
 
   products Product[]
   jobs     Job[]
@@ -151,40 +166,65 @@ model Batch {
 }
 
 model Product {
-  id                 String   @id @default(cuid())
-  batchId            String
-  batch              Batch    @relation(fields: [batchId], references: [id], onDelete: Cascade)
-  productName        String
-  originalTitle      String?
-  tiktokUrl          String?
-  category           String?
-  retailerName       String?
-  imageUrl           String?
+  id                      String    @id @default(cuid())
+  batchId                 String
+  batch                   Batch     @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  productName             String
+  originalTitle           String?
+  tiktokUrl               String?
+  category                String?
+  retailerName            String?
+  imageUrl                String?
   // Cloud-hosted reference image URL. Reserved for future signed-URL
   // download support; the local runner can't fetch these yet.
-  referenceImageUrl  String?
+  referenceImageUrl       String?
   // Local filesystem path the runner uses to read the reference image
   // (e.g. "inputs/reference_images/01_primary.jpg"). Must resolve on
   // the runner machine. Phase-3-cloud will replace this with signed
   // URL downloads on the runner side.
   referenceImagePathLocal String?
-  imagePrompt        String?
+  imagePrompt             String?
   // AI-generated supporting copy. Optional — populated by
   // generateAiPrompts; manual / deterministic fallback leaves them null.
-  hook               String?
-  caption            String?
+  hook                    String?
+  caption                 String?
   // JSON-encoded string[] (SQLite has no array type). Read with
   // parseJson<string[]>(p.hashtags) on the consumer side.
-  hashtags           String?
+  hashtags                String?
   // Per-product error from the last AI prompt-gen attempt. Cleared on
   // the next successful generation. Kept so the user sees *which*
   // product blew up without having to open every job.
-  aiPromptError      String?
-  aiPromptGeneratedAt DateTime?
-  createdAt          DateTime @default(now())
-  updatedAt          DateTime @updatedAt
+  aiPromptError           String?
+  aiPromptGeneratedAt     DateTime?
+  // Long-form product blurb the posting-assist QR page (Phase 5)
+  // shows next to hook/caption/hashtags. Optional; populated by the
+  // AI prompt generator when available.
+  productDescription      String?
+  // Mobile-review workflow status. Defaults to "needs_review" for
+  // every newly imported row so the user explicitly approves before
+  // burning generations on it. Transition values:
+  //   needs_review → approved | rejected | maybe
+  //   approved     → rejected | maybe       (still allowed to flip)
+  // Image / video generation queries filter to reviewStatus="approved"
+  // by default; the GenerateImagesPanel exposes an "include
+  // not-approved" override.
+  reviewStatus            String    @default("needs_review")
+  // Soft delete. Non-null means hidden from default queries. We
+  // never hard-delete a Product row so that linked Job/JobEvent
+  // rows + the audit trail stay intact.
+  deletedAt               DateTime?
+  // Optional per-product overrides of the batch's market/preset —
+  // lets a user import a primarily-UK batch with one US-only test
+  // product without splitting the batch. Falls back to the batch's
+  // value when null.
+  market                  String?
+  promptPreset            String?
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
 
   @@index([batchId])
+  @@index([reviewStatus])
+  @@index([deletedAt])
 }
 
 // ---------------------------------------------------------------------------
@@ -199,20 +239,20 @@ model Product {
 // JSON.parse on read. Moving to Postgres later: switch these to
 // `Json` and drop the stringify/parse glue.
 model Job {
-  id          String   @id @default(cuid())
+  id          String    @id @default(cuid())
   workspaceId String
   workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   batchId     String?
-  batch       Batch?   @relation(fields: [batchId], references: [id], onDelete: SetNull)
+  batch       Batch?    @relation(fields: [batchId], references: [id], onDelete: SetNull)
   agentId     String?
-  agent       Agent?   @relation(fields: [agentId], references: [id], onDelete: SetNull)
+  agent       Agent?    @relation(fields: [agentId], references: [id], onDelete: SetNull)
   jobType     String
-  status      String   @default("queued")
+  status      String    @default("queued")
   payload     String
   result      String?
   error       String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
 
   events JobEvent[]
 
@@ -226,7 +266,7 @@ model JobEvent {
   id        String   @id @default(cuid())
   jobId     String
   job       Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
-  eventType String   // "progress" / "result" / "error"
+  eventType String // "progress" / "result" / "error"
   stage     String?
   message   String?
   current   Int?

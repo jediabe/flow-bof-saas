@@ -37,6 +37,22 @@ export default async function BatchesPage() {
               required
             />
           </div>
+          <div className="min-w-[12rem]">
+            {/* Phase-1 TikTok Shop market selector. Drives the
+                prompt template (UK retail vs US retail) and the
+                posting-assist copy on later pages. Defaults to UK.
+                Editable per-batch later via the batch detail page. */}
+            <label className="label" htmlFor="market">Market</label>
+            <select
+              className="field"
+              id="market"
+              name="market"
+              defaultValue="uk"
+            >
+              <option value="uk">UK TikTok Shop</option>
+              <option value="us">US TikTok Shop</option>
+            </select>
+          </div>
           <button className="btn btn-primary" type="submit">
             Create
           </button>
@@ -61,7 +77,13 @@ export default async function BatchesPage() {
                 <div className="font-medium text-text group-hover:text-accent transition-colors">
                   {b.name}
                 </div>
-                <StatusChip label={b.status} variant="muted" />
+                <div className="flex items-baseline gap-1.5">
+                  <StatusChip
+                    label={b.market === "us" ? "US" : "UK"}
+                    variant={b.market === "us" ? "accent" : "ok"}
+                  />
+                  <StatusChip label={b.status} variant="muted" />
+                </div>
               </div>
               <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted">
                 <span>{b._count.products} products</span>

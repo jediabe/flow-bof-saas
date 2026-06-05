@@ -8,7 +8,12 @@ import {
   buildUkStorePrompt,
   findRetailer,
 } from "@/lib/uk-retailers";
-import { updateProduct, deleteProduct } from "../actions";
+import {
+  updateProduct,
+  deleteProduct,
+  restoreProduct,
+  setProductReviewStatus,
+} from "../actions";
 
 export interface ProductRow {
   id: string;
@@ -27,7 +32,40 @@ export interface ProductRow {
   aiPromptError: string | null;
   aiPromptGeneratedAt: string | null;
   submittedStatus: SubmittedStatus | null;
+  /** Phase-1 review-status workflow. Drives the badge on the product
+   *  card and the eligibility filter in GenerateImagesPanel.
+   *  Values: "needs_review" | "approved" | "rejected" | "maybe". */
+  reviewStatus: ReviewStatus;
+  /** ISO timestamp when the product was soft-deleted, or null when
+   *  active. Soft-deleted products are filtered out of the default
+   *  product list (see batches/[id]/page.tsx) — this field only
+   *  reaches the editor when the page explicitly fetches deleted
+   *  rows (Phase-7 follow-up). */
+  deletedAt: string | null;
 }
+
+export type ReviewStatus =
+  | "needs_review"
+  | "approved"
+  | "rejected"
+  | "maybe";
+
+const REVIEW_STATUS_VARIANT: Record<
+  ReviewStatus,
+  "ok" | "warn" | "bad" | "muted"
+> = {
+  needs_review: "warn",
+  approved:     "ok",
+  rejected:     "bad",
+  maybe:        "muted",
+};
+
+const REVIEW_STATUS_LABEL: Record<ReviewStatus, string> = {
+  needs_review: "needs review",
+  approved:     "approved",
+  rejected:     "rejected",
+  maybe:        "maybe",
+};
 
 /** Per-product status derived from the latest generate_flow_images job. */
 export type SubmittedStatus =
@@ -121,6 +159,25 @@ export default function ProductEditor({
     });
   }
 
+  function restore() {
+    const fd = new FormData();
+    fd.set("id", product.id);
+    fd.set("batchId", batchId);
+    startTransition(async () => {
+      await restoreProduct(fd);
+    });
+  }
+
+  function setStatus(status: ReviewStatus) {
+    const fd = new FormData();
+    fd.set("id", product.id);
+    fd.set("batchId", batchId);
+    fd.set("status", status);
+    startTransition(async () => {
+      await setProductReviewStatus(fd);
+    });
+  }
+
   return (
     <div
       className={`rounded-2xl border bg-panel2 overflow-hidden transition-colors ${
@@ -147,6 +204,10 @@ export default function ProductEditor({
             </div>
           )}
           <div className="mt-2 flex flex-wrap gap-1.5">
+            <StatusChip
+              label={REVIEW_STATUS_LABEL[product.reviewStatus]}
+              variant={REVIEW_STATUS_VARIANT[product.reviewStatus]}
+            />
             {product.submittedStatus &&
               product.submittedStatus !== "unknown" && (
                 <StatusChip
@@ -339,6 +400,45 @@ export default function ProductEditor({
             </div>
           </details>
 
+          {/* Review-status row — quick triage without opening every
+              product. Active status renders highlighted; the rest
+              click to transition. The Reset link returns the row to
+              "needs_review" so it shows up again in the next pass. */}
+          <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-border/40">
+            <span className="text-[11px] text-muted mr-1">Review:</span>
+            <ReviewBtn
+              label="Approve"
+              variant="ok"
+              active={product.reviewStatus === "approved"}
+              disabled={pending}
+              onClick={() => setStatus("approved")}
+            />
+            <ReviewBtn
+              label="Maybe"
+              variant="muted"
+              active={product.reviewStatus === "maybe"}
+              disabled={pending}
+              onClick={() => setStatus("maybe")}
+            />
+            <ReviewBtn
+              label="Reject"
+              variant="bad"
+              active={product.reviewStatus === "rejected"}
+              disabled={pending}
+              onClick={() => setStatus("rejected")}
+            />
+            {product.reviewStatus !== "needs_review" && (
+              <button
+                type="button"
+                className="text-[11px] text-muted hover:text-text underline-offset-2 hover:underline"
+                onClick={() => setStatus("needs_review")}
+                disabled={pending}
+              >
+                Reset to needs_review
+              </button>
+            )}
+          </div>
+
           <div className="flex items-center gap-2">
             <button
               type="button"
@@ -356,14 +456,27 @@ export default function ProductEditor({
             >
               Cancel
             </button>
-            <button
-              type="button"
-              className="btn btn-danger ml-auto"
-              onClick={remove}
-              disabled={pending}
-            >
-              Delete
-            </button>
+            {product.deletedAt ? (
+              <button
+                type="button"
+                className="btn btn-ghost ml-auto"
+                onClick={restore}
+                disabled={pending}
+                title="Undo the soft-delete; product becomes visible again."
+              >
+                Restore
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="btn btn-danger ml-auto"
+                onClick={remove}
+                disabled={pending}
+                title="Soft-delete — hides the product from default views and from generation eligibility. Reversible from the Phase-7 deleted-products view."
+              >
+                Delete
+              </button>
+            )}
           </div>
         </div>
       )}
@@ -430,5 +543,49 @@ function Field({
       </div>
       <div className="mt-1">{children}</div>
     </label>
+  );
+}
+
+/**
+ * Compact review-status button. Renders pill-shaped, highlights when
+ * the underlying product is already in that status (so clicking it
+ * again is a no-op — visual feedback only). Hand-rolled instead of
+ * using the existing btn-* classes because the row has three of
+ * these next to each other and the standard sizing is too chunky.
+ */
+function ReviewBtn({
+  label,
+  variant,
+  active,
+  disabled,
+  onClick,
+}: {
+  label: string;
+  variant: "ok" | "warn" | "bad" | "muted";
+  active: boolean;
+  disabled: boolean;
+  onClick: () => void;
+}) {
+  // Map our 4 variant tokens to concrete tailwind colours. Matching
+  // the existing StatusChip variants keeps the palette consistent.
+  const palette: Record<typeof variant, { bg: string; text: string; border: string }> = {
+    ok:    { bg: "bg-ok/15",    text: "text-ok",    border: "border-ok/40" },
+    warn:  { bg: "bg-warn/15",  text: "text-warn",  border: "border-warn/40" },
+    bad:   { bg: "bg-bad/15",   text: "text-bad",   border: "border-bad/40" },
+    muted: { bg: "bg-bg/40",    text: "text-muted", border: "border-border" },
+  };
+  const p = palette[variant];
+  const activeClasses = active
+    ? `${p.bg} ${p.text} ${p.border} border-2 font-medium`
+    : `${p.text} border-border hover:${p.bg}`;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={`text-xs px-3 py-1 rounded-full border transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${activeClasses}`}
+    >
+      {label}
+    </button>
   );
 }
