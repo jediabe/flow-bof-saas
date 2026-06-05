@@ -18,13 +18,44 @@ import Anthropic from "@anthropic-ai/sdk";
 
 import {
   DEFAULT_MODELS,
+  type AiMarket,
   type AiPromptOutput,
   type AiProviderSettings,
   type ProductPromptInput,
 } from "./types";
-import { UK_SYSTEM_PROMPT, formatUserPrompt } from "./uk-retail-prompts";
+import {
+  UK_SYSTEM_PROMPT,
+  formatUserPrompt as formatUkUserPrompt,
+} from "./uk-retail-prompts";
+import {
+  US_SYSTEM_PROMPT,
+  formatUserPrompt as formatUsUserPrompt,
+} from "./us-retail-prompts";
 import { buildUkRetailPrompt } from "../uk-retailers";
+import { buildUsRetailPrompt, findUsEnvironment } from "../us-retailers";
 import { extractJson, normaliseAiOutput } from "./prompt-generator";
+
+/**
+ * Pick the system prompt + user-prompt formatter for the market on
+ * the input. Defaults to UK when unset for back-compat.
+ */
+function templateForMarket(
+  market: AiMarket | undefined,
+): {
+  systemPrompt: string;
+  formatUserPrompt: (p: ProductPromptInput) => string;
+} {
+  if (market === "us") {
+    return {
+      systemPrompt: US_SYSTEM_PROMPT,
+      formatUserPrompt: formatUsUserPrompt,
+    };
+  }
+  return {
+    systemPrompt: UK_SYSTEM_PROMPT,
+    formatUserPrompt: formatUkUserPrompt,
+  };
+}
 
 // Internal: tiny per-product call result. Providers throw on transport
 // errors; the bulk runner wraps the throw in a per-product entry.
@@ -39,13 +70,35 @@ export interface ProviderCallResult {
 // ---------------------------------------------------------------------
 
 /**
- * Deterministic UK prompt — no network call, no API key. Uses the
- * existing pickRetailerKey()/buildUkStorePrompt() pair so this output
- * matches the "Generate UK Store Prompts" bulk button.
+ * Deterministic market-aware prompt — no network call, no API key.
+ * Picks the UK or US retail catalogue based on input.market, then
+ * delegates to that catalogue's prompt builder. Output matches the
+ * shape every other provider returns (minus the AI-only fields:
+ * hook / caption / hashtags / productDescription stay undefined
+ * because there's no model to synthesise them).
  */
 export function manualGenerate(
   input: ProductPromptInput,
 ): ProviderCallResult {
+  if (input.market === "us") {
+    const { prompt, envKey } = buildUsRetailPrompt({
+      productName: input.productName,
+      category:    input.category,
+      retailerName: input.retailerName,
+    });
+    return {
+      remote: false,
+      output: {
+        retailerName:      envKey,
+        retailEnvironment: findUsEnvironment(envKey).phrase ?? undefined,
+        imagePrompt:       prompt,
+        hook:              undefined,
+        caption:           undefined,
+        hashtags:          undefined,
+        productDescription: undefined,
+      },
+    };
+  }
   const { prompt, retailerKey } = buildUkRetailPrompt({
     productName: input.productName,
     category:    input.category,
@@ -77,12 +130,13 @@ export async function openaiGenerate(
   const model = (settings.openaiModel || "").trim() || DEFAULT_MODELS.openai;
   const client = new OpenAI({ apiKey });
 
+  const { systemPrompt, formatUserPrompt } = templateForMarket(input.market);
   const resp = await client.chat.completions.create({
     model,
     response_format: { type: "json_object" },
     temperature: 0.4,
     messages: [
-      { role: "system", content: UK_SYSTEM_PROMPT },
+      { role: "system", content: systemPrompt },
       { role: "user",   content: formatUserPrompt(input) },
     ],
   });
@@ -105,13 +159,14 @@ export async function anthropicGenerate(
     (settings.anthropicModel || "").trim() || DEFAULT_MODELS.anthropic;
   const client = new Anthropic({ apiKey });
 
+  const { systemPrompt, formatUserPrompt } = templateForMarket(input.market);
   const message = await client.messages.create({
     model,
     max_tokens: 2048,
     temperature: 0.4,
     // Anthropic has no native JSON mode; the system prompt already
     // demands strict JSON, but we double-reinforce.
-    system: UK_SYSTEM_PROMPT + "\n\nReturn JSON only. No markdown.",
+    system: systemPrompt + "\n\nReturn JSON only. No markdown.",
     messages: [{ role: "user", content: formatUserPrompt(input) }],
   });
   const text = message.content
@@ -146,11 +201,12 @@ export async function openrouterGenerate(
     defaultHeaders: Object.keys(defaultHeaders).length ? defaultHeaders : undefined,
   });
 
+  const { systemPrompt, formatUserPrompt } = templateForMarket(input.market);
   const resp = await client.chat.completions.create({
     model,
     temperature: 0.4,
     messages: [
-      { role: "system", content: UK_SYSTEM_PROMPT + "\n\nReturn JSON only." },
+      { role: "system", content: systemPrompt + "\n\nReturn JSON only." },
       { role: "user",   content: formatUserPrompt(input) },
     ],
   });

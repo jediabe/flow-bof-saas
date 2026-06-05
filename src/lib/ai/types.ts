@@ -37,6 +37,14 @@ export interface AiProviderSettings {
   openrouterAppName?: string | null;
 }
 
+/**
+ * TikTok Shop market the prompt targets. Selected on the parent
+ * Batch row; per-product overrides win when set. Drives which
+ * system prompt + retailer/environment catalogue the AI provider
+ * uses.
+ */
+export type AiMarket = "uk" | "us";
+
 /** Input to the prompt generator — one product worth of context. */
 export interface ProductPromptInput {
   productName:        string;
@@ -46,6 +54,12 @@ export interface ProductPromptInput {
   tiktokUrl?:         string | null;
   notes?:             string | null;
   referenceImageUrl?: string | null;
+  /**
+   * UK or US workflow. Defaults to "uk" at the dispatch layer when
+   * unset so behaviour stays unchanged for any caller that hasn't
+   * been updated yet (back-compat).
+   */
+  market?:            AiMarket;
 }
 
 /**
@@ -61,11 +75,33 @@ export interface ProductPromptInput {
  * back-compat with old workbooks.
  */
 export interface AiPromptOutput {
+  /**
+   * Canonical retailer / environment key. For UK this is the
+   * named-store key (e.g. "Boots", "Sephora UK"); for US this is
+   * the generic environment key from us-retailers.ts (e.g.
+   * "us_beauty_display"). Stored as Product.retailerName.
+   */
   retailerName: string;
+  /**
+   * Human-readable environment phrase used in the image prompt's
+   * placement paragraph. For UK this is the store name itself
+   * (Selfridges, IKEA…); for US this is the generic phrase
+   * (e.g. "American beauty retail display, cosmetics counter…").
+   * Surfaced to the user as a chip on the product card and to the
+   * posting-assist page as context.
+   */
+  retailEnvironment?: string;
   imagePrompt:  string;
   hook?:        string;
   caption?:     string;
   hashtags?:    string[];
+  /**
+   * 2-3 sentence neutral product blurb. Populated when the AI
+   * provider returns a US-workflow response (PART 4 of v0.7 spec)
+   * and used on the posting-assist QR page. Optional so the UK
+   * workflow can keep producing prompts without it for now.
+   */
+  productDescription?: string;
   // Echoed-through fields, mostly used for debugging the provider's
   // reasoning. The SaaS doesn't render these but stores them on the
   // AI envelope for traceability.

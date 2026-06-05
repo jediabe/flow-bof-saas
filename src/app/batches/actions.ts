@@ -579,15 +579,25 @@ export async function generateAiPrompts(input: {
   const { workspace } = await getCurrentWorkspace();
   const batch = await db.batch.findFirst({
     where: { id: batchId, workspaceId: workspace.id },
-    select: { id: true },
+    // Pull the batch market so we can pass it through to the AI
+    // provider. Phase-2 wiring — without this every prompt fell
+    // back to UK regardless of the batch's selected market.
+    select: { id: true, market: true },
   });
   if (!batch) return emptyAiReport("batch not found");
+
+  // Normalise to one of the AiMarket values. Defaults to "uk"
+  // for any batch row that still carries an unrecognised value
+  // (defensive — Phase-1 default is already "uk").
+  const batchMarket: "uk" | "us" = batch.market === "us" ? "us" : "uk";
 
   const settingsRow = await loadOrCreateSettings(workspace.id);
   const settings = toServerSettings(settingsRow);
 
   const products = await db.product.findMany({
-    where: { batchId: batch.id },
+    // Skip soft-deleted rows so we don't burn AI credits on
+    // products the user has already removed from the batch.
+    where: { batchId: batch.id, deletedAt: null },
     select: {
       id: true,
       productName: true,
@@ -597,6 +607,10 @@ export async function generateAiPrompts(input: {
       tiktokUrl: true,
       referenceImageUrl: true,
       imagePrompt: true,
+      // Per-product market override. Falls back to the batch
+      // market when null (or when set to something we don't
+      // recognise).
+      market: true,
     },
   });
 
@@ -611,6 +625,11 @@ export async function generateAiPrompts(input: {
       continue;
     }
 
+    // Per-product market override wins when present; otherwise
+    // inherit the batch's market.
+    const effectiveMarket: "uk" | "us" =
+      p.market === "us" ? "us" : p.market === "uk" ? "uk" : batchMarket;
+
     try {
       const { output } = await callProvider(
         {
@@ -620,6 +639,7 @@ export async function generateAiPrompts(input: {
           retailerName:      p.retailerName,
           tiktokUrl:         p.tiktokUrl,
           referenceImageUrl: p.referenceImageUrl,
+          market:            effectiveMarket,
         },
         settings,
       );
@@ -633,6 +653,11 @@ export async function generateAiPrompts(input: {
           hashtags:            output.hashtags
             ? encodeJson(output.hashtags)
             : null,
+          // Phase-2: persist the new productDescription field.
+          // Used by the posting-assist QR page (Phase 5). Null
+          // when the provider didn't return one — UK workflow
+          // still doesn't.
+          productDescription:  output.productDescription ?? null,
           aiPromptError:       null,
           aiPromptGeneratedAt: new Date(),
         },

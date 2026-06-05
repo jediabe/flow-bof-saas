@@ -113,10 +113,29 @@ export function normaliseAiOutput(
     throw new Error("AI response missing image_prompt");
   }
 
+  // Default the "did the model say nothing?" fallback by market.
+  // UK previous behaviour was "UK retail store"; US should land on
+  // a non-named description.
+  const fallbackRetailer =
+    input.market === "us" ? "American retail store" : "UK retail store";
+
   const retailerName =
-    asString(r.store_environment ?? r.retailerName ?? r.retailer_name) ||
+    asString(
+      r.store_environment ??
+      r.retail_environment ??
+      r.retailerName ??
+      r.retailer_name,
+    ) ||
     input.retailerName ||
-    "UK retail store";
+    fallbackRetailer;
+
+  // PART 4 of the v0.7 spec adds two new fields. retail_environment
+  // is the human-readable phrase (US workflow only — UK doesn't emit
+  // this key today). product_description is the posting-assist blurb.
+  const retailEnvironment =
+    asString(r.retail_environment ?? r.store_environment) || undefined;
+  const productDescription =
+    asString(r.product_description ?? r.productDescription) || undefined;
 
   const hook    = asString(r.hook) || undefined;
   const caption = asString(r.caption) || undefined;
@@ -124,10 +143,12 @@ export function normaliseAiOutput(
 
   return {
     retailerName,
+    retailEnvironment,
     imagePrompt,
     hook,
     caption,
     hashtags,
+    productDescription,
     productName: asString(r.product_name) || input.productName,
     category:    asString(r.category) || input.category || undefined,
     videoPrompt: asString(r.video_prompt) || undefined,
