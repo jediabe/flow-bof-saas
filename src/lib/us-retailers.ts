@@ -1,20 +1,41 @@
 /**
- * US TikTok Shop retail-environment catalogue + the blanket
+ * US TikTok Shop retail-environment catalogue + the editorial
  * image-prompt template the "Build US Store Prompt" path uses.
  *
- * Why this exists at all when uk-retailers.ts already covers the UK
- * workflow: the US prompts CANNOT mention specific named stores (per
- * the v0.7 spec — different legal / brand-safety surface from the UK
- * workflow). Instead we ship a catalogue of generic retail-environment
- * descriptions and a category→environment matcher that picks one.
+ * Hard constraint: generated US prompts must NEVER mention specific
+ * named US stores (Walmart / Target / CVS / etc.). Instead each
+ * category maps to a generic store-type noun phrase that fits the
+ * "inside a modern [STORE TYPE]" template slot.
  *
- * The "retailerName" field stored on Product for a US batch will hold
- * one of the `key`s from this file (e.g. "us_big_box_aisle"); the
- * prompt template renders the corresponding `phrase` into the
- * placement sentence.
+ * Framework (verbatim per the 2026-06-05 product spec):
  *
- * Lives in code (not the database) for the same reason as the UK
- * catalogue: phrasing tweaks happen in one place.
+ *   Paragraph 1 — placement + reference handling:
+ *     "Editorial retail product shot of the [PRODUCT NAME] displayed
+ *     exactly as shown in the reference image on a [DISPLAY METHOD]
+ *     inside a modern [STORE TYPE]. Match the product's color,
+ *     texture, size, and details precisely as they appear in the
+ *     reference. The product is the clear hero focus with open
+ *     negative space surrounding it, nothing else nearby. No store
+ *     logos, no brand signage, no price tags visible anywhere."
+ *
+ *   Paragraph 2 — lighting + atmosphere:
+ *     "[LIGHTING SENTENCE]. Background softly blurred with realistic
+ *     retail shelving and store atmosphere visible in the distance."
+ *
+ *   Paragraph 3 — realism / camera (verbatim, fixed):
+ *     "Shot on a handheld iPhone 15 Pro style camera with authentic
+ *     casual shopper framing and slight natural imperfections.
+ *     Visible realism: realistic textures, slight dust particles
+ *     catching light, natural shadows, true-to-size proportions. Not
+ *     cinematic, not studio lighting, not glossy CGI, not overly
+ *     polished. Looks like a real customer discovered the viral
+ *     TikTok Shop deal while browsing."
+ *
+ * Each environment in the catalogue below provides a default
+ * (displayMethod, storeType, lightingSentence) triple the
+ * deterministic builder substitutes into the template. The AI
+ * provider receives the same template + table in its system prompt
+ * and picks per product.
  */
 
 export const US_ENVIRONMENT_FALLBACK = "__us_fallback__" as const;
@@ -23,101 +44,133 @@ export interface UsRetailEnvironment {
   /**
    * Stable key used as the canonical retailerName for the US workflow.
    * `__us_fallback__` collapses to the generic "American retail store"
-   * placement sentence.
+   * placement when no category-specific entry matches.
    */
   key: string;
   /** Display label shown in the selector. */
   label: string;
   /**
-   * Phrase substituted into the prompt template's [US_ENVIRONMENT]
-   * slot. Generic environment language only — no named stores. For
-   * the fallback, the template uses a fully generic sentence.
+   * Generic store-type noun phrase substituted into the template's
+   * "inside a modern [STORE TYPE]" slot. NEVER a named retailer.
    */
-  phrase: string | null;
+  storeType: string;
+  /**
+   * Fixture / surface the product sits on, substituted into the
+   * "displayed ... on a [DISPLAY METHOD]" slot. Singular noun
+   * phrase that grammatically follows "on a / on an".
+   */
+  displayMethod: string;
+  /**
+   * One-sentence lighting description that opens paragraph 2.
+   * Should be a complete sentence (no trailing period — the builder
+   * appends one along with the rest of the paragraph).
+   */
+  lightingSentence: string;
 }
 
 /**
- * Catalogue of US retail environments. Ordered roughly from generic
- * to specific so the manual selector reads sensibly top-to-bottom.
- * Add new entries at the end so existing Product.retailerName values
- * (stored as `key`) keep resolving.
+ * Catalogue of US retail environments. Add new entries at the END
+ * so existing Product.retailerName values keep resolving by key.
+ *
+ * The previous "us_home_shopping_setup" fallback was removed
+ * (2026-06-05) — it was placing products on kitchen counters /
+ * bathroom shelves rather than retail fixtures, which contradicted
+ * the "retail product shot" intent of the framework. Replaced with
+ * a stronger generic-retail fallback + new "us_auto_accessories"
+ * category for car / vehicle accessory products.
  */
 export const US_ENVIRONMENTS: ReadonlyArray<UsRetailEnvironment> = [
   {
     key: US_ENVIRONMENT_FALLBACK,
     label: "US retail store (fallback)",
-    phrase: null,
+    storeType: "American retail store",
+    displayMethod: "tidy retail shelf",
+    lightingSentence:
+      "Even retail lighting with neutral ceiling tones evenly washes the product",
   },
   {
     key: "us_big_box_aisle",
-    label: "American big-box retail aisle",
-    phrase:
-      "broad American big-box retail aisle, wide shelves, bright overhead lighting, " +
-      "everyday consumer goods nearby",
+    label: "American big-box retail store",
+    storeType: "American big-box retail store",
+    displayMethod: "shelf endcap with neatly faced front",
+    lightingSentence:
+      "Cool overhead retail lighting with natural ceiling glow brightens the aisle",
   },
   {
     key: "us_lifestyle_retail",
-    label: "Modern American lifestyle retail display",
-    phrase:
-      "modern American lifestyle retail display, clean shelves, polished merchandising, " +
-      "soft bright retail lighting",
+    label: "American lifestyle retail store",
+    storeType: "American lifestyle retail store",
+    displayMethod: "folded table display at eye level",
+    lightingSentence:
+      "Soft warm retail lighting from track fixtures highlights the product surface",
   },
   {
     key: "us_warehouse_club",
-    label: "American warehouse-club aisle",
-    phrase:
-      "warehouse-club-style retail aisle, tall industrial shelving, bulk-pack " +
-      "presentation, wide concrete floor, bright ceiling lights",
+    label: "American warehouse club store",
+    storeType: "American warehouse club store",
+    displayMethod: "tall industrial pallet shelf",
+    lightingSentence:
+      "Bright fluorescent ceiling lighting flattens shadows across an open concrete floor",
   },
   {
     key: "us_pharmacy_aisle",
-    label: "American pharmacy-style aisle",
-    phrase:
-      "American pharmacy-style retail aisle, organized wellness shelves, bright " +
-      "clinical retail lighting",
+    label: "American pharmacy",
+    storeType: "American drugstore-style pharmacy",
+    displayMethod: "clean white pharmacy shelf with section dividers",
+    lightingSentence:
+      "Bright clinical retail lighting with an even white fluorescent tone illuminates the aisle",
   },
   {
     key: "us_beauty_display",
-    label: "American beauty retail display",
-    phrase:
-      "American beauty retail display, cosmetics counter, clean testers, glossy " +
-      "shelves, premium lighting",
+    label: "American beauty retail store",
+    storeType: "American beauty retail store",
+    displayMethod: "glossy cosmetics counter display",
+    lightingSentence:
+      "Premium spotlight lighting accents the product's surface with a soft warm glow",
   },
   {
     key: "us_electronics_showroom",
-    label: "American electronics showroom / tech aisle",
-    phrase:
-      "American electronics showroom or tech aisle, demo counter, clean modern " +
-      "product display, cool bright lighting",
+    label: "American electronics retail store",
+    storeType: "American electronics retail store",
+    displayMethod: "dedicated demo stand with a backlit accent strip",
+    lightingSentence:
+      "Cool LED accent lighting with subtle blue undertones rims the product",
   },
   {
     key: "us_home_improvement",
-    label: "American home-improvement retail aisle",
-    phrase:
-      "American home-improvement retail aisle, industrial shelving, tools or " +
-      "hardware nearby, practical store lighting",
+    label: "American home-improvement retail store",
+    storeType: "American home-improvement retail store",
+    displayMethod: "industrial peg hook on a steel slatwall",
+    lightingSentence:
+      "Bright practical overhead lighting with a slight warm cast covers the aisle",
   },
   {
     key: "us_pet_supply",
-    label: "American pet-supply retail aisle",
-    phrase:
-      "American pet-supply retail aisle, pet food / accessory shelves, clean " +
-      "organized display",
+    label: "American pet supply retail store",
+    storeType: "American pet supply retail store",
+    displayMethod: "tidy pet-aisle shelf with section signage softly out of focus",
+    lightingSentence:
+      "Clean even retail lighting with neutral tones washes the product",
   },
   {
     key: "us_sporting_goods",
-    label: "American sporting goods retail section",
-    phrase:
-      "American sporting goods retail section, fitness equipment shelves, " +
-      "athletic accessories nearby",
+    label: "American sporting goods retail store",
+    storeType: "American sporting goods retail store",
+    displayMethod: "athletic-section shelf with sleek metal supports",
+    lightingSentence:
+      "Cool bright retail lighting with mild accent highlights picks out the product texture",
   },
+  // 2026-06-05: new category covering car / vehicle accessories.
+  // Previously these landed in the (now removed) home-shopping
+  // setup and got staged on kitchen counters. They belong in an
+  // auto parts retail context.
   {
-    key: "us_home_shopping_setup",
-    label: "American home / kitchen / desk surface",
-    phrase:
-      "realistic American home-shopping setup — kitchen counter, bathroom shelf, " +
-      "office desk, bedroom dresser, garage workbench, or living room surface " +
-      "depending on what fits the product naturally",
+    key: "us_auto_accessories",
+    label: "American auto parts retail store",
+    storeType: "American auto parts retail store",
+    displayMethod: "wall-mounted accessory peg hook above a parts shelf",
+    lightingSentence:
+      "Practical bright overhead retail lighting with cool steel-toned reflections falls across the product",
   },
 ];
 
@@ -141,13 +194,27 @@ interface UsEnvironmentRule {
 }
 
 /**
- * Category → environment mapping. Mirrors the v0.7 PART 2 US
- * environment catalogue. Most-specific rules first so e.g. "skincare"
- * lands in `us_beauty_display`, not the broader `us_pharmacy_aisle`.
+ * Category → environment mapping. Most-specific rules first so e.g.
+ * "skincare" lands in `us_beauty_display`, not the broader
+ * `us_pharmacy_aisle`.
  */
 const US_ENVIRONMENT_RULES: UsEnvironmentRule[] = [
-  // Beauty / luxury beauty first — premium positioning beats the
-  // generic pharmacy aisle for makeup and high-end skincare.
+  // Auto / vehicle accessories first — distinctive enough that we
+  // don't want it falling into one of the broader buckets below.
+  {
+    envKey: "us_auto_accessories",
+    keywords: [
+      "car ", "auto ", "automotive", "vehicle",
+      "armrest", "center console", "dashboard",
+      "car seat", "car mat", "car organizer", "trunk organizer",
+      "steering wheel", "gear shift", "cup holder",
+      "windshield", "wiper",
+      "tire", "rim", "wheel cover",
+      "license plate", "bumper sticker",
+    ],
+  },
+  // Beauty / luxury beauty — premium positioning beats the generic
+  // pharmacy aisle for makeup and high-end skincare.
   {
     envKey: "us_beauty_display",
     keywords: [
@@ -228,7 +295,8 @@ const US_ENVIRONMENT_RULES: UsEnvironmentRule[] = [
       "accessory", "accessories", "bag", "handbag", "scarf", "hat",
     ],
   },
-  // Big-box catch-all — household, grocery, cleaning, everyday goods.
+  // Big-box catch-all — household, grocery, cleaning, everyday goods,
+  // kitchenware, toys.
   {
     envKey: "us_big_box_aisle",
     keywords: [
@@ -240,23 +308,12 @@ const US_ENVIRONMENT_RULES: UsEnvironmentRule[] = [
       "doll", "plush",
     ],
   },
-  // Home-shopping surface — explicit hints that the product is for
-  // home/lifestyle use rather than a retail aisle. Comes near the end
-  // because most products will have matched something more specific
-  // by now.
-  {
-    envKey: "us_home_shopping_setup",
-    keywords: [
-      "for the bathroom", "for the kitchen", "for the bedroom",
-      "for the office", "for the garage", "for the living room",
-    ],
-  },
 ];
 
 /**
  * Best-match US environment key for a product. Returns the fallback
  * when no rule matches — the prompt still works, just lands in the
- * generic "American retail store" placement sentence.
+ * generic "American retail store" placement.
  */
 export function pickUsEnvironmentKey({
   category,
@@ -277,8 +334,8 @@ export function pickUsEnvironmentKey({
 
 /**
  * Build a US image prompt for a product. Picks the environment
- * automatically (overriding a stored retailerName only when null) so
- * a freshly-imported US batch lands with sensible environments
+ * automatically (overriding a stored retailerName only when null)
+ * so a freshly-imported US batch lands with sensible environments
  * without the user touching each row.
  */
 export function buildUsRetailPrompt(product: {
@@ -292,52 +349,50 @@ export function buildUsRetailPrompt(product: {
       category: product.category,
       productName: product.productName,
     });
-  return { prompt: buildUsStorePrompt(envKey), envKey };
+  return {
+    prompt: buildUsStorePrompt(envKey, product.productName ?? null),
+    envKey,
+  };
 }
 
 /**
- * Compose the US image prompt for a given environment key. The
- * fallback key inserts the generic "American retail store" placement
- * sentence rather than a category-specific one.
- *
- * Output is the same four-paragraph structure as the UK builder so
- * the runner sees the same shape regardless of market. Paragraph 3
- * is the one that diverges: UK names a retailer; US describes the
- * environment by appearance only.
+ * Compose the US image prompt for a given environment key + product
+ * name. Renders the 3-paragraph editorial template per the
+ * 2026-06-05 product spec — strict, no extra paragraphs, no
+ * reference-handling guardrail (intentionally not in the spec).
  */
-export function buildUsStorePrompt(envKey: string | null | undefined): string {
+export function buildUsStorePrompt(
+  envKey: string | null | undefined,
+  productName: string | null = null,
+): string {
   const env = findUsEnvironment(envKey);
-  const placement =
-    env.phrase === null
-      ? "Place the product inside a realistic American retail store environment, " +
-        "no price tags, no text overlays, no promotional graphics, no catalog layout."
-      : `Place the product inside a ${env.phrase}, no price tags, no text overlays, ` +
-        "no promotional graphics, no catalog layout.";
+  const name = (productName ?? "").trim() || "product";
 
-  return [
-    // Paragraph 1 — reference handling (same guardrail as UK; the
-    // surface-area of reference-image trickery doesn't change by
-    // market).
-    "Use the uploaded reference image only to understand the product's design. " +
-      "Do not copy the reference image layout, background, text, labels, " +
-      "promotional graphics, multiple variants, collage arrangement, catalog " +
-      "composition, TikTok UI, shipping badges, discount claims, or " +
-      "product-page graphics.",
-    // Paragraph 2 — product extraction.
-    "Extract the primary product as one realistic physical product display. " +
-      "Show one product, or one complete pair/set if that is how the product " +
-      "is naturally sold.",
-    // Paragraph 3 — placement (the only paragraph that varies between
-    // UK and US).
-    placement,
-    // Paragraph 4 — realism constraints. Casual handheld iPhone shopper
-    // photo style matches the spec's PART 3 "Realism" section.
-    "Preserve the product's core shape, color, material, proportions, packaging, " +
-      "and branding if visible. Make it look physically present with realistic " +
-      "scale, contact shadows, shelf / table / counter placement, and ordinary " +
-      "nearby store or home items as appropriate. Casual handheld iPhone " +
-      "shopper photo, realistic American retail or home environment. No studio " +
-      "render, no catalog layout, no text overlays, no promotional graphics, " +
-      "no fake UI.",
-  ].join("\n\n");
+  // Paragraph 1 — placement + reference fidelity + hero focus.
+  const p1 =
+    `Editorial retail product shot of the ${name} displayed exactly ` +
+    `as shown in the reference image on a ${env.displayMethod} inside ` +
+    `a modern ${env.storeType}. Match the product's color, texture, ` +
+    `size, and details precisely as they appear in the reference. The ` +
+    `product is the clear hero focus with open negative space ` +
+    `surrounding it, nothing else nearby. No store logos, no brand ` +
+    `signage, no price tags visible anywhere.`;
+
+  // Paragraph 2 — lighting + soft-blur retail atmosphere.
+  const p2 =
+    `${env.lightingSentence}. Background softly blurred with ` +
+    `realistic retail shelving and store atmosphere visible in the ` +
+    `distance.`;
+
+  // Paragraph 3 — camera + realism (verbatim, fixed text).
+  const p3 =
+    "Shot on a handheld iPhone 15 Pro style camera with authentic " +
+    "casual shopper framing and slight natural imperfections. Visible " +
+    "realism: realistic textures, slight dust particles catching " +
+    "light, natural shadows, true-to-size proportions. Not cinematic, " +
+    "not studio lighting, not glossy CGI, not overly polished. Looks " +
+    "like a real customer discovered the viral TikTok Shop deal while " +
+    "browsing.";
+
+  return [p1, p2, p3].join("\n\n");
 }

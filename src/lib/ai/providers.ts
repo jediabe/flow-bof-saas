@@ -90,7 +90,11 @@ export function manualGenerate(
       remote: false,
       output: {
         retailerName:      envKey,
-        retailEnvironment: findUsEnvironment(envKey).phrase ?? undefined,
+        // The 2026-06-05 framework renamed the catalogue's `phrase`
+        // field to `storeType` (the noun that fits "inside a modern
+        // [STORE TYPE]"). retailEnvironment carries that for the
+        // SaaS to surface as a chip + on the posting-assist page.
+        retailEnvironment: findUsEnvironment(envKey).storeType ?? undefined,
         imagePrompt:       prompt,
         hook:              undefined,
         caption:           undefined,
