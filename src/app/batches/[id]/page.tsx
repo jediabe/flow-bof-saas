@@ -17,6 +17,8 @@ import { DEFAULT_MODELS } from "@/lib/ai/types";
 import { addProduct, deleteBatch, setBatchMarket } from "../actions";
 import BatchWorkbench from "./BatchWorkbench";
 import GenerateImagesPanel from "./GenerateImagesPanel";
+import MobileReviewQRCard from "./MobileReviewQRCard";
+import { headers } from "next/headers";
 import KalodataImportPanel from "./KalodataImportPanel";
 import AiPromptsPanel from "./AiPromptsPanel";
 import LatestTaskResult from "./LatestTaskResult";
@@ -26,6 +28,26 @@ import ProductEditor, {
 } from "./ProductEditor";
 
 export const dynamic = "force-dynamic";
+
+/**
+ * Resolve the public origin for building a full mobile-review
+ * URL. Prefers NEXT_PUBLIC_APP_URL when set; falls back to the
+ * incoming request's host header so dev / preview deploys work
+ * without env config. Strips trailing slash so the QR card can
+ * safely concatenate with a relative path.
+ */
+async function _reviewBaseUrl(): Promise<string> {
+  const explicit = (process.env.NEXT_PUBLIC_APP_URL || "").trim();
+  if (explicit) return explicit.replace(/\/+$/, "");
+  // Fall back to the request host. Next 15 — headers() is async.
+  const h = await headers();
+  const host = h.get("host") || "localhost:3000";
+  // Default to https unless we're clearly on a local dev port.
+  const isLocal = /^(localhost|127\.|0\.0\.0\.0)/.test(host) ||
+                  /:\d+$/.test(host) && host.startsWith("localhost");
+  const proto = isLocal ? "http" : "https";
+  return `${proto}://${host}`;
+}
 
 const JOB_STATUS_VARIANT: Record<string, "ok" | "warn" | "bad" | "muted"> = {
   queued:    "muted",
@@ -384,6 +406,16 @@ export default async function BatchDetail({
         provider={aiProvider}
         providerLabel={aiProviderLabel}
         providerHasKey={aiProviderHasKey}
+      />
+
+      {/* ----- Mobile Product Review (Phase 4) -------------------- */}
+      <MobileReviewQRCard
+        batchId={batch.id}
+        reviewToken={batch.reviewToken}
+        reviewBaseUrl={await _reviewBaseUrl()}
+        needsReviewCount={
+          batch.products.filter((p) => p.reviewStatus === "needs_review").length
+        }
       />
 
       {/* ----- Products section -------------------------------------- */}

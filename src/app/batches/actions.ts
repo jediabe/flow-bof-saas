@@ -1,6 +1,7 @@
 "use server";
 
 import { Buffer } from "node:buffer";
+import { randomBytes } from "node:crypto";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { db } from "@/lib/db";
@@ -279,6 +280,209 @@ export async function setBatchMarket(formData: FormData): Promise<void> {
     revalidatePath("/batches");
     revalidatePath("/dashboard");
   }
+}
+
+// ---------------------------------------------------------------------
+// Phase-4 mobile product-review QR
+// ---------------------------------------------------------------------
+
+/**
+ * Generate a URL-safe random token for mobile review / posting URLs.
+ * 32 bytes of crypto-random → 43-char base64url string. Long enough
+ * that brute-forcing the URL is intractable; short enough to fit on
+ * a phone screen if the user needs to type it manually.
+ */
+function _generateReviewToken(): string {
+  // base64url encode 32 random bytes. Replace + / = so the token
+  // survives in URLs without percent-encoding.
+  return randomBytes(32)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
+/**
+ * Ensure the batch has a mobile-review token; create one if not.
+ *
+ * Token lives on Batch.reviewToken (added in Phase 1) and is the
+ * anyone-with-URL credential for the phone review page. Per the
+ * v0.7 spec choice ("Anyone-with-URL"), tokens never expire on
+ * their own — caller invokes `rotateBatchReviewToken` to mint a
+ * new one and invalidate the old.
+ *
+ * Returns the token (existing or freshly minted). Caller composes
+ * the user-facing URL with `/mobile-review/<token>`.
+ */
+export async function getOrCreateBatchReviewToken(
+  batchId: string,
+): Promise<{ ok: boolean; token: string | null; message?: string }> {
+  if (!batchId) return { ok: false, token: null, message: "missing batchId" };
+  const { workspace } = await getCurrentWorkspace();
+  const batch = await db.batch.findFirst({
+    where: { id: batchId, workspaceId: workspace.id },
+    select: { id: true, reviewToken: true },
+  });
+  if (!batch) return { ok: false, token: null, message: "batch not found" };
+
+  if (batch.reviewToken) {
+    return { ok: true, token: batch.reviewToken };
+  }
+
+  // Mint a new one. Loop on the (vanishingly unlikely) collision
+  // with another batch's existing reviewToken — the @unique
+  // constraint on Batch.reviewToken means we'd hit a Prisma error
+  // if we tried to save a colliding value.
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const token = _generateReviewToken();
+    try {
+      await db.batch.update({
+        where: { id: batch.id },
+        data:  { reviewToken: token },
+      });
+      revalidatePath(`/batches/${batchId}`);
+      return { ok: true, token };
+    } catch (err) {
+      // Prisma unique-constraint violation — try again with a new
+      // random token. Any other error bubbles up.
+      const code = (err as { code?: string }).code;
+      if (code !== "P2002") throw err;
+      continue;
+    }
+  }
+  return {
+    ok: false,
+    token: null,
+    message:
+      "Could not allocate a unique review token after 4 attempts. " +
+      "Try again.",
+  };
+}
+
+/**
+ * Force-mint a new review token, invalidating the existing one.
+ * Used by the "Rotate token" button on the batch page when the
+ * user wants to revoke a previously-shared link.
+ */
+export async function rotateBatchReviewToken(
+  formData: FormData,
+): Promise<void> {
+  const batchId = String(formData.get("batchId") || "");
+  if (!batchId) return;
+  const { workspace } = await getCurrentWorkspace();
+  const batch = await db.batch.findFirst({
+    where: { id: batchId, workspaceId: workspace.id },
+    select: { id: true },
+  });
+  if (!batch) return;
+
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const token = _generateReviewToken();
+    try {
+      await db.batch.update({
+        where: { id: batch.id },
+        data:  { reviewToken: token },
+      });
+      revalidatePath(`/batches/${batchId}`);
+      return;
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      if (code !== "P2002") throw err;
+      continue;
+    }
+  }
+}
+
+/**
+ * Public review action invoked from the phone page. Authenticates
+ * by token (NOT session cookie) — anyone with the token URL can
+ * approve/reject any product in the matching batch.
+ *
+ * Returns ok:false with a generic message if the token doesn't
+ * match or the product isn't in that batch, so a stolen-token
+ * holder can't probe for valid product IDs.
+ */
+export async function setProductReviewStatusViaToken(input: {
+  token: string;
+  productId: string;
+  status: string;
+}): Promise<{ ok: boolean; message?: string }> {
+  const { token, productId, status } = input;
+  if (!token || !productId) {
+    return { ok: false, message: "missing parameters" };
+  }
+  if (!REVIEW_STATUSES.has(status as ReviewStatus)) {
+    return { ok: false, message: "invalid status" };
+  }
+
+  // Resolve the batch by token. NO workspace check — the token IS
+  // the auth surface. db.batch.findUnique on a unique field is the
+  // standard way to do anonymous lookups.
+  const batch = await db.batch.findUnique({
+    where: { reviewToken: token },
+    select: { id: true, workspaceId: true },
+  });
+  if (!batch) {
+    // Don't leak whether the token format was valid vs. just
+    // unknown — return the same opaque error either way.
+    return { ok: false, message: "invalid review link" };
+  }
+
+  // Verify the product belongs to that batch. Stops a stolen
+  // token from mutating products in unrelated batches by guessing
+  // ids.
+  const product = await db.product.findFirst({
+    where: { id: productId, batchId: batch.id, deletedAt: null },
+    select: { id: true },
+  });
+  if (!product) {
+    return { ok: false, message: "product not found in batch" };
+  }
+
+  await db.product.update({
+    where: { id: product.id },
+    data:  { reviewStatus: status },
+  });
+
+  // Revalidate both the mobile page (so subsequent loads see the
+  // new status if the reviewer hits Back) AND the owner-facing
+  // batch page (so the counts on the desktop side update).
+  revalidatePath(`/mobile-review/${token}`);
+  revalidatePath(`/batches/${batch.id}`);
+  return { ok: true };
+}
+
+/**
+ * Public soft-delete from the mobile review page. Same auth model
+ * as setProductReviewStatusViaToken — token alone is the credential.
+ */
+export async function softDeleteProductViaToken(input: {
+  token: string;
+  productId: string;
+}): Promise<{ ok: boolean; message?: string }> {
+  const { token, productId } = input;
+  if (!token || !productId) {
+    return { ok: false, message: "missing parameters" };
+  }
+  const batch = await db.batch.findUnique({
+    where: { reviewToken: token },
+    select: { id: true },
+  });
+  if (!batch) return { ok: false, message: "invalid review link" };
+
+  const product = await db.product.findFirst({
+    where: { id: productId, batchId: batch.id, deletedAt: null },
+    select: { id: true },
+  });
+  if (!product) return { ok: false, message: "product not found in batch" };
+
+  await db.product.update({
+    where: { id: product.id },
+    data:  { deletedAt: new Date() },
+  });
+  revalidatePath(`/mobile-review/${token}`);
+  revalidatePath(`/batches/${batch.id}`);
+  return { ok: true };
 }
 
 // ---------------------------------------------------------------------

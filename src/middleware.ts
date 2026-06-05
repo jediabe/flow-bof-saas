@@ -39,7 +39,17 @@ function isAlwaysOpen(pathname: string): boolean {
     pathname.startsWith("/_next/") ||
     pathname.startsWith("/uploads/") ||
     pathname === "/favicon.ico" ||
-    pathname === "/robots.txt"
+    pathname === "/robots.txt" ||
+    // Phase 4 mobile review pages — token-auth via the URL, no
+    // session cookie required. The token IS the credential (per the
+    // "anyone-with-URL" choice). Tokens are 32 bytes of crypto-
+    // random base64url, so the URL space is effectively infinite
+    // against brute force. Server actions on these pages do the
+    // token-lookup themselves; middleware just needs to let the
+    // request through.
+    pathname.startsWith("/mobile-review/") ||
+    // Phase 5 will need the same for /mobile-posting/.
+    pathname.startsWith("/mobile-posting/")
   );
 }
 
