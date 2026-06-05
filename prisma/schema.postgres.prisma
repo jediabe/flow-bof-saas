@@ -230,9 +230,73 @@ model Product {
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 
+  // Phase 3 — up to 3 reference images per product. The first row
+  // here (role="primary") is also reflected onto
+  // referenceImageUrl / referenceImagePathLocal above as a
+  // denormalised cache so existing read paths keep working without
+  // a join.
+  images             ProductImage[]
+
   @@index([batchId])
   @@index([reviewStatus])
   @@index([deletedAt])
+}
+
+// Phase 3 — additional reference images for a Product. Up to three
+// (role primary / ref2 / ref3) to mirror the runner's existing
+// REFERENCE_ROLES list. The runner already supports multiple
+// references per product — this table is the SaaS-side equivalent.
+//
+// Why a separate table instead of a JSON column on Product:
+//
+//   - We need per-image metadata (source, dimensions, when added) and
+//     a stable ID for the "Remove this image" UI to target.
+//   - Listing distinct images by role is much cleaner with a row-per-
+//     image schema; reordering happens via the role field, not array
+//     indexing.
+//   - Prisma handles the relation naturally; no JSON parsing glue on
+//     the read side.
+//
+// The "primary" image is also denormalised onto
+// Product.referenceImageUrl / .referenceImagePathLocal so all the
+// existing thumbnail / dispatch / runner code paths keep working
+// untouched. Writes to ProductImage(role="primary") MUST sync those
+// fields back; the helper in lib/product-images.ts is the single
+// chokepoint.
+model ProductImage {
+  id        String   @id @default(cuid())
+  productId String
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  // One of "primary" | "ref2" | "ref3". Matches the runner's
+  // REFERENCE_ROLES tuple verbatim so a single string flows end-to-
+  // end without translation.
+  role      String
+  // Public URL the SaaS serves the image at (e.g.
+  // /uploads/workspaces/<ws>/batches/<b>/<productId>_ref2.jpg).
+  // Optional only because a power user might supply a path-only
+  // override; for the normal Kalodata/paste/upload path this is
+  // always populated.
+  url       String?
+  // Optional local-filesystem path on the runner machine (debug
+  // override). Same semantics as Product.referenceImagePathLocal —
+  // when set, the runner prefers the path over the URL.
+  pathLocal String?
+  // Where the image came from: "kalodata" (auto-imported from the
+  // Excel hero shot), "paste" (clipboard paste on the product card),
+  // "upload" (drag/drop or file picker). Used for audit + future
+  // analytics; doesn't affect runtime behaviour.
+  source    String   @default("upload")
+  // Optional dimensions captured at upload time. Lets the UI render
+  // a sensible aspect-ratio placeholder before the image decodes.
+  width     Int?
+  height    Int?
+  bytes     Int?
+  createdAt DateTime @default(now())
+
+  // One row per role per product — guarantees a product never has
+  // two "primary" images and Phase 3 stays bounded at 3 refs.
+  @@unique([productId, role])
+  @@index([productId])
 }
 
 // ---------------------------------------------------------------------------

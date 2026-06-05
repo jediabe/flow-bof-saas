@@ -18,6 +18,7 @@ import {
 import { callProvider } from "@/lib/ai/providers";
 import { encodeJson } from "@/lib/json-column";
 import type { AiOverwriteMode } from "@/lib/ai/types";
+import { upsertProductImage } from "@/lib/product-images";
 
 export async function createBatch(formData: FormData): Promise<void> {
   const name = String(formData.get("name") || "").trim();
@@ -750,13 +751,16 @@ export async function importKalodataXlsx(
         batchId: batch.id,
         productId: product.id,
       });
-      // Critical: only set referenceImageUrl AFTER a successful
-      // download. A failed download leaves the column null so the
-      // UI can render a clean placeholder instead of a broken
-      // <img src=…> pointing at a file that never existed.
-      await db.product.update({
-        where: { id: product.id },
-        data: { referenceImageUrl: dl.relUrl },
+      // Phase 3: write through the ProductImage helper so the primary
+      // ProductImage row + the denormalised Product.referenceImageUrl
+      // cache stay in lockstep. upsertProductImage handles both writes
+      // in the right order.
+      await upsertProductImage({
+        productId: product.id,
+        role: "primary",
+        url: dl.relUrl,
+        source: "kalodata",
+        bytes: dl.size,
       });
       console.log(
         `[kalodata]   ↳ saved ${dl.size}B as ${dl.relUrl}`,
