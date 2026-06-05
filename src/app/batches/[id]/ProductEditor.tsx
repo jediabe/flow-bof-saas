@@ -14,6 +14,7 @@ import {
   restoreProduct,
   setProductReviewStatus,
   attachProductImageFromBlob,
+  generateAiPromptForProduct,
 } from "../actions";
 import ProductImageStack, {
   type ProductImageRow,
@@ -277,6 +278,34 @@ export default function ProductEditor({
     });
   }
 
+  // Phase-3: per-product AI regenerate. Independent transition from
+  // the rest so the rest of the editor stays interactive while this
+  // call is in flight (AI calls can take 5-20s).
+  const [aiBusy, startAiTransition] = useTransition();
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [aiOk, setAiOk] = useState<string | null>(null);
+
+  function regenerateAi() {
+    setAiError(null);
+    setAiOk(null);
+    startAiTransition(async () => {
+      const r = await generateAiPromptForProduct({
+        batchId,
+        productId: product.id,
+        force: true,
+      });
+      if (r.ok) {
+        setAiOk(r.message);
+        // Briefly show "generated" then clear so the chip on the
+        // header (which now reflects the fresh aiPromptGeneratedAt)
+        // becomes the durable indicator.
+        setTimeout(() => setAiOk(null), 2500);
+      } else {
+        setAiError(r.message);
+      }
+    });
+  }
+
   return (
     <div
       tabIndex={0}
@@ -450,13 +479,32 @@ export default function ProductEditor({
           <Field
             label="Image prompt"
             action={
-              <button
-                type="button"
-                className="btn btn-ghost text-[11px] px-2 py-1"
-                onClick={fillUkPrompt}
-              >
-                Build UK store prompt
-              </button>
+              <div className="flex items-center gap-2">
+                {aiOk && (
+                  <span className="text-[10px] text-ok">✓ {aiOk}</span>
+                )}
+                {aiError && (
+                  <span className="text-[10px] text-bad max-w-[14rem] truncate" title={aiError}>
+                    ⚠ {aiError}
+                  </span>
+                )}
+                <button
+                  type="button"
+                  className="btn btn-ghost text-[11px] px-2 py-1"
+                  onClick={regenerateAi}
+                  disabled={aiBusy || pending}
+                  title="Re-run the AI provider on just this product. Overwrites the existing prompt + hook + caption + hashtags."
+                >
+                  {aiBusy ? "Regenerating…" : "↻ Regenerate AI"}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-ghost text-[11px] px-2 py-1"
+                  onClick={fillUkPrompt}
+                >
+                  Build UK store prompt
+                </button>
+              </div>
             }
           >
             <textarea

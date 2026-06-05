@@ -4,63 +4,171 @@ import Link from "next/link";
 import { useState, useTransition } from "react";
 import StatusChip from "@/components/StatusChip";
 import {
-  generateAiPrompts,
+  generateAiPromptForProduct,
   generateUkStorePrompts,
-  type AiBulkReport,
+  type AiSingleResult,
   type BulkPromptReport,
 } from "../actions";
 import type { AiProviderKey } from "@/lib/ai/types";
 
 /**
- * Batch-level "AI Prompt Generation" surface.
+ * Batch-level "AI Prompt Generation" surface — Phase 3 redesign.
  *
- * One row of provider status + two action buttons:
- *   - "Generate AI Prompts" calls the configured provider (or the
- *     manual fallback when provider==="manual"). Mode toggle picks
- *     between "missing only" and "overwrite all".
- *   - "Use deterministic UK prompts" is the no-API-key escape hatch
- *     that always works. Same button BulkPromptButton offered before
- *     this refactor; lives here now so all prompt-gen is in one place.
+ * The big change vs. the previous version: instead of one bulk
+ * action that returns a single report at the end, the panel now
+ * fires N parallel per-product server actions with a small
+ * concurrency cap and updates a live progress list as each lands.
+ * The user sees individual product names tick over from queued →
+ * running → done / failed, and can see WHICH product blew up at
+ * the moment it does — not at the end of a 90-second wait.
  *
- * The result of either action lands inline in this panel — no
- * navigation, no full-page reload required. (revalidatePath on the
- * server still refreshes the Products grid.)
+ * The "Use deterministic UK prompts" button stays as-is: it's a
+ * single bulk call with no AI cost, and the response is fast
+ * enough that streaming per-product isn't worth the complexity.
  */
+
+export type AiPromptProductRow = {
+  id: string;
+  productName: string;
+  hasPrompt: boolean;
+};
+
+/** Per-row state in the live progress list. */
+type RowState =
+  | { kind: "queued" }
+  | { kind: "running" }
+  | { kind: "done"; message: string }
+  | { kind: "failed"; message: string };
+
+const MAX_CONCURRENCY = 3;
+
 export default function AiPromptsPanel({
   batchId,
   provider,
   providerLabel,
   providerHasKey,
+  products,
 }: {
   batchId: string;
   provider: AiProviderKey;
   providerLabel: string;
   providerHasKey: boolean;
+  /** All non-deleted products in the batch. The panel filters down
+   *  to the eligible set based on the mode selector. */
+  products: AiPromptProductRow[];
 }) {
-  const [pending, startTransition] = useTransition();
+  const [pendingManual, startManualTransition] = useTransition();
   const [mode, setMode] = useState<"missing" | "all">("missing");
-  const [aiReport, setAiReport] = useState<AiBulkReport | null>(null);
   const [manualReport, setManualReport] = useState<BulkPromptReport | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const disabledAi = pending || (provider !== "manual" && !providerHasKey);
+  // AI run state: a Map<productId, RowState> + a counter for the
+  // summary line. Distinct from "pending" because per-product
+  // failures shouldn't unmount the whole panel.
+  const [aiRunning, setAiRunning] = useState(false);
+  const [rowStates, setRowStates] = useState<Map<string, RowState>>(new Map());
 
-  function runAi() {
-    setError(null);
-    setAiReport(null);
-    setManualReport(null);
-    startTransition(async () => {
-      const r = await generateAiPrompts({ batchId, mode });
-      setAiReport(r);
-      if (!r.ok) setError(r.message);
+  const disabledAi =
+    aiRunning || pendingManual || (provider !== "manual" && !providerHasKey);
+
+  function setRowState(productId: string, state: RowState) {
+    setRowStates((prev) => {
+      const next = new Map(prev);
+      next.set(productId, state);
+      return next;
     });
+  }
+
+  async function runAi() {
+    setError(null);
+    setManualReport(null);
+
+    // Build the eligible list — in "missing" mode skip products
+    // that already have a prompt; "all" mode hits everyone.
+    const eligible = products.filter((p) => mode === "all" || !p.hasPrompt);
+    if (eligible.length === 0) {
+      setError(
+        mode === "missing"
+          ? "All products already have a prompt. Switch to 'All products' to regenerate."
+          : "No products to generate for.",
+      );
+      return;
+    }
+
+    // Reset state and mark everyone queued.
+    const init = new Map<string, RowState>();
+    for (const p of eligible) init.set(p.id, { kind: "queued" });
+    setRowStates(init);
+    setAiRunning(true);
+
+    // Concurrency-capped worker pool. Each worker pulls the next
+    // queued product off a shared index and dispatches the server
+    // action; updates state inline.
+    let cursor = 0;
+    async function worker() {
+      while (true) {
+        const idx = cursor++;
+        if (idx >= eligible.length) return;
+        const p = eligible[idx];
+        setRowState(p.id, { kind: "running" });
+        try {
+          const r: AiSingleResult = await generateAiPromptForProduct({
+            batchId,
+            productId: p.id,
+            force: mode === "all",
+          });
+          if (r.ok) {
+            setRowState(p.id, { kind: "done", message: r.message });
+          } else {
+            setRowState(p.id, { kind: "failed", message: r.message });
+          }
+        } catch (err) {
+          const e = err as Error;
+          setRowState(p.id, {
+            kind: "failed",
+            message: e.message || "unknown error",
+          });
+        }
+      }
+    }
+    await Promise.all(
+      Array.from({ length: Math.min(MAX_CONCURRENCY, eligible.length) }, () =>
+        worker(),
+      ),
+    );
+    setAiRunning(false);
+  }
+
+  async function retryProduct(productId: string) {
+    // Single-product retry from the "failed" row. Force=true so a
+    // partial regenerate works even when the original mode was
+    // "missing only".
+    setRowState(productId, { kind: "running" });
+    try {
+      const r = await generateAiPromptForProduct({
+        batchId,
+        productId,
+        force: true,
+      });
+      if (r.ok) {
+        setRowState(productId, { kind: "done", message: r.message });
+      } else {
+        setRowState(productId, { kind: "failed", message: r.message });
+      }
+    } catch (err) {
+      const e = err as Error;
+      setRowState(productId, {
+        kind: "failed",
+        message: e.message || "unknown error",
+      });
+    }
   }
 
   function runManual() {
     setError(null);
-    setAiReport(null);
     setManualReport(null);
-    startTransition(async () => {
+    setRowStates(new Map());
+    startManualTransition(async () => {
       const r = await generateUkStorePrompts({
         batchId,
         overwrite: mode === "all",
@@ -70,15 +178,26 @@ export default function AiPromptsPanel({
     });
   }
 
+  // Derived counters for the summary line.
+  const states = Array.from(rowStates.values());
+  const counts = {
+    queued: states.filter((s) => s.kind === "queued").length,
+    running: states.filter((s) => s.kind === "running").length,
+    done: states.filter((s) => s.kind === "done").length,
+    failed: states.filter((s) => s.kind === "failed").length,
+    total: states.length,
+  };
+
   return (
     <section className="panel p-5 space-y-4">
       <div className="flex items-baseline justify-between gap-2">
         <div>
           <div className="section-title">AI Prompt Generation</div>
           <p className="text-xs text-muted mt-1">
-            Author per-product image prompts, retailer placement, hook,
-            caption, and hashtags. The deterministic UK prompt fallback
-            below works without an API key.
+            Per-product image prompts, retailer placement, hook, caption,
+            and hashtags. Runs in parallel ({MAX_CONCURRENCY} at a time).
+            The deterministic UK prompt fallback below works without an
+            API key.
           </p>
         </div>
         <Link
@@ -107,7 +226,7 @@ export default function AiPromptsPanel({
             className="field mt-1"
             value={mode}
             onChange={(e) => setMode(e.target.value as "missing" | "all")}
-            disabled={pending}
+            disabled={aiRunning || pendingManual}
           >
             <option value="missing">Products missing imagePrompt</option>
             <option value="all">All products (overwrite)</option>
@@ -120,15 +239,17 @@ export default function AiPromptsPanel({
             disabled={disabledAi}
             onClick={runAi}
           >
-            {pending ? "Generating…" : "Generate AI Prompts"}
+            {aiRunning
+              ? `Generating… ${counts.done + counts.failed}/${counts.total}`
+              : "Generate AI Prompts"}
           </button>
           <button
             type="button"
             className="btn"
-            disabled={pending}
+            disabled={pendingManual || aiRunning}
             onClick={runManual}
           >
-            {pending ? "…" : "Use deterministic UK prompts"}
+            {pendingManual ? "…" : "Use deterministic UK prompts"}
           </button>
         </div>
       </div>
@@ -145,80 +266,121 @@ export default function AiPromptsPanel({
 
       {error && <div className="text-xs text-bad">⚠ {error}</div>}
 
-      {aiReport && (
-        <ReportPanel
-          provider={aiReport.provider}
-          message={aiReport.message}
-          generated={aiReport.generated}
-          skipped={aiReport.skipped}
-          failed={aiReport.failed}
-          failures={aiReport.failures}
-        />
+      {/* Live AI progress list. Shows while a run is in flight AND
+          after it completes so the user can review what happened
+          without scrolling away. Cleared when the user starts the
+          next run or switches to the manual button. */}
+      {rowStates.size > 0 && (
+        <div className="rounded-2xl border border-border bg-panel2 p-4 space-y-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <StatusChip
+              label={
+                aiRunning
+                  ? `running ${counts.done + counts.failed}/${counts.total}`
+                  : counts.failed > 0
+                    ? "completed with errors"
+                    : "completed"
+              }
+              variant={
+                aiRunning ? "warn" : counts.failed > 0 ? "warn" : "ok"
+              }
+            />
+            <Stat label="Done" value={counts.done} tone="ok" />
+            <Stat label="Failed" value={counts.failed} tone={counts.failed ? "bad" : "muted"} />
+            <Stat label="Running" value={counts.running} tone={counts.running ? "accent" : "muted"} />
+            <Stat label="Queued" value={counts.queued} tone="muted" />
+          </div>
+          <ul className="divide-y divide-border max-h-72 overflow-y-auto">
+            {products
+              .filter((p) => rowStates.has(p.id))
+              .map((p) => {
+                const state = rowStates.get(p.id)!;
+                return (
+                  <ProgressRow
+                    key={p.id}
+                    productName={p.productName}
+                    state={state}
+                    onRetry={
+                      state.kind === "failed"
+                        ? () => retryProduct(p.id)
+                        : undefined
+                    }
+                  />
+                );
+              })}
+          </ul>
+        </div>
       )}
+
       {manualReport && (
-        <ReportPanel
-          provider="manual"
-          message={manualReport.message}
-          generated={manualReport.generated}
-          skipped={manualReport.skipped}
-        />
+        <div className="rounded-2xl border border-border bg-panel2 p-4 space-y-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <StatusChip label="completed" variant="ok" />
+            <span className="text-xs text-text">{manualReport.message}</span>
+            <span className="text-[11px] text-muted ml-auto">
+              provider: manual
+            </span>
+          </div>
+          <div className="grid grid-cols-2 gap-3 text-xs">
+            <Stat label="Generated" value={manualReport.generated} tone="ok" />
+            <Stat label="Skipped" value={manualReport.skipped} tone="muted" />
+          </div>
+        </div>
       )}
     </section>
   );
 }
 
-function ReportPanel({
-  provider,
-  message,
-  generated,
-  skipped,
-  failed,
-  failures,
+function ProgressRow({
+  productName,
+  state,
+  onRetry,
 }: {
-  provider: string;
-  message: string;
-  generated: number;
-  skipped: number;
-  failed?: number;
-  failures?: Array<{ productName: string; reason: string }>;
+  productName: string;
+  state: RowState;
+  onRetry?: () => void;
 }) {
+  const label =
+    state.kind === "queued"
+      ? "queued"
+      : state.kind === "running"
+        ? "running…"
+        : state.kind === "done"
+          ? state.message
+          : state.message;
+  const dot =
+    state.kind === "queued"
+      ? "○"
+      : state.kind === "running"
+        ? "◐"
+        : state.kind === "done"
+          ? "✓"
+          : "✗";
+  const tone =
+    state.kind === "queued"
+      ? "text-muted2"
+      : state.kind === "running"
+        ? "text-accent"
+        : state.kind === "done"
+          ? "text-ok"
+          : "text-bad";
   return (
-    <div className="rounded-2xl border border-border bg-panel2 p-4 space-y-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <StatusChip
-          label={failed ? "completed with errors" : "completed"}
-          variant={failed ? "warn" : "ok"}
-        />
-        <span className="text-xs text-text">{message}</span>
-        <span className="text-[11px] text-muted ml-auto">
-          provider: {provider}
-        </span>
-      </div>
-      <div className="grid grid-cols-3 gap-3 text-xs">
-        <Stat label="Generated" value={generated} tone="ok" />
-        <Stat label="Skipped" value={skipped} tone="muted" />
-        <Stat
-          label="Failed"
-          value={failed ?? 0}
-          tone={failed ? "bad" : "muted"}
-        />
-      </div>
-      {failures && failures.length > 0 && (
-        <details className="text-[11px]">
-          <summary className="cursor-pointer text-muted hover:text-text transition-colors">
-            Failures ({failures.length})
-          </summary>
-          <ul className="mt-2 space-y-1">
-            {failures.map((f, i) => (
-              <li key={i} className="text-muted">
-                <span className="text-text">{f.productName}</span> —{" "}
-                {f.reason}
-              </li>
-            ))}
-          </ul>
-        </details>
+    <li className="py-1.5 flex items-center gap-3 text-xs">
+      <span className={`shrink-0 w-4 text-center ${tone}`}>{dot}</span>
+      <span className="flex-1 min-w-0 truncate text-text">{productName}</span>
+      <span className={`text-[11px] ${tone} text-right truncate max-w-[60%]`}>
+        {label}
+      </span>
+      {onRetry && (
+        <button
+          type="button"
+          className="text-[10px] text-accent hover:underline"
+          onClick={onRetry}
+        >
+          retry
+        </button>
       )}
-    </div>
+    </li>
   );
 }
 
@@ -229,20 +391,22 @@ function Stat({
 }: {
   label: string;
   value: number;
-  tone?: "default" | "ok" | "bad" | "muted";
+  tone?: "default" | "ok" | "bad" | "muted" | "accent";
 }) {
   const cls =
     tone === "ok"
       ? "text-ok"
       : tone === "bad"
         ? "text-bad"
-        : tone === "muted"
-          ? "text-muted"
-          : "text-text";
+        : tone === "accent"
+          ? "text-accent"
+          : tone === "muted"
+            ? "text-muted"
+            : "text-text";
   return (
-    <div>
-      <div className="label">{label}</div>
-      <div className={`text-lg font-semibold mt-0.5 ${cls}`}>{value}</div>
-    </div>
+    <span className="inline-flex items-baseline gap-1 text-[11px]">
+      <span className="text-muted">{label}:</span>
+      <span className={`font-semibold ${cls}`}>{value}</span>
+    </span>
   );
 }

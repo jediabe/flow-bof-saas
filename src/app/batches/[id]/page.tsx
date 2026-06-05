@@ -429,6 +429,11 @@ export default async function BatchDetail({
         provider={aiProvider}
         providerLabel={aiProviderLabel}
         providerHasKey={aiProviderHasKey}
+        products={batch.products.map((p) => ({
+          id: p.id,
+          productName: p.productName,
+          hasPrompt: !!p.imagePrompt,
+        }))}
       />
 
       {/* ----- Mobile Product Review (Phase 4) -------------------- */}

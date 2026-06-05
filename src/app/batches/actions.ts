@@ -1380,3 +1380,161 @@ function emptyAiReport(message: string): AiBulkReport {
     failures: [],
   };
 }
+
+// ---------------------------------------------------------------------
+// AI prompt generation — single product
+// ---------------------------------------------------------------------
+//
+// Counterpart to generateAiPrompts (bulk). Lets the client drive
+// per-product progress: fire N of these in parallel (with a small
+// concurrency cap), update a Map<productId, status> as each
+// resolves, and show a live progress list. Also powers the inline
+// "Regenerate" button on each product card.
+
+export interface AiSingleResult {
+  ok: boolean;
+  /** When ok, the productId we updated (echoed back so the client
+   *  can route the result to the right row without re-deriving). */
+  productId: string;
+  /** Free-form summary — "generated", "skipped (already had prompt)",
+   *  or the failure reason. Surfaced in the per-product progress UI. */
+  message: string;
+  /** Provider that was actually used (echoes settings.provider). */
+  provider: string;
+}
+
+/**
+ * Run the configured AI provider against ONE product. The client
+ * orchestrates parallelism + progress; this action is intentionally
+ * focused on a single row.
+ *
+ * `force` controls "regenerate even if there's already a prompt"
+ * (the regenerate button on the product card sets it; the bulk
+ * "missing only" mode doesn't).
+ *
+ * Workspace-scoped via the batch — re-resolves so a stale client
+ * can't drive AI generation on a product in another tenant.
+ */
+export async function generateAiPromptForProduct(input: {
+  batchId: string;
+  productId: string;
+  /** When true, regenerate even if the product already has a prompt.
+   *  When false (default), products with a prompt are skipped — useful
+   *  for the bulk "missing only" mode driven from the client. */
+  force?: boolean;
+}): Promise<AiSingleResult> {
+  const { batchId, productId, force = false } = input;
+  if (!batchId || !productId) {
+    return {
+      ok: false,
+      productId,
+      message: "missing batchId or productId",
+      provider: "",
+    };
+  }
+
+  const { workspace } = await getCurrentWorkspace();
+  const batch = await db.batch.findFirst({
+    where: { id: batchId, workspaceId: workspace.id },
+    select: { id: true, market: true },
+  });
+  if (!batch) {
+    return { ok: false, productId, message: "batch not found", provider: "" };
+  }
+
+  const batchMarket: "uk" | "us" = batch.market === "us" ? "us" : "uk";
+
+  const product = await db.product.findFirst({
+    where: { id: productId, batchId: batch.id, deletedAt: null },
+    select: {
+      id: true,
+      productName: true,
+      originalTitle: true,
+      category: true,
+      retailerName: true,
+      tiktokUrl: true,
+      referenceImageUrl: true,
+      imagePrompt: true,
+      market: true,
+    },
+  });
+  if (!product) {
+    return { ok: false, productId, message: "product not found", provider: "" };
+  }
+
+  const settingsRow = await loadOrCreateSettings(workspace.id);
+  const settings = toServerSettings(settingsRow);
+
+  if (product.imagePrompt && !force) {
+    return {
+      ok: true,
+      productId,
+      message: "skipped (already had a prompt)",
+      provider: settings.provider,
+    };
+  }
+
+  const effectiveMarket: "uk" | "us" =
+    product.market === "us"
+      ? "us"
+      : product.market === "uk"
+        ? "uk"
+        : batchMarket;
+
+  try {
+    const { output } = await callProvider(
+      {
+        productName:       product.productName,
+        originalTitle:     product.originalTitle,
+        category:          product.category,
+        retailerName:      product.retailerName,
+        tiktokUrl:         product.tiktokUrl,
+        referenceImageUrl: product.referenceImageUrl,
+        market:            effectiveMarket,
+      },
+      settings,
+    );
+    await db.product.update({
+      where: { id: productId },
+      data: {
+        imagePrompt:         output.imagePrompt,
+        retailerName:        output.retailerName,
+        hook:                output.hook ?? null,
+        caption:             output.caption ?? null,
+        hashtags:            output.hashtags
+          ? encodeJson(output.hashtags)
+          : null,
+        productDescription:  output.productDescription ?? null,
+        aiPromptError:       null,
+        aiPromptGeneratedAt: new Date(),
+      },
+    });
+    revalidatePath(`/batches/${batchId}`);
+    return {
+      ok: true,
+      productId,
+      message: "generated",
+      provider: settings.provider,
+    };
+  } catch (err) {
+    const e = err as Error;
+    const reason = `${e.name}: ${String(e.message ?? e).slice(0, 200)}`;
+    // Best-effort: record the failure on the row so the user sees it
+    // even after the client-side progress UI clears.
+    try {
+      await db.product.update({
+        where: { id: productId },
+        data: { aiPromptError: reason },
+      });
+    } catch {
+      // row vanished mid-run; nothing to do
+    }
+    revalidatePath(`/batches/${batchId}`);
+    return {
+      ok: false,
+      productId,
+      message: reason,
+      provider: settings.provider,
+    };
+  }
+}
