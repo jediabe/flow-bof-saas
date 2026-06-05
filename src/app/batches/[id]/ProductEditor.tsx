@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useEffect, useState, useTransition } from "react";
 import StatusChip from "@/components/StatusChip";
 import {
   UK_RETAILER_FALLBACK,
@@ -114,6 +114,40 @@ export default function ProductEditor({
     referenceImagePathLocal: product.referenceImagePathLocal ?? "",
     imagePrompt:             product.imagePrompt ?? "",
   });
+
+  // Sync the local draft when the underlying product changes
+  // externally (a server action ran — e.g. the bulk
+  // 'Generate AI prompts' button populated imagePrompt /
+  // retailerName from the AI provider). Without this, the local
+  // useState initialiser only fires on first mount, so an editor
+  // that was opened before the action ran would still show the
+  // pre-action draft state — looks like the AI did nothing even
+  // though the DB has the new prompt.
+  //
+  // Effect runs whenever any of the AI-populated fields change.
+  // Doesn't touch fields the user might be mid-editing (product
+  // name, category, etc.) unless those changed server-side too.
+  useEffect(() => {
+    setDraft((d) => ({
+      ...d,
+      productName:    product.productName,
+      originalTitle:  product.originalTitle ?? "",
+      tiktokUrl:      product.tiktokUrl ?? "",
+      category:       product.category ?? "",
+      retailerName:   product.retailerName ?? UK_RETAILER_FALLBACK,
+      imagePrompt:    product.imagePrompt ?? "",
+    }));
+    // Intentionally NOT including the setter — React state setters
+    // are stable. The eslint exhaustive-deps lint won't fire on
+    // these.
+  }, [
+    product.productName,
+    product.originalTitle,
+    product.tiktokUrl,
+    product.category,
+    product.retailerName,
+    product.imagePrompt,
+  ]);
 
   // "Ready" = the runner has *something* to send: either a SaaS-hosted
   // reference URL or a local override path, plus a prompt. The video
