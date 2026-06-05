@@ -213,6 +213,13 @@ model Product {
   // Image / video generation queries filter to reviewStatus="approved"
   // by default; GenerateImagesPanel exposes an override.
   reviewStatus       String   @default("needs_review")
+  // Phase-5 mobile posting workflow status. Independent of
+  // reviewStatus — defaults to "needs_posting" until the user
+  // marks it posted via the mobile posting QR page.
+  //   needs_posting | posted | skipped
+  postingStatus      String   @default("needs_posting")
+  // Free-form notes from the mobile posting page. Optional.
+  postingNotes       String?
   // Soft delete. Non-null means hidden from default queries. Never
   // hard-delete a Product row so that linked Job/JobEvent rows and
   // the audit trail stay intact.

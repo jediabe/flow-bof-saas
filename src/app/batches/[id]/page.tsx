@@ -18,6 +18,7 @@ import { addProduct, deleteBatch, setBatchMarket } from "../actions";
 import BatchWorkbench from "./BatchWorkbench";
 import GenerateImagesPanel from "./GenerateImagesPanel";
 import MobileReviewQRCard from "./MobileReviewQRCard";
+import MobilePostingQRCard from "./MobilePostingQRCard";
 import { headers } from "next/headers";
 import KalodataImportPanel from "./KalodataImportPanel";
 import AiPromptsPanel from "./AiPromptsPanel";
@@ -415,6 +416,23 @@ export default async function BatchDetail({
         reviewBaseUrl={await _reviewBaseUrl()}
         needsReviewCount={
           batch.products.filter((p) => p.reviewStatus === "needs_review").length
+        }
+      />
+
+      {/* ----- Mobile Posting Assist (Phase 5) -------------------- */}
+      <MobilePostingQRCard
+        batchId={batch.id}
+        postingToken={batch.postingToken}
+        postingBaseUrl={await _reviewBaseUrl()}
+        approvedCount={
+          batch.products.filter((p) => p.reviewStatus === "approved").length
+        }
+        needsPostingCount={
+          batch.products.filter(
+            (p) =>
+              p.reviewStatus === "approved" &&
+              p.postingStatus === "needs_posting",
+          ).length
         }
       />
 

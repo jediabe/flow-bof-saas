@@ -486,6 +486,155 @@ export async function softDeleteProductViaToken(input: {
 }
 
 // ---------------------------------------------------------------------
+// Phase-5 mobile posting-assist QR
+// ---------------------------------------------------------------------
+
+const POSTING_STATUSES = new Set([
+  "needs_posting",
+  "posted",
+  "skipped",
+] as const);
+type PostingStatus = "needs_posting" | "posted" | "skipped";
+
+/**
+ * Ensure the batch has a mobile-posting token; mint one if not.
+ * Mirror of getOrCreateBatchReviewToken — same anyone-with-URL
+ * auth model, separate token field on Batch.postingToken so
+ * rotating the review token doesn't invalidate the posting URL
+ * or vice versa.
+ */
+export async function getOrCreateBatchPostingToken(
+  batchId: string,
+): Promise<{ ok: boolean; token: string | null; message?: string }> {
+  if (!batchId) return { ok: false, token: null, message: "missing batchId" };
+  const { workspace } = await getCurrentWorkspace();
+  const batch = await db.batch.findFirst({
+    where: { id: batchId, workspaceId: workspace.id },
+    select: { id: true, postingToken: true },
+  });
+  if (!batch) return { ok: false, token: null, message: "batch not found" };
+
+  if (batch.postingToken) {
+    return { ok: true, token: batch.postingToken };
+  }
+
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const token = _generateReviewToken();
+    try {
+      await db.batch.update({
+        where: { id: batch.id },
+        data:  { postingToken: token },
+      });
+      revalidatePath(`/batches/${batchId}`);
+      return { ok: true, token };
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      if (code !== "P2002") throw err;
+      continue;
+    }
+  }
+  return {
+    ok: false,
+    token: null,
+    message:
+      "Could not allocate a unique posting token after 4 attempts. " +
+      "Try again.",
+  };
+}
+
+/** Force-mint a new posting token, invalidating the existing URL. */
+export async function rotateBatchPostingToken(
+  formData: FormData,
+): Promise<void> {
+  const batchId = String(formData.get("batchId") || "");
+  if (!batchId) return;
+  const { workspace } = await getCurrentWorkspace();
+  const batch = await db.batch.findFirst({
+    where: { id: batchId, workspaceId: workspace.id },
+    select: { id: true },
+  });
+  if (!batch) return;
+
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const token = _generateReviewToken();
+    try {
+      await db.batch.update({
+        where: { id: batch.id },
+        data:  { postingToken: token },
+      });
+      revalidatePath(`/batches/${batchId}`);
+      return;
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      if (code !== "P2002") throw err;
+      continue;
+    }
+  }
+}
+
+/**
+ * Public posting-status action invoked from the mobile posting
+ * page. Authenticates by token, not session cookie. Sets
+ * Product.postingStatus to one of:
+ *   needs_posting | posted | skipped
+ *
+ * Optional notes are persisted to Product.postingNotes — the
+ * shopper-style page lets the user leave a remark without
+ * exposing it on the owner-facing dashboard until they want it.
+ */
+export async function setProductPostingStatusViaToken(input: {
+  token: string;
+  productId: string;
+  status: string;
+  notes?: string | null;
+}): Promise<{ ok: boolean; message?: string }> {
+  const { token, productId, status, notes } = input;
+  if (!token || !productId) {
+    return { ok: false, message: "missing parameters" };
+  }
+  if (!POSTING_STATUSES.has(status as PostingStatus)) {
+    return { ok: false, message: "invalid status" };
+  }
+
+  const batch = await db.batch.findUnique({
+    where: { postingToken: token },
+    select: { id: true },
+  });
+  if (!batch) {
+    return { ok: false, message: "invalid posting link" };
+  }
+
+  const product = await db.product.findFirst({
+    where: { id: productId, batchId: batch.id, deletedAt: null },
+    select: { id: true },
+  });
+  if (!product) {
+    return { ok: false, message: "product not found in batch" };
+  }
+
+  const updateData: { postingStatus: string; postingNotes?: string | null } = {
+    postingStatus: status,
+  };
+  // Only touch postingNotes when the caller explicitly passes one;
+  // undefined means "leave existing notes alone." Empty string
+  // means "clear the notes" (intentional clear).
+  if (notes !== undefined) {
+    updateData.postingNotes =
+      typeof notes === "string" && notes.trim().length > 0
+        ? notes.trim()
+        : null;
+  }
+
+  await db.product.update({
+    where: { id: product.id },
+    data:  updateData,
+  });
+  revalidatePath(`/mobile-posting/${token}`);
+  revalidatePath(`/batches/${batch.id}`);
+  return { ok: true };
+}
+
+// ---------------------------------------------------------------------
 // Kalodata import
 // ---------------------------------------------------------------------
 

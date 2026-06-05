@@ -209,6 +209,17 @@ model Product {
   // by default; the GenerateImagesPanel exposes an "include
   // not-approved" override.
   reviewStatus            String    @default("needs_review")
+  // Phase-5 mobile posting workflow status. Independent of
+  // reviewStatus — a product can be "approved" for generation AND
+  // separately "posted" after the user has uploaded its video to
+  // TikTok. Defaults to "needs_posting" for every product until
+  // the user marks it posted via the mobile QR page.
+  //   needs_posting | posted | skipped
+  postingStatus           String    @default("needs_posting")
+  // Free-form notes captured from the mobile posting page —
+  // optional shopper-style remarks ("posted at 2pm", "swapped a
+  // hashtag", etc.). Nullable; never required.
+  postingNotes            String?
   // Soft delete. Non-null means hidden from default queries. We
   // never hard-delete a Product row so that linked Job/JobEvent
   // rows + the audit trail stay intact.
