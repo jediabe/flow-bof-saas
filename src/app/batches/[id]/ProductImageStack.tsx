@@ -10,19 +10,18 @@ import {
 /**
  * Phase 3 — multi-reference image stack on the product card.
  *
- * Renders up to 3 reference image slots (primary / ref2 / ref3) and
- * a paste-anywhere overlay that lets the user copy an image from
- * Kalodata (or any other source) and Ctrl-V it directly onto the
- * card. Drag/drop + click-to-pick are fallbacks.
+ * Renders up to 3 reference image slots (primary / ref2 / ref3).
+ * Paste-anywhere + drag/drop are handled by the PARENT product card
+ * wrapper (ProductEditor) so the user can paste regardless of which
+ * child of the card has focus. This component only owns:
+ *   - the slot visuals (thumbnail + ★/role badge)
+ *   - per-slot click-to-pick (file browser fallback)
+ *   - per-slot hover controls (remove / promote)
  *
- * The stack lives inside a focusable container on the product card —
- * the paste event only fires when the card has focus, so a user with
- * one card focused can paste an image and have it land on THAT card,
- * even though the browser's paste handler is global.
- *
- * Server interaction is via Server Actions (attach / remove / promote)
- * — no fetch, no API route. Path revalidation on the server keeps
- * the parent page's product list in sync.
+ * Server interaction is via Server Actions (remove / promote +
+ * attach via the file picker) — no fetch, no API route. Path
+ * revalidation on the server keeps the parent page's product list in
+ * sync.
  */
 export interface ProductImageRow {
   id: string;
@@ -49,8 +48,6 @@ export default function ProductImageStack({
 }) {
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
-  const [isDragOver, setIsDragOver] = useState(false);
-  const [focused, setFocused] = useState(false);
   const pickerRef = useRef<HTMLInputElement | null>(null);
 
   // Build a Map<role, ProductImageRow> for fast lookup. Roles that
@@ -95,45 +92,6 @@ export default function ProductImageStack({
     });
   }
 
-  // Paste handler — fires on the focusable container. The paste event
-  // carries a clipboardData.items array; we grab the first image-typed
-  // entry. The user might also paste text (URL or filename) — we
-  // intentionally don't handle that here (URL upload is a future
-  // enhancement). The default browser paste is preventDefault'd only
-  // for image items so text paste in unrelated focused inputs still
-  // works.
-  function onPaste(e: React.ClipboardEvent<HTMLDivElement>) {
-    if (!e.clipboardData) return;
-    for (const item of e.clipboardData.items) {
-      if (item.kind === "file" && item.type.startsWith("image/")) {
-        const file = item.getAsFile();
-        if (file) {
-          e.preventDefault();
-          attach(file, "paste");
-          return;
-        }
-      }
-    }
-  }
-
-  function onDrop(e: React.DragEvent<HTMLDivElement>) {
-    e.preventDefault();
-    setIsDragOver(false);
-    const file = e.dataTransfer.files?.[0];
-    if (file && file.type.startsWith("image/")) {
-      attach(file, "upload");
-    } else if (file) {
-      setError(`Not an image: ${file.type || "unknown type"}`);
-    }
-  }
-
-  function onDragOver(e: React.DragEvent<HTMLDivElement>) {
-    if (Array.from(e.dataTransfer.items).some((i) => i.kind === "file")) {
-      e.preventDefault();
-      setIsDragOver(true);
-    }
-  }
-
   function onPick(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (file) attach(file, "upload");
@@ -141,33 +99,9 @@ export default function ProductImageStack({
     e.target.value = "";
   }
 
-  // Focus indicator + paste-binding: make the container tab-focusable
-  // so onPaste fires reliably. Note that onPaste also bubbles up from
-  // any child input, so an active text field on the card might
-  // intercept the paste first — that's fine, image paste in an input
-  // does nothing useful anyway. The card-level handler is for "paste
-  // onto the card chrome itself."
   return (
     <div
-      tabIndex={0}
-      onFocus={() => setFocused(true)}
-      onBlur={() => setFocused(false)}
-      onPaste={onPaste}
-      onDrop={onDrop}
-      onDragOver={onDragOver}
-      onDragLeave={() => setIsDragOver(false)}
-      className={`flex flex-col gap-1.5 rounded-xl p-1 outline-none transition-all ${
-        isDragOver
-          ? "ring-2 ring-accent bg-accent/[0.06]"
-          : focused
-            ? "ring-1 ring-accent/40"
-            : ""
-      } ${pending ? "opacity-60" : ""}`}
-      title={
-        focused
-          ? "Paste an image (Ctrl-V) or drop a file to add a reference."
-          : "Click to focus, then paste / drop an image."
-      }
+      className={`flex flex-col gap-1.5 ${pending ? "opacity-60" : ""}`}
     >
       {ROLES.map((role) => {
         const img = byRole.get(role);

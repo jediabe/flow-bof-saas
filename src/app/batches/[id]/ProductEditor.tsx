@@ -13,6 +13,7 @@ import {
   deleteProduct,
   restoreProduct,
   setProductReviewStatus,
+  attachProductImageFromBlob,
 } from "../actions";
 import ProductImageStack, {
   type ProductImageRow,
@@ -110,6 +111,64 @@ export default function ProductEditor({
 }) {
   const [expanded, setExpanded] = useState(false);
   const [pending, startTransition] = useTransition();
+  // Card-level paste/drop state. Lives at the card level (not on the
+  // ProductImageStack) so a paste fires regardless of which child has
+  // focus — clicking the text area or chevron also unlocks pasting.
+  // Without this, the user had to specifically click the image stack
+  // first, which wasn't discoverable.
+  const [pasteBusy, startPasteTransition] = useTransition();
+  const [pasteError, setPasteError] = useState<string | null>(null);
+  const [dragOver, setDragOver] = useState(false);
+
+  function attachBlob(blob: Blob, source: "paste" | "upload") {
+    setPasteError(null);
+    const fd = new FormData();
+    fd.set("productId", product.id);
+    fd.set("batchId", batchId);
+    fd.set("role", "auto");
+    fd.set("source", source);
+    fd.set("image", blob);
+    startPasteTransition(async () => {
+      const r = await attachProductImageFromBlob(fd);
+      if (!r.ok) setPasteError(r.message);
+    });
+  }
+
+  function onCardPaste(e: React.ClipboardEvent<HTMLDivElement>) {
+    if (!e.clipboardData) return;
+    // Walk the clipboard items; first image-typed file wins. Text
+    // pastes (URL, filename, etc.) are intentionally ignored — they
+    // pass through to whichever input the user has focused. That
+    // means pasting text INTO the prompt textarea still works.
+    for (const item of e.clipboardData.items) {
+      if (item.kind === "file" && item.type.startsWith("image/")) {
+        const file = item.getAsFile();
+        if (file) {
+          e.preventDefault();
+          attachBlob(file, "paste");
+          return;
+        }
+      }
+    }
+  }
+
+  function onCardDrop(e: React.DragEvent<HTMLDivElement>) {
+    e.preventDefault();
+    setDragOver(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file && file.type.startsWith("image/")) {
+      attachBlob(file, "upload");
+    } else if (file) {
+      setPasteError(`Not an image: ${file.type || "unknown type"}`);
+    }
+  }
+
+  function onCardDragOver(e: React.DragEvent<HTMLDivElement>) {
+    if (Array.from(e.dataTransfer.items).some((i) => i.kind === "file")) {
+      e.preventDefault();
+      setDragOver(true);
+    }
+  }
 
   const [draft, setDraft] = useState({
     productName:             product.productName,
@@ -220,9 +279,22 @@ export default function ProductEditor({
 
   return (
     <div
-      className={`rounded-2xl border bg-panel2 overflow-hidden transition-colors ${
-        expanded ? "border-accent/50" : "border-border"
-      }`}
+      tabIndex={0}
+      onPaste={onCardPaste}
+      onDrop={onCardDrop}
+      onDragOver={onCardDragOver}
+      onDragLeave={() => setDragOver(false)}
+      className={`rounded-2xl border bg-panel2 overflow-hidden transition-colors outline-none ${
+        dragOver
+          ? "border-accent ring-2 ring-accent/40"
+          : expanded
+            ? "border-accent/50"
+            : "border-border focus-within:border-accent/30"
+      } ${pasteBusy ? "opacity-70" : ""}`}
+      // The whole card is focusable so a click anywhere unlocks
+      // Ctrl-V. Without tabIndex the paste event has nothing to fire
+      // on for clicks outside child buttons. Visual feedback comes
+      // from focus-within on the border.
     >
       {/* Image stack + summary header. NOT wrapped in a <button>
           because the stack has its own interactive controls (remove /
@@ -290,6 +362,21 @@ export default function ProductEditor({
           {expanded ? "▲" : "▼"}
         </button>
       </div>
+
+      {/* Card-level paste feedback. Only renders when there's an
+          error or active upload so it doesn't add noise to idle
+          cards. The image-stack itself shows pending opacity for
+          slot-level actions; this row is for the paste/drop path. */}
+      {(pasteBusy || pasteError) && (
+        <div className="px-3 pb-2 -mt-1 text-[10px] leading-tight">
+          {pasteBusy && (
+            <span className="text-accent">Uploading pasted image…</span>
+          )}
+          {pasteError && (
+            <span className="text-bad">⚠ {pasteError}</span>
+          )}
+        </div>
+      )}
 
       {/* Expanded editor --------------------------------------------- */}
       {expanded && (
