@@ -15,7 +15,8 @@ export interface ImageGenAgent {
 export interface ImageGenProduct {
   id: string;
   productName: string;
-  /** SaaS-hosted reference URL (preferred). Absolute or `/uploads/...`. */
+  /** SaaS-hosted reference URL (preferred). Absolute or `/uploads/...`.
+   *  This is the primary cache; multi-ref payload prefers `images`. */
   referenceImageUrl: string | null;
   /** Local override path (debug/fallback only). */
   referenceImagePathLocal: string | null;
@@ -28,6 +29,21 @@ export interface ImageGenProduct {
    * | "maybe".
    */
   reviewStatus: string;
+  /**
+   * Phase 3 — full reference-image list (up to 3 roles: primary /
+   * ref2 / ref3). Sent as `reference_images: [{role, url, path}]` in
+   * the runner payload. The runner attaches them in role order via
+   * Flow's "add image to prompt" path.
+   *
+   * Empty list = use the legacy single-image fields. A runner that
+   * predates Phase 3 will ignore this array; the legacy fields keep
+   * working.
+   */
+  images?: Array<{
+    role: "primary" | "ref2" | "ref3";
+    url: string | null;
+    pathLocal: string | null;
+  }>;
 }
 
 export interface LastImageJobSummary {
@@ -141,6 +157,23 @@ export default function GenerateImagesPanel({
         // exists, falls back to the URL otherwise. Useful when a
         // power user has cached a local copy.
         item.reference_image_path = p.referenceImagePathLocal;
+      }
+      // Phase 3 — full multi-reference array. The legacy fields
+      // above stay populated (= the primary image) for back-compat
+      // with older runners; new runners prefer this array. Roles are
+      // sent in canonical order ("primary" first) so a runner that
+      // walks the list left-to-right attaches the hero shot before
+      // ref2/ref3. URLs are made absolute here, same as the legacy
+      // path, so the runner doesn't need to know about
+      // AGENT_ASSET_BASE_URL.
+      if (p.images && p.images.length > 0) {
+        item.reference_images = p.images
+          .filter((img) => img.url || img.pathLocal)
+          .map((img) => ({
+            role: img.role,
+            url:  img.url ? makeAbsolute(img.url) : null,
+            path: img.pathLocal,
+          }));
       }
       return item;
     });

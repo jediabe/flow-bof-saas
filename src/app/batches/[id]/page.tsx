@@ -524,6 +524,24 @@ export default async function BatchDetail({
                       referenceImagePathLocal: p.referenceImagePathLocal,
                       imagePrompt:             p.imagePrompt,
                       reviewStatus:            p.reviewStatus,
+                      // Phase 3 — pass through the full reference-
+                      // image list. Filter to known roles defensively.
+                      images: p.images
+                        .filter(
+                          (
+                            i,
+                          ): i is typeof i & {
+                            role: "primary" | "ref2" | "ref3";
+                          } =>
+                            i.role === "primary" ||
+                            i.role === "ref2" ||
+                            i.role === "ref3",
+                        )
+                        .map((i) => ({
+                          role: i.role,
+                          url: i.url,
+                          pathLocal: i.pathLocal,
+                        })),
                     }))}
                     agentAssetBaseUrl={agentAssetBaseUrl}
                     lastJob={
