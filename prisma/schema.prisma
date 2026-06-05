@@ -230,6 +230,56 @@ model Product {
   // value when null.
   market                  String?
   promptPreset            String?
+
+  // Phase 9 — IP / trademark risk screening.
+  //
+  // This is a CONSERVATIVE screening tool, not legal advice. The
+  // SaaS uses these fields to flag potentially counterfeit /
+  // brand-impersonating / IP-infringing products BEFORE wasting
+  // Flow credits on content for them. Two-layer detection:
+  //   1. Deterministic heuristic (always runs, no API key)
+  //   2. Optional AI-assisted second opinion (manual trigger only,
+  //      to avoid surprise AI bills on every Kalodata import)
+  // When both run, the higher risk score wins.
+  //
+  // Hard rule from the spec: messaging says "potential IP/trademark
+  // risk detected; review manually before generating content." It
+  // NEVER says "this product is illegal."
+  //
+  // Status transitions:
+  //   unchecked → low | medium | high | needs_manual_review
+  // High and needs_manual_review are excluded from image generation
+  // by default; the user can override per-product with
+  // ipRiskOverride=true + a written ipRiskOverrideReason.
+  ipRiskStatus            String    @default("unchecked")
+  // JSON-encoded array of human-readable reasons, e.g.
+  //   ["Contains famous brand term: Nike",
+  //    "Contains imitation phrase: designer inspired"]
+  // Read with parseJson<string[]>(p.ipRiskReasons) on the consumer
+  // side. SQLite has no array type; same pattern as the hashtags
+  // column. Nullable because "unchecked" products have nothing to
+  // say yet.
+  ipRiskReasons           String?
+  // When the last check ran. Null when status is "unchecked".
+  // Used so the UI can show "checked 2 hours ago" and so a stale
+  // check can be re-run after the product was edited.
+  ipRiskCheckedAt         DateTime?
+  // User override: when true, the product is eligible for
+  // generation even if ipRiskStatus is "high" or
+  // "needs_manual_review". Defaults to false; the override form
+  // requires a written reason captured below.
+  ipRiskOverride          Boolean   @default(false)
+  // Free-form text from the user explaining why they're allowing
+  // a high-risk product through (e.g. "verified official seller
+  // with brand authorization", "generic compatibility product,
+  // not infringing"). Required when ipRiskOverride=true is set on
+  // a "high" or "needs_manual_review" row.
+  ipRiskOverrideReason    String?
+  // Timestamp the override was last set / changed. Audit trail —
+  // we keep this so a future review can tell when a decision was
+  // made and by which session.
+  ipRiskOverrideAt        DateTime?
+
   createdAt               DateTime  @default(now())
   updatedAt               DateTime  @updatedAt
 
@@ -243,6 +293,11 @@ model Product {
   @@index([batchId])
   @@index([reviewStatus])
   @@index([deletedAt])
+  // Phase 9 — speeds up the batch-page filter dropdown + summary
+  // counts (low/medium/high/needs_review per batch). Without the
+  // index, each render scans the whole products table on a busy
+  // workspace.
+  @@index([ipRiskStatus])
 }
 
 // Phase 3 — additional reference images for a Product. Up to three
