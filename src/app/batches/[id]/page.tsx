@@ -27,6 +27,7 @@ import ProductEditor, {
   type ProductRow,
   type SubmittedStatus,
 } from "./ProductEditor";
+import BatchTabs from "./BatchTabs";
 
 export const dynamic = "force-dynamic";
 
@@ -328,6 +329,11 @@ export default async function BatchDetail({
           ? masked.openrouter.keySet
           : true;
 
+  // Resolve the public origin once and reuse for both QR cards.
+  // Previously this was awaited inline twice; now both Mobile share
+  // QR cards share the same value.
+  const baseUrl = await _reviewBaseUrl();
+
   return (
     <div className="space-y-8">
       <header className="flex items-baseline justify-between gap-4">
@@ -420,246 +426,297 @@ export default async function BatchDetail({
         />
       </div>
 
-      {/* ----- Kalodata import --------------------------------------- */}
-      <KalodataImportPanel batchId={batch.id} />
-
-      {/* ----- AI prompt generation ---------------------------------- */}
-      <AiPromptsPanel
-        batchId={batch.id}
-        provider={aiProvider}
-        providerLabel={aiProviderLabel}
-        providerHasKey={aiProviderHasKey}
-        products={batch.products.map((p) => ({
-          id: p.id,
-          productName: p.productName,
-          hasPrompt: !!p.imagePrompt,
-        }))}
-      />
-
-      {/* ----- Mobile Product Review (Phase 4) -------------------- */}
-      <MobileReviewQRCard
-        batchId={batch.id}
-        reviewToken={batch.reviewToken}
-        reviewBaseUrl={await _reviewBaseUrl()}
-        needsReviewCount={
-          batch.products.filter((p) => p.reviewStatus === "needs_review").length
-        }
-      />
-
-      {/* ----- Mobile Posting Assist (Phase 5) -------------------- */}
-      <MobilePostingQRCard
-        batchId={batch.id}
-        postingToken={batch.postingToken}
-        postingBaseUrl={await _reviewBaseUrl()}
-        approvedCount={
-          batch.products.filter((p) => p.reviewStatus === "approved").length
-        }
-        needsPostingCount={
-          batch.products.filter(
-            (p) =>
-              p.reviewStatus === "approved" &&
-              p.postingStatus === "needs_posting",
-          ).length
-        }
-      />
-
-      {/* ----- Products section -------------------------------------- */}
-      <Panel
-        title={`Products (${productRows.length})`}
-        action={
-          <div className="flex items-baseline gap-3 text-[11px] text-muted">
-            <span className="text-ok">{readyCount} ready</span>
-            {missingPromptCount > 0 && (
-              <span className="text-warn">{missingPromptCount} no prompt</span>
-            )}
-            {missingRefCount > 0 && (
-              <span className="text-warn">{missingRefCount} no reference</span>
-            )}
-            <a
-              href="#add-product"
-              className="text-accent hover:underline ml-1"
-            >
-              Add manually ↓
-            </a>
-          </div>
-        }
-      >
-        {productRows.length === 0 ? (
-          <EmptyState
-            icon="◇"
-            title="No products yet"
-            hint="Add a product below to give the runner something to work with."
-          />
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            {productRows.map((p) => (
-              <ProductEditor key={p.id} batchId={batch.id} product={p} />
-            ))}
-          </div>
-        )}
-      </Panel>
-
-      {/* ----- Generate Product Images ------------------------------ */}
-      {agents.length === 0 ? (
-        <Panel title="Generate Product Images">
-          <EmptyState
-            icon="◆"
-            title="No runner registered"
-            hint="Register a local runner before you can drive Flow from this batch."
-            action={
-              <Link href="/agents" className="btn btn-primary">
-                Open Runner
-              </Link>
-            }
-          />
-        </Panel>
-      ) : (
-        <GenerateImagesPanel
-          batchId={batch.id}
-          agents={agents.map((a) => ({
-            id:     a.id,
-            name:   a.name,
-            status: a.status,
-          }))}
-          products={batch.products.map((p) => ({
-            id:                      p.id,
-            productName:             p.productName,
-            referenceImageUrl:       p.referenceImageUrl,
-            referenceImagePathLocal: p.referenceImagePathLocal,
-            imagePrompt:             p.imagePrompt,
-            // Phase 1: eligibility filter now defaults to
-            // reviewStatus=="approved". Carry the field through so
-            // the panel can apply the filter (and show an override
-            // checkbox for "include not-approved").
-            reviewStatus:            p.reviewStatus,
-          }))}
-          agentAssetBaseUrl={agentAssetBaseUrl}
-          lastJob={
-            lastImageRun && imageSummary
-              ? {
-                  jobId:     lastImageRun.id,
-                  createdAt: lastImageRun.createdAt.toISOString(),
-                  submitted: imageSummary.submitted ?? 0,
-                  failed:    imageSummary.failed ?? 0,
-                  total:     imageSummary.items?.length ?? 0,
-                }
-              : null
-          }
-        />
-      )}
-
-      {/* ----- Favorites + Videos workbench -------------------------- */}
-      {agents.length > 0 && (
-        <BatchWorkbench
-          batchId={batch.id}
-          agents={agents}
-          scanSummary={{
-            favoritedImages: favoritedImagesLive,
-            tilesScanned: scanSummary?.tiles_scanned ?? null,
-            lastScanJobId: lastScan?.id ?? null,
-            lastScanAt: favoritedImagesAsOf?.toISOString() ?? null,
-          }}
-          videoSummary={{
-            submitted: videoSummary?.submitted ?? null,
-            skipped: videoSummary?.skipped_already_submitted ?? null,
-            failed: videoSummary?.failed ?? null,
-            lastVideoJobId: lastVideoRun?.id ?? null,
-            lastVideoAt: lastVideoRun?.createdAt?.toISOString() ?? null,
-          }}
-        />
-      )}
-
-      {/* ----- Manual product form (rare path) ------------------------ */}
-      <Panel title="Add product manually" action={<span id="add-product" />}>
-        <form
-          action={addProduct}
-          className="grid grid-cols-1 md:grid-cols-2 gap-3"
-        >
-          <input type="hidden" name="batchId" value={batch.id} />
-          <div>
-            <label className="label">Product name</label>
-            <input className="field" name="productName" required />
-          </div>
-          <div>
-            <label className="label">Category</label>
-            <input className="field" name="category" />
-          </div>
-          <div>
-            <label className="label">TikTok URL</label>
-            <input className="field" name="tiktokUrl" />
-          </div>
-          <div>
-            <label className="label">Retailer / store</label>
-            <input
-              className="field"
-              name="retailerName"
-              placeholder="e.g. boots, sephora_uk (or leave blank)"
-            />
-          </div>
-          <div>
-            <label className="label">Local reference image path</label>
-            <input
-              className="field"
-              name="referenceImagePathLocal"
-              placeholder="inputs/reference_images/01_primary.jpg"
-            />
-          </div>
-          <div>
-            <label className="label">Reference image URL (cloud, optional)</label>
-            <input className="field" name="referenceImageUrl" />
-          </div>
-          <div className="md:col-span-2">
-            <label className="label">Image prompt</label>
-            <textarea className="field" name="imagePrompt" rows={4} />
-          </div>
-          <div className="md:col-span-2">
-            <button className="btn btn-primary" type="submit">
-              Add product
-            </button>
-          </div>
-        </form>
-      </Panel>
-
-      {/* ----- Recent activity --------------------------------------- */}
-      <Panel
-        title={`Activity (${batch.jobs.length})`}
-        action={
-          <Link href="/jobs" className="text-xs text-accent hover:underline">
-            All jobs →
-          </Link>
-        }
-      >
-        {batch.jobs.length === 0 ? (
-          <EmptyState
-            icon="≡"
-            title="No jobs run for this batch yet"
-            hint="Trigger one of the actions above."
-          />
-        ) : (
-          <ul className="divide-y divide-border">
-            {batch.jobs.map((j) => (
-              <li
-                key={j.id}
-                className="py-3 flex items-center gap-3 text-sm"
-              >
-                <StatusChip
-                  label={j.status}
-                  variant={JOB_STATUS_VARIANT[j.status] ?? "muted"}
+      {/* Phase-3: split the long single-column layout into three top-
+          level tabs (Products / Mobile share / Activity). All data is
+          already server-rendered above; the BatchTabs client component
+          just toggles which panel is visible. Counts in the tab badges
+          are computed once from the products list so a glance at the
+          tab strip tells the user what work is outstanding. */}
+      <BatchTabs
+        initialTab="products"
+        tabs={[
+          {
+            key: "products",
+            label: "Products",
+            badge: String(batch.products.length),
+            badgeTone: "muted",
+            content: (
+              <>
+                <KalodataImportPanel batchId={batch.id} />
+                <AiPromptsPanel
+                  batchId={batch.id}
+                  provider={aiProvider}
+                  providerLabel={aiProviderLabel}
+                  providerHasKey={aiProviderHasKey}
+                  products={batch.products.map((p) => ({
+                    id: p.id,
+                    productName: p.productName,
+                    hasPrompt: !!p.imagePrompt,
+                  }))}
                 />
-                <Link
-                  href={`/jobs/${j.id}`}
-                  className="text-text hover:text-accent transition-colors"
+                <Panel
+                  title={`Products (${productRows.length})`}
+                  action={
+                    <div className="flex items-baseline gap-3 text-[11px] text-muted">
+                      <span className="text-ok">{readyCount} ready</span>
+                      {missingPromptCount > 0 && (
+                        <span className="text-warn">
+                          {missingPromptCount} no prompt
+                        </span>
+                      )}
+                      {missingRefCount > 0 && (
+                        <span className="text-warn">
+                          {missingRefCount} no reference
+                        </span>
+                      )}
+                      <a
+                        href="#add-product"
+                        className="text-accent hover:underline ml-1"
+                      >
+                        Add manually ↓
+                      </a>
+                    </div>
+                  }
                 >
-                  {friendlyJobType(j.jobType)}
-                </Link>
-                <span className="text-xs text-muted ml-auto">
-                  {timeAgo(j.createdAt)}
-                </span>
-              </li>
-            ))}
-          </ul>
-        )}
-      </Panel>
+                  {productRows.length === 0 ? (
+                    <EmptyState
+                      icon="◇"
+                      title="No products yet"
+                      hint="Add a product below to give the runner something to work with."
+                    />
+                  ) : (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      {productRows.map((p) => (
+                        <ProductEditor
+                          key={p.id}
+                          batchId={batch.id}
+                          product={p}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </Panel>
+                {agents.length === 0 ? (
+                  <Panel title="Generate Product Images">
+                    <EmptyState
+                      icon="◆"
+                      title="No runner registered"
+                      hint="Register a local runner before you can drive Flow from this batch."
+                      action={
+                        <Link href="/agents" className="btn btn-primary">
+                          Open Runner
+                        </Link>
+                      }
+                    />
+                  </Panel>
+                ) : (
+                  <GenerateImagesPanel
+                    batchId={batch.id}
+                    agents={agents.map((a) => ({
+                      id:     a.id,
+                      name:   a.name,
+                      status: a.status,
+                    }))}
+                    products={batch.products.map((p) => ({
+                      id:                      p.id,
+                      productName:             p.productName,
+                      referenceImageUrl:       p.referenceImageUrl,
+                      referenceImagePathLocal: p.referenceImagePathLocal,
+                      imagePrompt:             p.imagePrompt,
+                      reviewStatus:            p.reviewStatus,
+                    }))}
+                    agentAssetBaseUrl={agentAssetBaseUrl}
+                    lastJob={
+                      lastImageRun && imageSummary
+                        ? {
+                            jobId:     lastImageRun.id,
+                            createdAt: lastImageRun.createdAt.toISOString(),
+                            submitted: imageSummary.submitted ?? 0,
+                            failed:    imageSummary.failed ?? 0,
+                            total:     imageSummary.items?.length ?? 0,
+                          }
+                        : null
+                    }
+                  />
+                )}
+                {agents.length > 0 && (
+                  <BatchWorkbench
+                    batchId={batch.id}
+                    agents={agents}
+                    scanSummary={{
+                      favoritedImages: favoritedImagesLive,
+                      tilesScanned: scanSummary?.tiles_scanned ?? null,
+                      lastScanJobId: lastScan?.id ?? null,
+                      lastScanAt: favoritedImagesAsOf?.toISOString() ?? null,
+                    }}
+                    videoSummary={{
+                      submitted: videoSummary?.submitted ?? null,
+                      skipped: videoSummary?.skipped_already_submitted ?? null,
+                      failed: videoSummary?.failed ?? null,
+                      lastVideoJobId: lastVideoRun?.id ?? null,
+                      lastVideoAt:
+                        lastVideoRun?.createdAt?.toISOString() ?? null,
+                    }}
+                  />
+                )}
+                <Panel
+                  title="Add product manually"
+                  action={<span id="add-product" />}
+                >
+                  <form
+                    action={addProduct}
+                    className="grid grid-cols-1 md:grid-cols-2 gap-3"
+                  >
+                    <input type="hidden" name="batchId" value={batch.id} />
+                    <div>
+                      <label className="label">Product name</label>
+                      <input className="field" name="productName" required />
+                    </div>
+                    <div>
+                      <label className="label">Category</label>
+                      <input className="field" name="category" />
+                    </div>
+                    <div>
+                      <label className="label">TikTok URL</label>
+                      <input className="field" name="tiktokUrl" />
+                    </div>
+                    <div>
+                      <label className="label">Retailer / store</label>
+                      <input
+                        className="field"
+                        name="retailerName"
+                        placeholder="e.g. boots, sephora_uk (or leave blank)"
+                      />
+                    </div>
+                    <div>
+                      <label className="label">
+                        Local reference image path
+                      </label>
+                      <input
+                        className="field"
+                        name="referenceImagePathLocal"
+                        placeholder="inputs/reference_images/01_primary.jpg"
+                      />
+                    </div>
+                    <div>
+                      <label className="label">
+                        Reference image URL (cloud, optional)
+                      </label>
+                      <input className="field" name="referenceImageUrl" />
+                    </div>
+                    <div className="md:col-span-2">
+                      <label className="label">Image prompt</label>
+                      <textarea
+                        className="field"
+                        name="imagePrompt"
+                        rows={4}
+                      />
+                    </div>
+                    <div className="md:col-span-2">
+                      <button className="btn btn-primary" type="submit">
+                        Add product
+                      </button>
+                    </div>
+                  </form>
+                </Panel>
+              </>
+            ),
+          },
+          {
+            key: "mobile",
+            label: "Mobile share",
+            // Show a "needs review" count badge only when there's
+            // something to review, otherwise omit the badge.
+            badge: (() => {
+              const n = batch.products.filter(
+                (p) => p.reviewStatus === "needs_review",
+              ).length;
+              return n > 0 ? String(n) : null;
+            })(),
+            badgeTone: "warn",
+            content: (
+              <>
+                <MobileReviewQRCard
+                  batchId={batch.id}
+                  reviewToken={batch.reviewToken}
+                  reviewBaseUrl={baseUrl}
+                  needsReviewCount={
+                    batch.products.filter(
+                      (p) => p.reviewStatus === "needs_review",
+                    ).length
+                  }
+                />
+                <MobilePostingQRCard
+                  batchId={batch.id}
+                  postingToken={batch.postingToken}
+                  postingBaseUrl={baseUrl}
+                  approvedCount={
+                    batch.products.filter((p) => p.reviewStatus === "approved")
+                      .length
+                  }
+                  needsPostingCount={
+                    batch.products.filter(
+                      (p) =>
+                        p.reviewStatus === "approved" &&
+                        p.postingStatus === "needs_posting",
+                    ).length
+                  }
+                />
+              </>
+            ),
+          },
+          {
+            key: "activity",
+            label: "Activity",
+            badge: String(batch.jobs.length),
+            badgeTone: "muted",
+            content: (
+              <Panel
+                title={`Activity (${batch.jobs.length})`}
+                action={
+                  <Link
+                    href="/jobs"
+                    className="text-xs text-accent hover:underline"
+                  >
+                    All jobs →
+                  </Link>
+                }
+              >
+                {batch.jobs.length === 0 ? (
+                  <EmptyState
+                    icon="≡"
+                    title="No jobs run for this batch yet"
+                    hint="Trigger one of the actions above."
+                  />
+                ) : (
+                  <ul className="divide-y divide-border">
+                    {batch.jobs.map((j) => (
+                      <li
+                        key={j.id}
+                        className="py-3 flex items-center gap-3 text-sm"
+                      >
+                        <StatusChip
+                          label={j.status}
+                          variant={JOB_STATUS_VARIANT[j.status] ?? "muted"}
+                        />
+                        <Link
+                          href={`/jobs/${j.id}`}
+                          className="text-text hover:text-accent transition-colors"
+                        >
+                          {friendlyJobType(j.jobType)}
+                        </Link>
+                        <span className="text-xs text-muted ml-auto">
+                          {timeAgo(j.createdAt)}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </Panel>
+            ),
+          },
+        ]}
+      />
     </div>
   );
 }
