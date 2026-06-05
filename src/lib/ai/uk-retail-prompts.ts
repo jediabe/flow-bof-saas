@@ -138,13 +138,78 @@ write a per-product video prompt under any circumstances:
     morphing, no dramatic camera move, no cinematic lighting.
 
 ============================================================
-HOOK & CAPTION
+HOOK — UK STYLE (Apex Initiative curriculum)
 ============================================================
-- Hook: conversational, BOF-style, one short sentence. UK English
-  spelling. No specific prices or percentages. No "free shipping"
-  unless the product notes explicitly state it.
-- Caption: product name + 2-3 relevant hashtags. UK English. No
-  emojis by default.
+Pick exactly ONE template from the two families below. Fill in
+[PRODUCT NAME] verbatim from the input (shorten if needed for
+readability — keep proper nouns). The hook is multi-line — keep
+the line breaks as shown by using "\\n" in the JSON string.
+
+FAMILY 1 — "I'M SO SORRY" hooks:
+
+  Template A1:
+    I'M SO SORRY...
+    but the [PRODUCT NAME] is absolutely flying out 😱
+    if you wanted one don't wait
+
+  Template A2:
+    I'M SO SORRY...
+    the [PRODUCT NAME] is now on a mad discount
+    and everyone's grabbing it fast
+
+  Template A3:
+    I'M SO SORRY...
+    but the [PRODUCT NAME] might be the best bargain on TikTok Shop right now 🔥
+
+FAMILY 2 — "WAIT..." hooks:
+
+  Template B1:
+    WAIT...
+    why is nobody talking about the [PRODUCT NAME]??
+    it's literally selling out already
+
+  Template B2:
+    WAIT...
+    the [PRODUCT NAME] just dropped back in stock
+    and the discount is actually mental 😱
+
+  Template B3:
+    WAIT...
+    you're telling me the [PRODUCT NAME] is under £[PRICE] right now??
+    nah that's a proper bargain
+
+Rules:
+- Pick ONE template. Don't combine families.
+- Only pick Template B3 if a PRICE is explicitly given in the
+  input. Otherwise pick any of the other five.
+- Use [PRODUCT NAME] from the input. Shorten if the full name is
+  long (e.g. "Halara High Waisted Drawstring Pocket Wide Leg Baggy
+  Joggers" → "Halara wide-leg joggers" — keep brand if present).
+- Keep the emojis exactly where shown.
+- Encode the line breaks as "\\n" inside the JSON string field.
+- Vary template choice from product to product where possible;
+  don't repeat the same template across a whole batch.
+
+============================================================
+CAPTION
+============================================================
+Short caption to post UNDER the video: product name + a 4-word
+"trust" tail like "selling out fast", "absolute bargain", "this
+just dropped", "stock running low". UK English. No emojis. No
+hashtags in the caption (hashtags are a separate field).
+
+Example: "Halara wide-leg joggers — selling out fast"
+
+============================================================
+HASHTAGS — UK STYLE
+============================================================
+Always return EXACTLY these 4 hashtags, in this order, no more,
+no fewer, no substitutions:
+
+  #TikTokShopUK
+  #DealDrops
+  #TikTokMadeMeBuyIt
+  #WeekendSale
 
 ============================================================
 OUTPUT FORMAT
@@ -159,15 +224,17 @@ nothing outside the JSON object. Use exactly these keys:
   "placement_type": "<'in-store display' — UK template is generic>",
   "image_prompt": "<the four-paragraph UK image prompt, paragraphs separated by a blank line>",
   "video_prompt": "<the universal blanket video prompt verbatim>",
-  "hook": "<one-sentence UK TikTok hook>",
-  "caption": "<product name + 2-3 hashtags>",
-  "hashtags": ["<#tag1>", "<#tag2>"],
+  "hook": "<chosen template, line breaks encoded as \\n>",
+  "hook_template": "<one of: A1, A2, A3, B1, B2, B3>",
+  "caption": "<product name + short trust tail, no hashtags>",
+  "hashtags": ["#TikTokShopUK", "#DealDrops", "#TikTokMadeMeBuyIt", "#WeekendSale"],
   "warnings": ["<any concerns: regulated product, missing info, etc.>"]
 }
 
 If you have no warnings, return an empty list for "warnings".
 Never include any text outside the JSON object. The image_prompt
-MUST be the four-paragraph structure — not a single sentence.`;
+MUST be the four-paragraph structure — not a single sentence.
+The hashtags array MUST be exactly the four UK hashtags above.`;
 
 /**
  * Format a product into the user-message body that goes with

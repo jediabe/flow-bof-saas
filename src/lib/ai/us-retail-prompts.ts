@@ -203,16 +203,98 @@ write a per-product video prompt under any circumstances:
     lighting.
 
 ============================================================
-HOOK, CAPTION, PRODUCT DESCRIPTION
+HOOK — US STYLE (Apex Initiative 7 Levers)
 ============================================================
-- Hook: conversational, BOF-style, one short sentence. American
-  English spelling. No specific prices or percentages. No "free
-  shipping" unless the product notes explicitly state it.
-- Caption: product name + 2-3 relevant hashtags. American English.
-  No emojis by default.
-- productDescription: a 2-3 sentence neutral product blurb the
-  posting-assist page uses next to the hook + caption. Neutral
-  tone — no marketing superlatives, no claims, no comparisons.
+Pick exactly ONE of the 7 psychological levers below and write a
+single-sentence hook following its structure. The hook is one
+long sentence — no line breaks — that uses the lever's framing
+to drive purchase intent without sounding like a hard sell.
+
+LEVER 1 — Reflected Social Proof
+  Frames the purchase as "others like me are already doing this."
+  Example:
+    Anyone else grabbing this X7 video doorbell with monitor
+    today since it's a fraction of the price with zero WiFi
+    zero app and zero subscription with shipping covered
+
+LEVER 2 — Identity Forecasting
+  Frames the purchase as a future-self decision; ties the
+  product to who the buyer will be after.
+  Example:
+    The version of you that grabbed this X7 video doorbell
+    today is going into summer already knowing who's at the
+    door with no monthly fees and shipping covered
+
+LEVER 3 — Exclusivity Inversion
+  Implies in-the-know people are already on this; inverts the
+  usual "exclusive" framing.
+  Example:
+    The people who actually care about home security already
+    moved on this X7 no WiFi no subscription video doorbell
+    today since it's basically being given away with shipping
+    covered
+
+LEVER 4 — Discovered Secret
+  Implies an accidental discount / insider opportunity.
+  Example:
+    Someone fckd up at TikTok cus today this X7 video doorbell
+    with monitor and no subscription is on a triple discount
+    with shipping covered
+
+LEVER 5 — Reverse Urgency
+  Soft urgency — "no pressure but…" while conveying scarcity
+  through seasonal / contextual framing.
+  Example:
+    No pressure but this X7 video doorbell with no app and no
+    subscription is a fraction of the price today with shipping
+    covered and summer travel season is not holding off
+
+LEVER 6 — Emotional Permission Slip
+  Reassures the buyer the purchase is rational, removes guilt.
+  Example:
+    You are not being impulsive — this X7 no WiFi video doorbell
+    at this price going into summer is just a smart decision
+    with shipping covered
+
+LEVER 7 — Economic Relief
+  Positions the product as a counter-inflation win.
+  Example:
+    Everything costs more going into summer except this X7
+    video doorbell with monitor which just dropped to basically
+    nothing today with shipping covered
+
+Rules:
+- Pick exactly ONE lever. Don't combine.
+- Fill in PRODUCT, FEATURES, SEASON / SEASONAL CONTEXT, BENEFIT,
+  DOMAIN from the product input. Keep features short (3-5 words
+  max each).
+- "shipping covered" must appear in every hook.
+- One long sentence, no line breaks, no exclamation marks, no
+  exact prices, no "X% off" / "$Y off".
+- American English. Lowercase opening word unless it's a brand
+  or proper noun.
+- Vary lever choice product-to-product when possible — don't
+  repeat the same lever across a whole batch.
+
+============================================================
+CAPTION & PRODUCT DESCRIPTION
+============================================================
+- caption: short post caption (no hashtags — hashtags are a
+  separate field). Product name + a 3-5 word trust tail like
+  "selling out today" or "shipping covered today". American
+  English, no emojis.
+- productDescription: 2-3 sentence neutral product blurb the
+  posting-assist page uses next to the hook. Neutral tone — no
+  marketing superlatives, no claims, no comparisons.
+
+============================================================
+HASHTAGS — US STYLE
+============================================================
+3-5 American TikTok-style hashtags relevant to the product.
+Examples for inspiration (not a fixed set — pick what fits):
+  #TikTokShop  #TikTokMadeMeBuyIt  #AmazonFinds  #ViralProduct
+  #DealAlert  #ShippingCovered  #SummerEssentials
+Always include #TikTokShop. Other 2-4 should be product-relevant.
 
 ============================================================
 OUTPUT FORMAT
@@ -230,9 +312,10 @@ nothing outside the JSON object. Use exactly these keys:
   "placement_type": "'in-store display'",
   "image_prompt": "<the three-paragraph US image prompt, paragraphs separated by a blank line>",
   "video_prompt": "<the universal blanket video prompt verbatim>",
-  "hook": "<one-sentence American TikTok hook>",
-  "caption": "<product name + 2-3 hashtags>",
-  "hashtags": ["<#tag1>", "<#tag2>"],
+  "hook": "<single-sentence hook in the chosen lever's style>",
+  "hook_lever": "<integer 1-7 identifying which lever you used>",
+  "caption": "<product name + short trust tail, no hashtags>",
+  "hashtags": ["#TikTokShop", "<#tag2>", "<#tag3>"],
   "product_description": "<2-3 sentence neutral blurb>",
   "warnings": ["<any concerns: regulated product, missing info, etc.>"]
 }
