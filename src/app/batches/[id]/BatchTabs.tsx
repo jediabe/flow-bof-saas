@@ -26,7 +26,7 @@ import { useState, type ReactNode } from "react";
  * first.
  */
 
-export type TabKey = "products" | "mobile" | "activity";
+export type TabKey = "products" | "mobile" | "flow" | "activity";
 
 interface TabDef {
   key: TabKey;

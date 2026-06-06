@@ -29,6 +29,15 @@ import ProductEditor, {
 } from "./ProductEditor";
 import BatchTabs from "./BatchTabs";
 import ProductsWithIpRisk from "./ProductsWithIpRisk";
+import FlowItemsTab, {
+  type FlowItemRow,
+  type FlowItemsTabProduct,
+  type FlowItemBindState,
+} from "./FlowItemsTab";
+import {
+  ingestFlowItemsForBatch,
+  countFlowItemsByState,
+} from "@/lib/flow-items";
 
 export const dynamic = "force-dynamic";
 
@@ -345,6 +354,52 @@ export default async function BatchDetail({
   // Previously this was awaited inline twice; now both Mobile share
   // QR cards share the same value.
   const baseUrl = await _reviewBaseUrl();
+
+  // Phase 6 — ingest scan results into FlowItem rows before render.
+  // Idempotent; runs on every batch page render so the Flow items
+  // tab always reflects the latest successful scan. Failures are
+  // logged but never block the page render (the tab will just show
+  // stale/empty data).
+  let flowIngestSummary: Awaited<
+    ReturnType<typeof ingestFlowItemsForBatch>
+  > | null = null;
+  try {
+    flowIngestSummary = await ingestFlowItemsForBatch({
+      workspaceId: workspace.id,
+      batchId: batch.id,
+    });
+  } catch (err) {
+    console.warn("[flow-items] ingest failed:", err);
+  }
+  const flowItemRows = await db.flowItem.findMany({
+    where: { workspaceId: workspace.id, batchId: batch.id },
+    orderBy: [
+      { bindState: "asc" }, // unbound (asc) first
+      { firstSeenAt: "desc" },
+    ],
+  });
+  const flowItemRowsForTab: FlowItemRow[] = flowItemRows.map((it) => ({
+    id:           it.id,
+    bindState:    it.bindState as FlowItemBindState,
+    mediaId:      it.mediaId,
+    tileHref:     it.tileHref,
+    kind:         it.kind,
+    favorited:    it.favorited,
+    thumbnailUrl: it.thumbnailUrl,
+    productId:    it.productId,
+    notes:        it.notes,
+    firstSeenAt:  it.firstSeenAt.toISOString(),
+  }));
+  const flowProductsForTab: FlowItemsTabProduct[] = batch.products.map((p) => ({
+    id:           p.id,
+    productName:  p.productName,
+    thumbnailUrl: p.referenceImageUrl,
+    reviewStatus: p.reviewStatus,
+  }));
+  const flowItemCounts = await countFlowItemsByState({
+    workspaceId: workspace.id,
+    batchId: batch.id,
+  });
 
   return (
     <div className="space-y-8">
@@ -682,6 +737,29 @@ export default async function BatchDetail({
                   }
                 />
               </>
+            ),
+          },
+          {
+            // Phase 6 — Flow reconciliation. Badge shows the count
+            // of unmatched tiles (the actionable backlog); falls back
+            // to total when nothing's unmatched but there's still
+            // tracked data, so the user knows the tab has content.
+            key: "flow",
+            label: "Flow items",
+            badge:
+              flowItemCounts.unbound > 0
+                ? String(flowItemCounts.unbound)
+                : flowItemCounts.total > 0
+                  ? String(flowItemCounts.total)
+                  : null,
+            badgeTone: flowItemCounts.unbound > 0 ? "warn" : "muted",
+            content: (
+              <FlowItemsTab
+                batchId={batch.id}
+                items={flowItemRowsForTab}
+                products={flowProductsForTab}
+                lastScanAt={flowIngestSummary?.lastScanAt ?? null}
+              />
             ),
           },
           {

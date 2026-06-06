@@ -1863,3 +1863,209 @@ export async function setProductIpRiskOverride(formData: FormData): Promise<{
 // Note: decodeIpRiskReasons and IP_RISK_STATUSES are pure values,
 // not server actions. Client / server-component consumers should
 // import them directly from "@/lib/ip-risk".
+
+// ---------------------------------------------------------------------
+// Phase 6 — Flow reconciliation server actions
+// ---------------------------------------------------------------------
+//
+// These actions back the drag-and-drop bind / ignore / un-ignore
+// surface on the Flow items tab. Each is workspace-scoped via the
+// batch the FlowItem belongs to, so a stale client can't touch
+// rows in another tenant.
+//
+// Note: per-tile video animation (the spec's "Generate video
+// anyway" action) needs a new runner job type and is intentionally
+// out of scope for this commit. The existing bulk
+// generate_flow_videos_from_favorites workbench button still
+// works untouched — that animates ALL favorited tiles. A future
+// commit will add animate_single_flow_tile to the runner so we
+// can animate one specific tile from the reconciliation UI.
+
+/** Whitelist of valid bindState values — guards the server action
+ *  against arbitrary string injection. */
+const FLOW_ITEM_BIND_STATES = new Set([
+  "unbound",
+  "bound",
+  "ignored",
+  "auto",
+] as const);
+
+async function _resolveFlowItemInBatch(input: {
+  flowItemId: string;
+  batchId: string;
+}): Promise<{ ok: false; message: string } | { ok: true; workspaceId: string }> {
+  if (!input.flowItemId || !input.batchId) {
+    return { ok: false, message: "Missing flowItemId or batchId" };
+  }
+  const { workspace } = await getCurrentWorkspace();
+  const batch = await db.batch.findFirst({
+    where: { id: input.batchId, workspaceId: workspace.id },
+    select: { id: true },
+  });
+  if (!batch) return { ok: false, message: "Batch not found" };
+  const item = await db.flowItem.findFirst({
+    where: {
+      id: input.flowItemId,
+      workspaceId: workspace.id,
+      batchId: batch.id,
+    },
+    select: { id: true },
+  });
+  if (!item) return { ok: false, message: "Flow item not found" };
+  return { ok: true, workspaceId: workspace.id };
+}
+
+/**
+ * Bind a FlowItem to a Product (drag-drop on the Flow items tab).
+ *
+ * FormData fields:
+ *   - flowItemId  (required)
+ *   - batchId     (required, for workspace scope check)
+ *   - productId   (required — the target product)
+ *
+ * Sets bindState="bound" + productId. Clears any prior notes
+ * (which were probably the "ignored" reason; binding clears that
+ * context).
+ */
+export async function bindFlowItemToProduct(
+  formData: FormData,
+): Promise<{ ok: boolean; message: string }> {
+  const flowItemId = String(formData.get("flowItemId") || "");
+  const batchId = String(formData.get("batchId") || "");
+  const productId = String(formData.get("productId") || "");
+
+  const scope = await _resolveFlowItemInBatch({ flowItemId, batchId });
+  if (!scope.ok) return scope;
+
+  // Verify the product is in this batch — a stale client must not
+  // bind a flow item to a product from another batch.
+  const product = await db.product.findFirst({
+    where: { id: productId, batchId, deletedAt: null },
+    select: { id: true },
+  });
+  if (!product) {
+    return {
+      ok: false,
+      message: "Product not found in this batch (it may have been deleted).",
+    };
+  }
+
+  await db.flowItem.update({
+    where: { id: flowItemId },
+    data: {
+      bindState: "bound",
+      productId,
+      notes:     null,
+    },
+  });
+
+  revalidatePath(`/batches/${batchId}`);
+  return { ok: true, message: "Bound." };
+}
+
+/**
+ * Reverse `bindFlowItemToProduct`. Sets bindState="unbound" and
+ * clears productId. Used both for "I changed my mind on a manual
+ * bind" and for "this auto-bound tile was wrong" — works on bound
+ * AND auto-bound rows.
+ */
+export async function unbindFlowItem(
+  formData: FormData,
+): Promise<{ ok: boolean; message: string }> {
+  const flowItemId = String(formData.get("flowItemId") || "");
+  const batchId = String(formData.get("batchId") || "");
+
+  const scope = await _resolveFlowItemInBatch({ flowItemId, batchId });
+  if (!scope.ok) return scope;
+
+  await db.flowItem.update({
+    where: { id: flowItemId },
+    data: { bindState: "unbound", productId: null, notes: null },
+  });
+
+  revalidatePath(`/batches/${batchId}`);
+  return { ok: true, message: "Unbound." };
+}
+
+/**
+ * Mark a FlowItem as "not relevant to this batch". Optional reason
+ * captured in `notes` for the audit trail. Ignored items stay in
+ * the database (we can un-ignore later) but disappear from the
+ * default Unmatched view.
+ */
+export async function ignoreFlowItem(
+  formData: FormData,
+): Promise<{ ok: boolean; message: string }> {
+  const flowItemId = String(formData.get("flowItemId") || "");
+  const batchId = String(formData.get("batchId") || "");
+  const reason = String(formData.get("reason") || "").trim();
+
+  const scope = await _resolveFlowItemInBatch({ flowItemId, batchId });
+  if (!scope.ok) return scope;
+
+  await db.flowItem.update({
+    where: { id: flowItemId },
+    data: {
+      bindState: "ignored",
+      productId: null,
+      notes:     reason || null,
+    },
+  });
+
+  revalidatePath(`/batches/${batchId}`);
+  return { ok: true, message: "Ignored." };
+}
+
+/**
+ * Reverse `ignoreFlowItem`. Returns the row to bindState="unbound"
+ * so it shows up in Unmatched again. notes cleared.
+ */
+export async function unignoreFlowItem(
+  formData: FormData,
+): Promise<{ ok: boolean; message: string }> {
+  const flowItemId = String(formData.get("flowItemId") || "");
+  const batchId = String(formData.get("batchId") || "");
+
+  const scope = await _resolveFlowItemInBatch({ flowItemId, batchId });
+  if (!scope.ok) return scope;
+
+  await db.flowItem.update({
+    where: { id: flowItemId },
+    data: { bindState: "unbound", productId: null, notes: null },
+  });
+
+  revalidatePath(`/batches/${batchId}`);
+  return { ok: true, message: "Un-ignored." };
+}
+
+/**
+ * Direct bindState setter — escape hatch for tests + admin tooling.
+ * The four specific actions above are the preferred API; this
+ * exists so a future bulk-action UI can change many rows at once
+ * without re-implementing the workspace-scope check each time.
+ */
+export async function setFlowItemBindState(
+  formData: FormData,
+): Promise<{ ok: boolean; message: string }> {
+  const flowItemId = String(formData.get("flowItemId") || "");
+  const batchId = String(formData.get("batchId") || "");
+  const stateRaw = String(formData.get("state") || "");
+  const productId = String(formData.get("productId") || "");
+  if (!FLOW_ITEM_BIND_STATES.has(stateRaw as "unbound" | "bound" | "ignored" | "auto")) {
+    return { ok: false, message: `Invalid state: ${stateRaw}` };
+  }
+
+  const scope = await _resolveFlowItemInBatch({ flowItemId, batchId });
+  if (!scope.ok) return scope;
+
+  await db.flowItem.update({
+    where: { id: flowItemId },
+    data: {
+      bindState: stateRaw,
+      productId: stateRaw === "bound" || stateRaw === "auto" ? productId || null : null,
+    },
+  });
+
+  revalidatePath(`/batches/${batchId}`);
+  return { ok: true, message: `State set to ${stateRaw}.` };
+}
