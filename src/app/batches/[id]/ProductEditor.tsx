@@ -19,6 +19,8 @@ import {
 import ProductImageStack, {
   type ProductImageRow,
 } from "./ProductImageStack";
+import IpRiskRow, { type IpRiskRowProduct } from "./IpRiskRow";
+import type { IpRiskStatus } from "@/lib/ip-risk";
 
 export interface ProductRow {
   id: string;
@@ -50,6 +52,13 @@ export interface ProductRow {
   /** Phase-3 multi-reference images. Up to 3 rows (primary / ref2 /
    *  ref3). Empty list when the product has no images yet. */
   images: ProductImageRow[];
+  /** Phase-9 IP / trademark risk screening fields. */
+  ipRiskStatus: IpRiskStatus;
+  ipRiskReasons: string[];
+  ipRiskCheckedAt: string | null;
+  ipRiskOverride: boolean;
+  ipRiskOverrideReason: string | null;
+  ipRiskOverrideAt: string | null;
 }
 
 export type ReviewStatus =
@@ -89,6 +98,27 @@ const STATUS_VARIANT: Record<SubmittedStatus, "ok" | "warn" | "bad" | "muted"> =
   skipped:   "warn",
   pending:   "muted",
   unknown:   "muted",
+};
+
+// Phase 9 — IP risk chip variants for the collapsed card header.
+// Mirrors STATUS_VARIANT in IpRiskRow but with shorter labels
+// (collapsed view real estate is tight).
+const IP_RISK_CHIP_VARIANT: Record<
+  IpRiskStatus,
+  "ok" | "warn" | "bad" | "muted" | "accent"
+> = {
+  unchecked:           "muted",
+  low:                 "ok",
+  medium:              "warn",
+  high:                "bad",
+  needs_manual_review: "warn",
+};
+const IP_RISK_CHIP_LABEL: Record<IpRiskStatus, string> = {
+  unchecked:           "IP unchecked",
+  low:                 "IP low",
+  medium:              "IP medium",
+  high:                "IP HIGH",
+  needs_manual_review: "IP review",
 };
 
 /**
@@ -374,6 +404,18 @@ export default function ProductEditor({
               </>
             )}
             <StatusChip label={retailerLabel} variant="muted" />
+            {/* Phase 9 — IP risk chip. Surfaces the risk status at
+                a glance so the user can see which products are
+                blocked from generation without expanding the card.
+                The override-approved badge shows next to it when
+                the user has explicitly allowed a risky product. */}
+            <StatusChip
+              label={IP_RISK_CHIP_LABEL[product.ipRiskStatus]}
+              variant={IP_RISK_CHIP_VARIANT[product.ipRiskStatus]}
+            />
+            {product.ipRiskOverride && (
+              <StatusChip label="IP override" variant="accent" />
+            )}
             {product.aiPromptGeneratedAt && (
               <StatusChip label="AI prompt" variant="accent" />
             )}
@@ -559,6 +601,25 @@ export default function ProductEditor({
               )}
             </section>
           )}
+
+          {/* Phase 9 — IP / trademark risk row. Always rendered so
+              the user sees the current verdict at a glance and can
+              re-check after editing the product name (or first-time
+              check on a fresh import). The full panel includes the
+              check button, AI toggle, reasons list, and override
+              form when the verdict is risky. */}
+          <IpRiskRow
+            product={{
+              id:                    product.id,
+              batchId:               batchId,
+              ipRiskStatus:          product.ipRiskStatus,
+              ipRiskReasons:         product.ipRiskReasons,
+              ipRiskCheckedAt:       product.ipRiskCheckedAt,
+              ipRiskOverride:        product.ipRiskOverride,
+              ipRiskOverrideReason:  product.ipRiskOverrideReason,
+              ipRiskOverrideAt:      product.ipRiskOverrideAt,
+            }}
+          />
 
           <details className="text-xs">
             <summary className="cursor-pointer text-muted hover:text-text transition-colors select-none">

@@ -50,6 +50,12 @@ export default async function MobileReviewPage({
           imageUrl: true,
           category: true,
           reviewStatus: true,
+          // Phase 9 — surface IP risk on the mobile review page so
+          // reviewers can see the verdict and react appropriately.
+          // High-risk products default to Reject in the client UI.
+          ipRiskStatus: true,
+          ipRiskReasons: true,
+          ipRiskOverride: true,
         },
         orderBy: [
           // Push needs_review to the top so the user lands on
@@ -69,15 +75,34 @@ export default async function MobileReviewPage({
     notFound();
   }
 
-  const products: MobileProduct[] = batch.products.map((p) => ({
-    id:                p.id,
-    productName:       p.productName,
-    tiktokUrl:         p.tiktokUrl,
-    referenceImageUrl: p.referenceImageUrl,
-    imageUrl:          p.imageUrl,
-    category:          p.category,
-    reviewStatus:      p.reviewStatus as MobileProduct["reviewStatus"],
-  }));
+  // Decode Phase 9 IP risk reasons (JSON-encoded string[] in SQLite)
+  // so the client component sees a clean array. Defensive parse
+  // handles malformed JSON without breaking the page.
+  const products: MobileProduct[] = batch.products.map((p) => {
+    let reasons: string[] = [];
+    if (p.ipRiskReasons) {
+      try {
+        const decoded = JSON.parse(p.ipRiskReasons);
+        if (Array.isArray(decoded)) {
+          reasons = decoded.filter((r) => typeof r === "string");
+        }
+      } catch {
+        // Stale or malformed JSON — surface no reasons rather than crash
+      }
+    }
+    return {
+      id:                p.id,
+      productName:       p.productName,
+      tiktokUrl:         p.tiktokUrl,
+      referenceImageUrl: p.referenceImageUrl,
+      imageUrl:          p.imageUrl,
+      category:          p.category,
+      reviewStatus:      p.reviewStatus as MobileProduct["reviewStatus"],
+      ipRiskStatus:      p.ipRiskStatus as MobileProduct["ipRiskStatus"],
+      ipRiskReasons:     reasons,
+      ipRiskOverride:    p.ipRiskOverride,
+    };
+  });
 
   return (
     <MobileReviewClient

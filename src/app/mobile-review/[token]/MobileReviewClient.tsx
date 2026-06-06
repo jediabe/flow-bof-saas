@@ -31,6 +31,13 @@ export type ReviewStatus =
   | "rejected"
   | "maybe";
 
+export type IpRiskStatus =
+  | "unchecked"
+  | "low"
+  | "medium"
+  | "high"
+  | "needs_manual_review";
+
 export interface MobileProduct {
   id: string;
   productName: string;
@@ -39,6 +46,12 @@ export interface MobileProduct {
   imageUrl: string | null;
   category: string | null;
   reviewStatus: ReviewStatus;
+  /** Phase 9 — IP / trademark risk verdict. High and needs_review
+   *  change the default action emphasis (Reject becomes the primary
+   *  action) and surface a warning banner. */
+  ipRiskStatus: IpRiskStatus;
+  ipRiskReasons: string[];
+  ipRiskOverride: boolean;
 }
 
 const STATUS_LABEL: Record<ReviewStatus, string> = {
@@ -281,29 +294,122 @@ export default function MobileReviewClient({
         </div>
       </section>
 
-      {/* Big action buttons */}
+      {/* Phase 9 — IP / trademark risk banner. Surfaces the verdict
+          + reasons on phone reviewers' screens so they can react.
+          The wording follows the spec: "potential risk; review
+          manually before generating" — never "illegal". When the
+          status is high or needs_review AND there's no override,
+          the action order below puts Reject first. */}
+      {(current.ipRiskStatus === "high" ||
+        current.ipRiskStatus === "needs_manual_review" ||
+        current.ipRiskStatus === "medium") && (
+        <section className="px-4 pt-4">
+          <div
+            className={`rounded-2xl px-4 py-3 text-sm leading-snug ${
+              current.ipRiskStatus === "high"
+                ? "bg-red-500/10 border border-red-500/40 text-red-300"
+                : "bg-orange-500/10 border border-orange-500/40 text-orange-300"
+            }`}
+          >
+            <div className="font-medium">
+              {current.ipRiskStatus === "high"
+                ? "Potential HIGH IP/trademark risk"
+                : current.ipRiskStatus === "needs_manual_review"
+                  ? "Needs manual IP review"
+                  : "Potential IP/trademark risk"}
+            </div>
+            <div className="text-xs mt-1">
+              Review manually before generating content. This is not legal
+              advice.
+            </div>
+            {current.ipRiskOverride && (
+              <div className="text-[11px] text-green-400 mt-1.5">
+                ✓ Override approved on desktop — generation allowed.
+              </div>
+            )}
+            {current.ipRiskReasons.length > 0 && (
+              <details className="mt-2 text-xs">
+                <summary className="cursor-pointer text-zinc-300/80">
+                  Reasons ({current.ipRiskReasons.length})
+                </summary>
+                <ul className="mt-1 list-disc pl-4 text-zinc-300/80 space-y-0.5">
+                  {current.ipRiskReasons.map((r, i) => (
+                    <li key={i}>{r}</li>
+                  ))}
+                </ul>
+              </details>
+            )}
+          </div>
+        </section>
+      )}
+
+      {/* Big action buttons. When the product is HIGH risk (no
+          override yet), Reject is shown first + emphasised so a
+          casual swipe doesn't accidentally approve an IP-risky
+          product. Override-approved high-risk rows revert to the
+          normal Approve-first order — the desktop user has already
+          made a deliberate decision to allow it. */}
       <section className="px-4 pt-6 space-y-2.5">
-        <ReviewBtn
-          label="Approve"
-          color="bg-green-600 active:bg-green-700"
-          textColor="text-white"
-          disabled={pending}
-          onTap={() => applyStatus("approved")}
-        />
-        <ReviewBtn
-          label="Maybe"
-          color="bg-zinc-700 active:bg-zinc-600"
-          textColor="text-zinc-100"
-          disabled={pending}
-          onTap={() => applyStatus("maybe")}
-        />
-        <ReviewBtn
-          label="Reject"
-          color="bg-red-600 active:bg-red-700"
-          textColor="text-white"
-          disabled={pending}
-          onTap={() => applyStatus("rejected")}
-        />
+        {current.ipRiskStatus === "high" && !current.ipRiskOverride ? (
+          <>
+            <ReviewBtn
+              label="Reject (recommended for HIGH risk)"
+              color="bg-red-600 active:bg-red-700"
+              textColor="text-white"
+              disabled={pending}
+              onTap={() => applyStatus("rejected")}
+            />
+            <ReviewBtn
+              label="Maybe — flag for desktop review"
+              color="bg-zinc-700 active:bg-zinc-600"
+              textColor="text-zinc-100"
+              disabled={pending}
+              onTap={() => applyStatus("maybe")}
+            />
+            <ReviewBtn
+              label="Approve anyway"
+              color="bg-zinc-800 active:bg-zinc-700 border border-zinc-700"
+              textColor="text-green-400"
+              disabled={pending}
+              onTap={() => {
+                if (
+                  window.confirm(
+                    "This product has HIGH potential IP/trademark risk. " +
+                      "Approving it lets it through review, but generation " +
+                      "will still require a per-product override with a " +
+                      "written reason on the desktop. Continue?",
+                  )
+                ) {
+                  applyStatus("approved");
+                }
+              }}
+            />
+          </>
+        ) : (
+          <>
+            <ReviewBtn
+              label="Approve"
+              color="bg-green-600 active:bg-green-700"
+              textColor="text-white"
+              disabled={pending}
+              onTap={() => applyStatus("approved")}
+            />
+            <ReviewBtn
+              label="Maybe"
+              color="bg-zinc-700 active:bg-zinc-600"
+              textColor="text-zinc-100"
+              disabled={pending}
+              onTap={() => applyStatus("maybe")}
+            />
+            <ReviewBtn
+              label="Reject"
+              color="bg-red-600 active:bg-red-700"
+              textColor="text-white"
+              disabled={pending}
+              onTap={() => applyStatus("rejected")}
+            />
+          </>
+        )}
         <ReviewBtn
           label="Delete product"
           color="bg-zinc-800 active:bg-zinc-700 border border-zinc-700"

@@ -28,6 +28,7 @@ import ProductEditor, {
   type SubmittedStatus,
 } from "./ProductEditor";
 import BatchTabs from "./BatchTabs";
+import ProductsWithIpRisk from "./ProductsWithIpRisk";
 
 export const dynamic = "force-dynamic";
 
@@ -282,6 +283,17 @@ export default async function BatchDetail({
         url: i.url,
         source: i.source,
       })),
+    // Phase-9 IP risk fields. Cast status to the IpRiskStatus union
+    // — Prisma stores it as a string but we know the values per
+    // schema default + server-action validation.
+    ipRiskStatus: (p.ipRiskStatus as
+      | "unchecked" | "low" | "medium" | "high" | "needs_manual_review"
+    ),
+    ipRiskReasons:        (parseJson(p.ipRiskReasons) as string[] | null) ?? [],
+    ipRiskCheckedAt:      p.ipRiskCheckedAt?.toISOString() ?? null,
+    ipRiskOverride:       p.ipRiskOverride,
+    ipRiskOverrideReason: p.ipRiskOverrideReason,
+    ipRiskOverrideAt:     p.ipRiskOverrideAt?.toISOString() ?? null,
   }));
 
   // "Ready" = has both a reference (URL or local override) AND a prompt.
@@ -454,9 +466,10 @@ export default async function BatchDetail({
                     hasPrompt: !!p.imagePrompt,
                   }))}
                 />
-                <Panel
-                  title={`Products (${productRows.length})`}
-                  action={
+                <ProductsWithIpRisk
+                  batchId={batch.id}
+                  products={productRows}
+                  productsPanelAction={
                     <div className="flex items-baseline gap-3 text-[11px] text-muted">
                       <span className="text-ok">{readyCount} ready</span>
                       {missingPromptCount > 0 && (
@@ -477,25 +490,7 @@ export default async function BatchDetail({
                       </a>
                     </div>
                   }
-                >
-                  {productRows.length === 0 ? (
-                    <EmptyState
-                      icon="◇"
-                      title="No products yet"
-                      hint="Add a product below to give the runner something to work with."
-                    />
-                  ) : (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                      {productRows.map((p) => (
-                        <ProductEditor
-                          key={p.id}
-                          batchId={batch.id}
-                          product={p}
-                        />
-                      ))}
-                    </div>
-                  )}
-                </Panel>
+                />
                 {agents.length === 0 ? (
                   <Panel title="Generate Product Images">
                     <EmptyState
@@ -542,6 +537,12 @@ export default async function BatchDetail({
                           url: i.url,
                           pathLocal: i.pathLocal,
                         })),
+                      // Phase 9 — IP risk gating fields.
+                      ipRiskStatus: (p.ipRiskStatus as
+                        | "unchecked" | "low" | "medium"
+                        | "high" | "needs_manual_review"
+                      ),
+                      ipRiskOverride: p.ipRiskOverride,
                     }))}
                     agentAssetBaseUrl={agentAssetBaseUrl}
                     lastJob={

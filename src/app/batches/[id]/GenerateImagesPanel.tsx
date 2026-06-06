@@ -44,6 +44,18 @@ export interface ImageGenProduct {
     url: string | null;
     pathLocal: string | null;
   }>;
+  /**
+   * Phase 9 — IP risk gating.
+   *   - "high" + "needs_manual_review" rows are EXCLUDED by default
+   *     unless ipRiskOverride is true (with a reason logged).
+   *   - "low" / "medium" / "unchecked" pass through unchanged.
+   *
+   * The spec is explicit: do NOT allow high-risk products to be
+   * generated "silently". Inclusion requires the user to have
+   * explicitly approved the override per-product on the card.
+   */
+  ipRiskStatus: "unchecked" | "low" | "medium" | "high" | "needs_manual_review";
+  ipRiskOverride: boolean;
 }
 
 export interface LastImageJobSummary {
@@ -97,20 +109,29 @@ export default function GenerateImagesPanel({
   // doing the phone-review pass.
   const [includeNotApproved, setIncludeNotApproved] = useState(false);
 
-  // Phase-1 eligibility:
+  // Phase-1 + Phase-9 eligibility:
   //   - has an imagePrompt
   //   - has a reference source (URL or local-override path)
-  //   - reviewStatus is "approved", OR the override is on
+  //   - reviewStatus is "approved", OR the not-approved override is on
+  //   - ipRiskStatus is not "high"/"needs_manual_review" UNLESS
+  //     ipRiskOverride is true (per-product). Spec: "Do NOT allow
+  //     high-risk products to be included silently."
   const hasUsableRefAndPrompt = (p: ImageGenProduct) =>
     !!p.imagePrompt &&
     (!!p.referenceImageUrl || !!p.referenceImagePathLocal);
+
+  const isBlockedByIpRisk = (p: ImageGenProduct): boolean =>
+    (p.ipRiskStatus === "high" ||
+      p.ipRiskStatus === "needs_manual_review") &&
+    !p.ipRiskOverride;
 
   const eligible = useMemo(
     () =>
       products.filter(
         (p) =>
           hasUsableRefAndPrompt(p) &&
-          (includeNotApproved || p.reviewStatus === "approved"),
+          (includeNotApproved || p.reviewStatus === "approved") &&
+          !isBlockedByIpRisk(p),
       ),
     [products, includeNotApproved],
   );
@@ -126,6 +147,9 @@ export default function GenerateImagesPanel({
   const heldByReviewCount = products.filter(
     (p) =>
       hasUsableRefAndPrompt(p) && p.reviewStatus !== "approved",
+  ).length;
+  const heldByIpRiskCount = products.filter((p) =>
+    hasUsableRefAndPrompt(p) && isBlockedByIpRisk(p),
   ).length;
 
   const missingPrompt = products.filter((p) => !p.imagePrompt).length;
@@ -307,6 +331,22 @@ export default function GenerateImagesPanel({
           </span>
         </span>
       </label>
+
+      {/* Phase 9 — IP risk gate banner. Surfaces the count of
+          products held back by the high / needs_manual_review
+          status. The override is per-product on the card (not a
+          bulk toggle here) — the spec is explicit that high-risk
+          inclusion must be explicit per product, not silent. */}
+      {heldByIpRiskCount > 0 && (
+        <div className="rounded-2xl border border-warn/40 bg-warn/[0.06] text-xs text-warn px-4 py-3 leading-snug">
+          <span className="font-semibold">
+            {heldByIpRiskCount} product{heldByIpRiskCount === 1 ? "" : "s"}
+          </span>{" "}
+          with high or needs-review IP risk are excluded from this run.
+          To include them, expand the product card and approve the override
+          with a written reason.
+        </div>
+      )}
 
       {/* Controls --------------------------------------------------- */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
