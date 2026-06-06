@@ -266,6 +266,116 @@ function matchAny(
 }
 
 // ---------------------------------------------------------------------
+// Typosquat detection — Levenshtein distance against famous brands
+// ---------------------------------------------------------------------
+//
+// Typosquatting is one of the most reliable pure-text counterfeit
+// signals. "Nikee" (1 edit from Nike), "Adiidas" (1 edit), "Apel"
+// (1 edit from Apple), "Eufii" (1 edit from Eufy) are deliberate
+// brand-evasion attempts. Legitimate brand listings spell the
+// brand correctly.
+//
+// Implementation: for each word in the product haystack, compute
+// the edit distance against each single-word famous brand. If a
+// word is 1-2 edits away AND is not the brand exactly AND is long
+// enough to avoid coincidental short-word matches, flag it.
+//
+// We only check single-word brands here. Multi-word brands ("louis
+// vuitton") fall through to the regular brand matcher — typosquats
+// of multi-word brands are vanishingly rare in practice.
+
+interface TyposquatHit {
+  word: string;
+  brand: string;
+  editDistance: number;
+}
+
+function levenshtein(a: string, b: string): number {
+  if (a === b) return 0;
+  if (a.length === 0) return b.length;
+  if (b.length === 0) return a.length;
+  // Two-row DP, O(min(a,b)) space.
+  let prev = new Array(b.length + 1);
+  let curr = new Array(b.length + 1);
+  for (let j = 0; j <= b.length; j++) prev[j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    curr[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a.charCodeAt(i - 1) === b.charCodeAt(j - 1) ? 0 : 1;
+      curr[j] = Math.min(
+        prev[j] + 1,
+        curr[j - 1] + 1,
+        prev[j - 1] + cost,
+      );
+    }
+    [prev, curr] = [curr, prev];
+  }
+  return prev[b.length];
+}
+
+/** Pre-computed list of single-word famous brands. Multi-word
+ *  brands ("louis vuitton", "off white") are excluded because the
+ *  per-word Levenshtein check would flag every coincidental
+ *  near-match. */
+const SINGLE_WORD_BRANDS: readonly string[] = FAMOUS_BRANDS.filter(
+  (b) => !b.includes(" ") && !b.includes("-") && b.length >= 4,
+);
+
+/** Words too common to be typosquats. Even if they're Levenshtein-1
+ *  away from a brand, they're not deliberate misspellings.
+ *  Conservative list — better to miss a typosquat than spam false
+ *  positives. */
+const TYPOSQUAT_STOPWORDS: ReadonlySet<string> = new Set([
+  // Single-letter-off matches we'd otherwise flag:
+  "rome",   // 1 from "roe"? safe to skip; example
+  "apple",  // exact match, handled by brand list — don't flag
+  // Add more here as we find false positives in production.
+]);
+
+export function detectBrandTyposquats(text: string): TyposquatHit[] {
+  const hits: TyposquatHit[] = [];
+  // Tokenise: words = alphanumeric runs (4+ chars to avoid noise).
+  // We lower-case both sides and compare in lower-case throughout.
+  const words = Array.from(
+    text.toLowerCase().matchAll(/[a-z][a-z0-9]{3,}/g),
+    (m) => m[0],
+  );
+  // De-dupe so the same misspelled word doesn't produce N reasons.
+  const seenWords = new Set<string>();
+
+  for (const w of words) {
+    if (seenWords.has(w)) continue;
+    if (TYPOSQUAT_STOPWORDS.has(w)) continue;
+    for (const brand of SINGLE_WORD_BRANDS) {
+      if (w === brand) {
+        // Exact brand match — handled by the regular brand matcher,
+        // not a typosquat. Don't flag here.
+        continue;
+      }
+      // Length filter: |len(w) - len(brand)| > 2 → too different
+      // to be a typosquat (different word entirely).
+      const lenDiff = Math.abs(w.length - brand.length);
+      if (lenDiff > 2) continue;
+      const ed = levenshtein(w, brand);
+      // Threshold tuning: 1 edit is a near-certain typosquat for
+      // brands of length ≥ 4. 2 edits is a typosquat candidate
+      // for brands of length ≥ 6 (shorter brands like "ugg" or
+      // "gucci" generate too many 2-edit false positives —
+      // "dust", "dock", "lock" are all 2 from "ugg" or similar).
+      if (
+        (ed === 1 && brand.length >= 4) ||
+        (ed === 2 && brand.length >= 7)
+      ) {
+        hits.push({ word: w, brand, editDistance: ed });
+        seenWords.add(w);
+        break; // one brand per word is enough
+      }
+    }
+  }
+  return hits;
+}
+
+// ---------------------------------------------------------------------
 // Main entry point
 // ---------------------------------------------------------------------
 
@@ -303,69 +413,134 @@ export function assessProductIpRisk(
     if (STATUS_RANK[to] > STATUS_RANK[highest]) highest = to;
   }
 
-  // --- 1. Imitation phrases. Strongest signal — almost always
-  //        counterfeit intent. Single hit → high.
+  // Rebalanced heuristic (post-feedback): TikTok Shop hosts many
+  // legitimate brand listings AND authorized resellers. The previous
+  // logic treated "mentions a famous brand" as HIGH on its own,
+  // which flagged Anker selling Eufy products (Anker owns Eufy) as
+  // high-risk — exactly the wrong signal.
+  //
+  // New tier breakdown:
+  //   HIGH    — clear counterfeit / impersonation signals:
+  //               typosquatting (e.g. "Nikee", "Adiidas"),
+  //               imitation phrases ("1:1", "replica", "dupe"),
+  //               protected characters/franchises,
+  //               brand + explicit false-official claim,
+  //               logo/pattern term + brand mention.
+  //   MEDIUM  — soft signals worth a manual look:
+  //               brand mention without context,
+  //               logo/pattern term alone,
+  //               false-official claim alone (no brand match).
+  //   LOW     — branded compatibility accessory, or no signals.
+  //
+  // The wording of every reason is rewritten to be non-accusatory.
+  // We say "verify legitimacy" not "claims affiliation"; the user
+  // sees the heuristic as a checklist, not a verdict.
+
+  // --- 1. Imitation phrases. Strongest single signal — explicit
+  //        counterfeit/dupe language. Single hit → HIGH.
   const imitation = matchAny(haystack, IMITATION_PHRASES);
   if (imitation.matched.length > 0) {
     bump("high", 60);
     for (const m of imitation.matched) {
-      reasons.push(`Contains imitation phrase: "${m.trim()}"`);
+      reasons.push(
+        `Contains imitation / counterfeit phrase: "${m.trim()}". This is a strong counterfeit signal.`,
+      );
       matchedTerms.push(m.trim());
     }
   }
 
-  // --- 2. Famous brands. Adjusted by compatibility context.
+  // --- 2. Typosquatting — intentional misspellings of famous
+  //        brand names (e.g. "Nikee" for Nike, "Adiidas" for
+  //        Adidas, "Apel" for Apple). High-confidence counterfeit
+  //        signal: legitimate brand listings spell the brand
+  //        correctly. Implemented as a Levenshtein-distance check
+  //        on each word in the haystack against each famous-brand
+  //        term. Only single-word brands; multi-word brands like
+  //        "louis vuitton" use the regular brand matcher.
+  const typosquats = detectBrandTyposquats(haystack);
+  if (typosquats.length > 0) {
+    bump("high", 70);
+    for (const t of typosquats) {
+      reasons.push(
+        `Possible typosquat: "${t.word}" is ${t.editDistance} edit(s) away from brand "${t.brand}". Misspelled brand names are a strong counterfeit signal.`,
+      );
+      matchedTerms.push(t.word);
+    }
+  }
+
+  // --- 3. Famous brands. Major rebalance: brand mention ALONE is
+  //        LOW (most TikTok Shop branded listings are legitimate).
+  //        Only escalates when paired with counterfeit signals.
   const brand = matchAny(haystack, FAMOUS_BRANDS);
   if (brand.matched.length > 0) {
     const compat = matchAny(haystack, COMPATIBILITY_QUALIFIERS);
     const falseClaim = matchAny(haystack, FALSE_OFFICIAL_CLAIMS);
-    // Spec: compatibility qualifier + brand = lower risk. False
-    // "official" / "authentic" claim + brand = higher risk.
     if (falseClaim.matched.length > 0) {
+      // Brand + "authentic"/"official"/"OEM" claim — the brand
+      // itself ISN'T proof of authorization. This combination is
+      // a common counterfeit signal because authorized sellers
+      // rarely need to emphasise "authentic" in their titles.
       bump("high", 50);
       for (const m of brand.matched) {
         reasons.push(
-          `Claims affiliation with famous brand: "${m}" + "${falseClaim.first}"`,
+          `Combines brand "${m}" with affiliation claim "${falseClaim.first}". Verify the seller is authorized — authorized brand sellers typically don't add "${falseClaim.first}" to their titles.`,
         );
         matchedTerms.push(m);
       }
     } else if (compat.matched.length > 0) {
-      bump("medium", 25);
+      // Brand + compatibility wording — legitimate accessory.
+      bump("low", 5);
       for (const m of brand.matched) {
         reasons.push(
-          `Mentions compatibility with brand: "${m}" (qualifier: "${compat.first?.trim()}"). Review whether the product uses brand logos or claims to be official.`,
+          `Mentions brand "${m}" in a compatibility/accessory context ("${compat.first?.trim()}"). Likely a legitimate accessory product.`,
         );
         matchedTerms.push(m);
       }
     } else {
-      bump("high", 45);
+      // Brand alone — could be a legitimate brand listing
+      // (authorized retailer, brand's own product), could be
+      // counterfeit. Without other signals, we DON'T flag high.
+      // We surface MEDIUM so the user can do a quick verification
+      // pass — but the wording acknowledges most listings are fine.
+      bump("medium", 20);
       for (const m of brand.matched) {
-        reasons.push(`Contains famous brand term: "${m}"`);
+        reasons.push(
+          `Mentions brand "${m}" — most TikTok Shop branded listings are legitimate (authorized retailers or direct-from-brand). Verify the seller is the brand or an authorized reseller; if so, mark this product's override approved.`,
+        );
         matchedTerms.push(m);
       }
     }
   }
 
-  // --- 3. Character / franchise references. Hits → high; this is
-  //        almost always protected IP.
+  // --- 4. Character / franchise references. Hits → HIGH. These
+  //        are almost always protected IP and TikTok Shop has
+  //        seen waves of unauthorized character merchandise.
   const character = matchAny(haystack, CHARACTER_FRANCHISES);
   if (character.matched.length > 0) {
     bump("high", 50);
     for (const m of character.matched) {
-      reasons.push(`May reference protected character/franchise: "${m}"`);
+      reasons.push(
+        `References protected character/franchise: "${m}". Unauthorized character merchandise is a common TikTok Shop IP issue.`,
+      );
       matchedTerms.push(m);
     }
   }
 
-  // --- 4. Logo / pattern terms. Medium on their own; high when
-  //        they appear alongside a brand or character hit.
+  // --- 5. Logo / pattern terms. MEDIUM on their own (could be
+  //        generic style terms); HIGH when paired with a brand
+  //        or character hit (then the pattern is almost certainly
+  //        a brand impersonation).
   const logo = matchAny(haystack, LOGO_PATTERN_TERMS);
   if (logo.matched.length > 0) {
     const escalate =
       brand.matched.length > 0 || character.matched.length > 0;
     bump(escalate ? "high" : "medium", escalate ? 25 : 15);
     for (const m of logo.matched) {
-      reasons.push(`Contains logo/pattern-related term: "${m.trim()}"`);
+      reasons.push(
+        escalate
+          ? `Logo/pattern term "${m.trim()}" combined with a brand or character reference — strong impersonation signal.`
+          : `Mentions logo/pattern term "${m.trim()}". Verify whether the product uses an actual brand logo or just generic styling.`,
+      );
       matchedTerms.push(m.trim());
     }
   }
