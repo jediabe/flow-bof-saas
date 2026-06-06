@@ -144,10 +144,42 @@ export default function GenerateImagesPanel({
   function submit() {
     setLastError(null);
     const items = eligible.slice(0, limit).map((p) => {
+      // Phase 3 — multi-reference image set. Filter to entries that
+      // resolve to either a URL or a path; cap at 3. The runner caps
+      // too, but matching the cap here keeps the count in
+      // `images.length` accurate for the prompt-augmentation check
+      // below.
+      const refs = (p.images ?? [])
+        .filter((img) => img.url || img.pathLocal)
+        .slice(0, 3);
+      const refCount = refs.length;
+
+      // When a product has more than one reference image, prepend
+      // the multi-ref guidance so Flow understands the references
+      // describe ONE product, not several. Wording mirrors what's
+      // documented in the v0.7 roadmap memory's "Multi-reference
+      // prompt addendum" (PART 9).
+      //
+      // Single-ref products keep the prompt unchanged so the
+      // existing image-output behaviour is byte-for-byte identical
+      // for the 1-image case.
+      let finalPrompt = p.imagePrompt!;
+      if (refCount > 1) {
+        const multiRefPreamble =
+          "Use all provided reference images together to understand " +
+          "the same product. Treat them as different views or details " +
+          "of one product, not separate products. Combine the " +
+          "consistent product design, packaging, color, shape, and " +
+          "visible branding into one realistic product display. Do " +
+          "not create a collage. Do not show multiple variants unless " +
+          "the product is naturally sold as a set.\n\n";
+        finalPrompt = multiRefPreamble + finalPrompt;
+      }
+
       const item: Record<string, unknown> = {
         item_id:      p.id,
         product_name: p.productName,
-        image_prompt: p.imagePrompt!,
+        image_prompt: finalPrompt,
       };
       if (p.referenceImageUrl) {
         item.reference_image_url = makeAbsolute(p.referenceImageUrl);
@@ -166,14 +198,12 @@ export default function GenerateImagesPanel({
       // ref2/ref3. URLs are made absolute here, same as the legacy
       // path, so the runner doesn't need to know about
       // AGENT_ASSET_BASE_URL.
-      if (p.images && p.images.length > 0) {
-        item.reference_images = p.images
-          .filter((img) => img.url || img.pathLocal)
-          .map((img) => ({
-            role: img.role,
-            url:  img.url ? makeAbsolute(img.url) : null,
-            path: img.pathLocal,
-          }));
+      if (refCount > 0) {
+        item.reference_images = refs.map((img) => ({
+          role: img.role,
+          url:  img.url ? makeAbsolute(img.url) : null,
+          path: img.pathLocal,
+        }));
       }
       return item;
     });
