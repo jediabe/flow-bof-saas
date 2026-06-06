@@ -50,10 +50,15 @@ model Workspace {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  agents   Agent[]
-  batches  Batch[]
-  jobs     Job[]
-  settings WorkspaceSettings?
+  agents     Agent[]
+  batches    Batch[]
+  jobs       Job[]
+  settings   WorkspaceSettings?
+  // Phase 6 — Flow reconciliation. One row per Flow media/tile the
+  // SaaS has ever heard of, regardless of whether it originated
+  // from a SaaS job. Scoped to the workspace so two tenants can't
+  // collide on Flow's global media_id space.
+  flowItems  FlowItem[]
 }
 
 // ---------------------------------------------------------------------------
@@ -159,8 +164,12 @@ model Batch {
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 
-  products Product[]
-  jobs     Job[]
+  products  Product[]
+  jobs      Job[]
+  // Phase 6 — Flow items scoped to this batch. Used by the
+  // Flow-reconciliation tab to group unmatched / bound / ignored
+  // tiles per batch instead of mixing tiles from other batches.
+  flowItems FlowItem[]
 
   @@index([workspaceId])
 }
@@ -289,6 +298,12 @@ model Product {
   // denormalised cache so existing read paths keep working without
   // a join.
   images                  ProductImage[]
+  // Phase 6 — Flow items bound to this product (typically the
+  // generated images / video derivatives the user has approved
+  // for this product). A product can have multiple bound items
+  // (e.g. one image variant + one animated video) — the relation
+  // is one-to-many.
+  flowItems               FlowItem[]
 
   @@index([batchId])
   @@index([reviewStatus])
@@ -355,6 +370,91 @@ model ProductImage {
   // two "primary" images and Phase 3 stays bounded at 3 refs.
   @@unique([productId, role])
   @@index([productId])
+}
+
+// Phase 6 — Flow reconciliation.
+//
+// One row per Flow media/tile the SaaS has ever heard of. Created
+// by the scan ingester whenever a scan_favorited_images job
+// returns a tile we haven't seen before, or when the originating
+// item path (generate_flow_images) confirms a tile we expected.
+//
+// The bindState column drives the reconciliation UI:
+//
+//   "unbound"  Default for newly-discovered tiles whose origin we
+//              can't tell. Lives in the "Unmatched" tray on the
+//              Flow items tab; user can bind / ignore / animate.
+//   "bound"    User explicitly bound this tile to a Product row.
+//              Survives across scans — re-running the scan doesn't
+//              re-promote bound items back to unbound.
+//   "ignored"  User said "not relevant to this batch". Doesn't
+//              show up in the default Unmatched view. Can be
+//              un-ignored.
+//   "auto"     Tile came from a SaaS-driven generate_flow_images
+//              job and was matched back to its originating Product
+//              via media_id / tile_id at ingest time. Functionally
+//              equivalent to "bound" but distinguishable in the UI
+//              ("this was generated FROM SaaS" vs "this was
+//              manually bound").
+//
+// Why workspace-scoped uniqueness on (workspaceId, mediaId):
+//   Flow's media_id is globally unique within Google's space but
+//   we want one tenant's actions on a tile to be isolated from
+//   another tenant's. (Practically: a single workspace owns all
+//   the runners that touch its Google account.)
+model FlowItem {
+  id                String   @id @default(cuid())
+  workspaceId       String
+  workspace         Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  // Optional batch + product scope — null when the tile is
+  // genuinely unmatched. Bound tiles always have both. Ignored
+  // tiles have batchId set (we ignored them in the context of a
+  // specific batch) but productId null.
+  batchId           String?
+  batch             Batch?   @relation(fields: [batchId], references: [id], onDelete: SetNull)
+  productId         String?
+  product           Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+  // Flow-side identifiers from the runner's tile scan. mediaId is
+  // the most reliable handle (extracted from the image URL);
+  // tileId is composer position; editId is the /edit/<id> portion
+  // of the deep-link to Flow's editor.
+  mediaId           String?
+  tileId            String?
+  editId            String?
+  tileHref          String?
+  // What the runner thinks this tile is — "image" | "video" |
+  // "unknown". Mirrors TileInfo.kind on the runner side.
+  kind              String   @default("unknown")
+  // Whether the tile had the favorite heart toggled ON at last
+  // scan. We update this on every scan; it can flip back and
+  // forth as the user hearts/unhearts in Flow directly.
+  favorited         Boolean  @default(false)
+  // Flow's /fx/api/trpc/media.getMediaUrlRedirect?name=<id> URL
+  // for the tile's image. The thumbnail is fetched directly from
+  // Flow — the SaaS does NOT cache final generated media (per the
+  // hard rule "no SaaS storage of final generated videos").
+  thumbnailUrl      String?
+  // Reconciliation state — one of "unbound" | "bound" |
+  // "ignored" | "auto". See module comment above.
+  bindState         String   @default("unbound")
+  // When this tile first showed up. Useful for "Show me tiles
+  // from the last 24h" / "what arrived after the latest gen job"
+  // queries the Phase-6 UI may want.
+  firstSeenJobId    String?
+  firstSeenAt       DateTime @default(now())
+  // Free-form notes from the user. Used by the "Ignore" flow to
+  // capture WHY a tile was ignored (e.g. "not the right product
+  // — was a Flow auto-suggestion").
+  notes             String?
+  updatedAt         DateTime @updatedAt
+
+  // mediaId is the stable handle — once we know it, an upsert
+  // collapses duplicate scans into one row.
+  @@unique([workspaceId, mediaId])
+  @@index([workspaceId])
+  @@index([batchId])
+  @@index([productId])
+  @@index([bindState])
 }
 
 // ---------------------------------------------------------------------------

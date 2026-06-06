@@ -61,10 +61,12 @@ model Workspace {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  agents   Agent[]
-  batches  Batch[]
-  jobs     Job[]
-  settings WorkspaceSettings?
+  agents     Agent[]
+  batches    Batch[]
+  jobs       Job[]
+  settings   WorkspaceSettings?
+  // Phase 6 — Flow reconciliation. See FlowItem model below.
+  flowItems  FlowItem[]
 }
 
 // ---------------------------------------------------------------------------
@@ -166,8 +168,10 @@ model Batch {
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
-  products Product[]
-  jobs     Job[]
+  products  Product[]
+  jobs      Job[]
+  // Phase 6 — Flow items scoped to this batch.
+  flowItems FlowItem[]
 
   @@index([workspaceId])
 }
@@ -273,6 +277,9 @@ model Product {
   // denormalised cache so existing read paths keep working without
   // a join.
   images             ProductImage[]
+  // Phase 6 — Flow items bound to this product (generated images
+  // / videos the user has approved for this product).
+  flowItems          FlowItem[]
 
   @@index([batchId])
   @@index([reviewStatus])
@@ -339,6 +346,36 @@ model ProductImage {
   // two "primary" images and Phase 3 stays bounded at 3 refs.
   @@unique([productId, role])
   @@index([productId])
+}
+
+// Phase 6 — Flow reconciliation. See schema.prisma for the
+// full module comment; this file mirrors the model exactly.
+model FlowItem {
+  id                String   @id @default(cuid())
+  workspaceId       String
+  workspace         Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  batchId           String?
+  batch             Batch?   @relation(fields: [batchId], references: [id], onDelete: SetNull)
+  productId         String?
+  product           Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+  mediaId           String?
+  tileId            String?
+  editId            String?
+  tileHref          String?
+  kind              String   @default("unknown")
+  favorited         Boolean  @default(false)
+  thumbnailUrl      String?
+  bindState         String   @default("unbound")
+  firstSeenJobId    String?
+  firstSeenAt       DateTime @default(now())
+  notes             String?
+  updatedAt         DateTime @updatedAt
+
+  @@unique([workspaceId, mediaId])
+  @@index([workspaceId])
+  @@index([batchId])
+  @@index([productId])
+  @@index([bindState])
 }
 
 // ---------------------------------------------------------------------------
