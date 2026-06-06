@@ -1538,3 +1538,259 @@ export async function generateAiPromptForProduct(input: {
     };
   }
 }
+
+// ---------------------------------------------------------------------
+// Phase 9 — IP / trademark risk screening
+// ---------------------------------------------------------------------
+//
+// Server actions:
+//   - checkProductIpRisk        — run heuristic (always) + optional AI
+//                                  check on a single product. Higher
+//                                  score wins on merge. Client
+//                                  parallelises for batch checks.
+//   - setProductIpRiskOverride   — record / clear the per-product
+//                                  override that lets a high-risk
+//                                  product through generation. High
+//                                  risk override requires a reason.
+//
+// Hard rules preserved from the Phase 9 spec:
+//   - Messaging says "potential risk", never "illegal".
+//   - High and needs_manual_review excluded from generation by default.
+//   - High override requires a written reason logged with timestamp.
+//   - AI call sends ONLY product text — no API keys, no runner tokens,
+//     no cookies.
+
+import {
+  assessProductIpRisk,
+  mergeIpRisk,
+  type IpRiskAssessment,
+  type IpRiskStatus,
+} from "@/lib/ip-risk";
+import { aiAssessIpRisk } from "@/lib/ai/ip-risk-ai";
+
+export interface CheckProductIpRiskResult {
+  ok: boolean;
+  productId: string;
+  /** Final merged verdict (heuristic ∪ AI, higher score wins). */
+  status: IpRiskStatus;
+  /** Concatenated reasons — heuristic first, then AI-prefixed reasons. */
+  reasons: string[];
+  /** "approve" / "review" / "reject" — non-binding; gating uses status. */
+  recommendation: IpRiskAssessment["recommendation"];
+  /** Provider that handled the AI half (or "manual" / "heuristic-only"). */
+  provider: string;
+  /** Free-form transport error message when ok=false. */
+  message: string;
+}
+
+/**
+ * Run the IP/trademark risk screen on one product. Heuristic always
+ * runs; AI runs only when `useAi` is true AND the workspace has a
+ * non-manual provider configured.
+ *
+ * Persists the merged verdict to the product row:
+ *   - ipRiskStatus
+ *   - ipRiskReasons (JSON-encoded string[])
+ *   - ipRiskCheckedAt (now)
+ *
+ * Does NOT modify ipRiskOverride or its reason/timestamp — those are
+ * user-driven and stay sticky across re-runs.
+ */
+export async function checkProductIpRisk(input: {
+  batchId: string;
+  productId: string;
+  useAi?: boolean;
+}): Promise<CheckProductIpRiskResult> {
+  const { batchId, productId, useAi = false } = input;
+  if (!batchId || !productId) {
+    return _emptyIpRiskResult(productId, "missing batchId or productId");
+  }
+
+  const { workspace } = await getCurrentWorkspace();
+  const batch = await db.batch.findFirst({
+    where: { id: batchId, workspaceId: workspace.id },
+    select: { id: true },
+  });
+  if (!batch) return _emptyIpRiskResult(productId, "batch not found");
+
+  const product = await db.product.findFirst({
+    where: { id: productId, batchId: batch.id, deletedAt: null },
+    select: {
+      id: true,
+      productName: true,
+      originalTitle: true,
+      category: true,
+      tiktokUrl: true,
+    },
+  });
+  if (!product) return _emptyIpRiskResult(productId, "product not found");
+
+  // Heuristic always runs — it's pure, cheap, no API key needed.
+  const heuristic = assessProductIpRisk({
+    productName:   product.productName,
+    originalTitle: product.originalTitle,
+    category:      product.category,
+    tiktokUrl:     product.tiktokUrl,
+  });
+
+  // AI check is opt-in. Manual provider returns null (no AI to call).
+  let aiVerdict: IpRiskAssessment | null = null;
+  let providerLabel = "heuristic-only";
+  if (useAi) {
+    const settingsRow = await loadOrCreateSettings(workspace.id);
+    const settings = toServerSettings(settingsRow);
+    try {
+      const aiResult = await aiAssessIpRisk(
+        {
+          productName:   product.productName,
+          originalTitle: product.originalTitle,
+          category:      product.category,
+          tiktokUrl:     product.tiktokUrl,
+        },
+        settings,
+      );
+      if (aiResult) {
+        aiVerdict = aiResult.verdict;
+        providerLabel = `heuristic + ${aiResult.provider} (${aiResult.model})`;
+      } else {
+        // Provider was "manual" — no AI call to make.
+        providerLabel = "heuristic-only (manual provider)";
+      }
+    } catch (err) {
+      const e = err as Error;
+      // AI failure shouldn't block persistence of the heuristic
+      // verdict. Log the failure as a synthetic reason so the user
+      // sees what happened, but persist the heuristic-only result.
+      heuristic.reasons.push(
+        `AI check failed: ${e.name}: ${String(e.message ?? e).slice(0, 160)}`,
+      );
+      providerLabel = "heuristic-only (AI call failed)";
+    }
+  }
+
+  const merged = mergeIpRisk(heuristic, aiVerdict);
+
+  // Persist. ipRiskReasons stores the JSON-encoded merged reasons —
+  // decode helper in lib/ip-risk.ts.
+  await db.product.update({
+    where: { id: productId },
+    data: {
+      ipRiskStatus:    merged.status,
+      ipRiskReasons:   encodeJson(merged.reasons),
+      ipRiskCheckedAt: new Date(),
+    },
+  });
+
+  revalidatePath(`/batches/${batchId}`);
+
+  return {
+    ok: true,
+    productId,
+    status:         merged.status,
+    reasons:        merged.reasons,
+    recommendation: merged.recommendation,
+    provider:       providerLabel,
+    message:        `Risk verdict: ${merged.status}.`,
+  };
+}
+
+function _emptyIpRiskResult(
+  productId: string,
+  message: string,
+): CheckProductIpRiskResult {
+  return {
+    ok:             false,
+    productId,
+    status:         "unchecked",
+    reasons:        [],
+    recommendation: "review",
+    provider:       "",
+    message,
+  };
+}
+
+/**
+ * Set or clear the per-product override. Override lets a high-risk
+ * product through image generation; for "high" or
+ * "needs_manual_review" rows, an override REQUIRES a written reason
+ * (per the Phase 9 spec).
+ *
+ * To clear an override: pass override=false; reason is ignored.
+ */
+export async function setProductIpRiskOverride(formData: FormData): Promise<{
+  ok: boolean;
+  message: string;
+}> {
+  const productId = String(formData.get("productId") || "");
+  const batchId = String(formData.get("batchId") || "");
+  const overrideRaw = String(formData.get("override") || "");
+  const reason = String(formData.get("reason") || "").trim();
+
+  if (!productId || !batchId) {
+    return { ok: false, message: "Missing productId or batchId" };
+  }
+  const override = overrideRaw === "true" || overrideRaw === "on";
+
+  const { workspace } = await getCurrentWorkspace();
+  const batch = await db.batch.findFirst({
+    where: { id: batchId, workspaceId: workspace.id },
+    select: { id: true },
+  });
+  if (!batch) return { ok: false, message: "Batch not found" };
+
+  const product = await db.product.findFirst({
+    where: { id: productId, batchId: batch.id },
+    select: { id: true, ipRiskStatus: true },
+  });
+  if (!product) return { ok: false, message: "Product not found" };
+
+  // High-risk override requires a reason. Low/medium can be
+  // overridden without one (rare path — you'd only override low/
+  // medium if you wanted to FORCE generation past the
+  // "approve-only" gate, but that gate doesn't filter low/medium
+  // anyway, so override on those is a no-op).
+  if (
+    override &&
+    (product.ipRiskStatus === "high" ||
+      product.ipRiskStatus === "needs_manual_review") &&
+    reason.length === 0
+  ) {
+    return {
+      ok: false,
+      message:
+        "An override reason is required for high-risk or needs-review products.",
+    };
+  }
+
+  if (override) {
+    await db.product.update({
+      where: { id: productId },
+      data: {
+        ipRiskOverride:       true,
+        ipRiskOverrideReason: reason || null,
+        ipRiskOverrideAt:     new Date(),
+      },
+    });
+  } else {
+    // Clearing: wipe reason and timestamp too, so a future re-check
+    // doesn't see stale audit data.
+    await db.product.update({
+      where: { id: productId },
+      data: {
+        ipRiskOverride:       false,
+        ipRiskOverrideReason: null,
+        ipRiskOverrideAt:     null,
+      },
+    });
+  }
+
+  revalidatePath(`/batches/${batchId}`);
+  return {
+    ok: true,
+    message: override ? "Override recorded." : "Override cleared.",
+  };
+}
+
+// Note: decodeIpRiskReasons and IP_RISK_STATUSES are pure values,
+// not server actions. Client / server-component consumers should
+// import them directly from "@/lib/ip-risk".
