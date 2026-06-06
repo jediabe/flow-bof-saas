@@ -29,6 +29,13 @@
 
 import { db } from "@/lib/db";
 import { parseJson } from "@/lib/json-column";
+import { promises as fs } from "node:fs";
+import path from "node:path";
+import { Buffer } from "node:buffer";
+import {
+  getWorkspaceUploadDir,
+  publicUploadUrlFor,
+} from "@/lib/uploads";
 
 interface ScanItem {
   media_id?: string;
@@ -38,6 +45,14 @@ interface ScanItem {
   kind?: string;
   favorited?: boolean;
   thumbnail_src?: string;
+  /** Phase 6 thumbnail bundling (runner ≥ 0.6.6-alpha): base64 of
+   *  the tile's image fetched by the runner's authenticated Flow
+   *  page. Absent on older runners; ingester falls back to
+   *  thumbnail_src (which will render as a broken image because
+   *  labs.google requires auth, but the alt text and media_id
+   *  still flow through). */
+  thumbnail_b64?: string;
+  thumbnail_mime?: string;
 }
 
 interface ScanResult {
@@ -71,6 +86,69 @@ export interface FlowItemIngestSummary {
   /** ISO timestamp of the most-recent successful scan ingested,
    *  or null if no scan has run for this batch yet. */
   lastScanAt: string | null;
+}
+
+/** Mime → file-extension lookup. Defaults to "jpg" for anything
+ *  not in the table (matches our existing image-sniff fallbacks). */
+const MIME_TO_EXT: Record<string, string> = {
+  "image/jpeg": "jpg",
+  "image/jpg":  "jpg",
+  "image/png":  "png",
+  "image/webp": "webp",
+  "image/gif":  "gif",
+};
+
+/**
+ * Decode a base64 thumbnail from the runner's scan result and
+ * save it to /uploads/workspaces/<ws>/flow-thumbnails/<mediaId>.<ext>.
+ * Returns the public /uploads/... URL on success, null on any
+ * failure (decoding error, write failure, oversized payload).
+ *
+ * Idempotent — re-running the same mediaId overwrites the file.
+ * Caller invokes once per scan ingest.
+ */
+async function _saveThumbnailFromBase64(
+  workspaceId: string,
+  mediaId: string,
+  b64: string,
+  mime: string | undefined,
+): Promise<string | null> {
+  try {
+    // Reasonable hard cap on the SaaS side too, in case a runner
+    // ever sends something massive — keep prod safe even if a
+    // future runner has a bug.
+    const MAX_BYTES = 512 * 1024; // 512 KB
+    if (b64.length > (MAX_BYTES * 4) / 3 + 64) return null;
+
+    const buf = Buffer.from(b64, "base64");
+    if (buf.byteLength === 0 || buf.byteLength > MAX_BYTES) return null;
+
+    const ct = (mime ?? "image/jpeg").toLowerCase();
+    const ext = MIME_TO_EXT[ct] ?? "jpg";
+
+    // Sanitise mediaId for use in a filename. Flow media_ids are
+    // UUID-ish today but be defensive.
+    const safeId = mediaId.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 64);
+    if (!safeId) return null;
+
+    const dir = path.join(
+      getWorkspaceUploadDir(workspaceId),
+      "flow-thumbnails",
+    );
+    await fs.mkdir(dir, { recursive: true });
+    const filename = `${safeId}.${ext}`;
+    const filePath = path.join(dir, filename);
+    await fs.writeFile(filePath, buf);
+    return publicUploadUrlFor(
+      "workspaces",
+      workspaceId,
+      "flow-thumbnails",
+      filename,
+    );
+  } catch (err) {
+    console.warn("[flow-items] thumbnail save failed:", err);
+    return null;
+  }
 }
 
 /**
@@ -152,6 +230,24 @@ export async function ingestFlowItemsForBatch(input: {
       // overwrite a user's manual binding on subsequent scans.
       const autoBindTarget = mediaIdToProduct.get(mediaId);
 
+      // Phase 6 — save the base64 thumbnail bundled by newer
+      // runners (≥ 0.6.6-alpha) to /uploads/.../flow-thumbnails/.
+      // Falls back to the raw labs.google URL on older runners
+      // (will render as a broken image but the rest of the row
+      // still works). Idempotent: re-ingesting the same mediaId
+      // overwrites the file rather than creating dupes.
+      let savedThumbnailUrl: string | null = null;
+      if (it.thumbnail_b64) {
+        savedThumbnailUrl = await _saveThumbnailFromBase64(
+          workspaceId,
+          mediaId,
+          it.thumbnail_b64,
+          it.thumbnail_mime,
+        );
+      }
+      const incomingThumbnailUrl =
+        savedThumbnailUrl ?? it.thumbnail_src ?? null;
+
       // Upsert keyed on (workspaceId, mediaId) — the unique index
       // on the table. Existing rows update favorited / thumbnail
       // / tileId / editId from the latest scan but DO NOT touch
@@ -169,7 +265,12 @@ export async function ingestFlowItemsForBatch(input: {
             tileHref:     it.tile_href || existing.tileHref,
             kind:         (it.kind || existing.kind) || "unknown",
             favorited:    !!it.favorited,
-            thumbnailUrl: it.thumbnail_src || existing.thumbnailUrl,
+            // Prefer the fresh bundled thumbnail when present;
+            // otherwise keep whatever the row already had so a
+            // failed bundle on a later scan doesn't wipe a
+            // working thumbnail saved by an earlier one.
+            thumbnailUrl:
+              incomingThumbnailUrl ?? existing.thumbnailUrl,
             // Surface this scan as the "still seen" signal. The
             // firstSeenJobId / firstSeenAt stay frozen on first
             // ingest — useful for "when did we first see this?"
@@ -193,7 +294,7 @@ export async function ingestFlowItemsForBatch(input: {
             tileHref:       it.tile_href || null,
             kind:           it.kind || "unknown",
             favorited:      !!it.favorited,
-            thumbnailUrl:   it.thumbnail_src || null,
+            thumbnailUrl:   incomingThumbnailUrl,
             firstSeenJobId: j.id,
             firstSeenAt:    j.createdAt,
           },
