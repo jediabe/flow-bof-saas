@@ -70,6 +70,7 @@ export default function IpRiskRow({
   const [checking, startCheckTransition] = useTransition();
   const [overrideSaving, startOverrideTransition] = useTransition();
   const [useAi, setUseAi] = useState(false);
+  const [useVision, setUseVision] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showOverrideForm, setShowOverrideForm] = useState(false);
   const [overrideReason, setOverrideReason] = useState(
@@ -83,6 +84,9 @@ export default function IpRiskRow({
         batchId:   product.batchId,
         productId: product.id,
         useAi,
+        // Vision implies AI — guard against the UI letting the user
+        // tick vision without AI (the server action also enforces).
+        useVision: useAi && useVision,
       });
       if (!r.ok) setError(r.message);
     });
@@ -131,15 +135,36 @@ export default function IpRiskRow({
             />
             with AI
           </label>
+          <label
+            className={`inline-flex items-center gap-1 text-[11px] select-none ${
+              useAi ? "text-muted" : "text-muted2 cursor-not-allowed"
+            }`}
+            title={
+              !useAi
+                ? "Vision check requires 'with AI' to be enabled."
+                : "Vision-assisted check — sends the reference image to the AI provider so it can verify logo authenticity, spot misspelled brand text on packaging, and identify counterfeit-looking products. Uses a vision-capable model (gpt-4o, claude-3.5-sonnet, etc.)."
+            }
+          >
+            <input
+              type="checkbox"
+              checked={useVision}
+              onChange={(e) => setUseVision(e.target.checked)}
+              disabled={checking || !useAi}
+              className="accent-accent"
+            />
+            + vision
+          </label>
           <button
             type="button"
             className="btn btn-ghost text-[11px] px-2 py-1"
             onClick={runCheck}
             disabled={checking}
             title={
-              useAi
-                ? "Run the deterministic heuristic plus an AI-assisted second opinion. AI provider must be configured in Settings."
-                : "Run the deterministic heuristic only. No AI cost, no API key required."
+              useAi && useVision
+                ? "Run heuristic + AI + vision check on the reference image."
+                : useAi
+                  ? "Run the deterministic heuristic plus an AI-assisted second opinion. AI provider must be configured in Settings."
+                  : "Run the deterministic heuristic only. No AI cost, no API key required."
             }
           >
             {checking ? "Checking…" : "Check IP risk"}

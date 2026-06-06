@@ -37,6 +37,7 @@ import {
   IP_RISK_STATUSES,
   type ProductForRiskCheck,
 } from "../ip-risk";
+import { Buffer } from "node:buffer";
 
 // ---------------------------------------------------------------------
 // System prompt — verbatim spec language, with the hard "never say
@@ -390,6 +391,313 @@ export async function aiAssessIpRisk(
       return anthropicIpRisk(input, settings);
     case "openrouter":
       return openrouterIpRisk(input, settings);
+    default:
+      throw new Error(`Unknown AI provider: ${settings.provider}`);
+  }
+}
+
+// ---------------------------------------------------------------------
+// Vision-assisted check
+// ---------------------------------------------------------------------
+//
+// Pure-text screening misses the signals that matter most for
+// counterfeit detection: actual logos on packaging, misspelled
+// brand text on the product, generic-looking packaging that doesn't
+// match the claimed brand, poor print quality consistent with
+// counterfeits. Vision-capable AI models can read those.
+//
+// This entry point is opt-in (user clicks "with vision" in the UI)
+// and ONLY runs when:
+//   - A vision-capable provider is configured (OpenAI / Anthropic /
+//     OpenRouter; manual provider returns null).
+//   - The product has a reference image URL we can fetch.
+//
+// The verdict still passes through the merge function — vision can
+// only ESCALATE the heuristic's verdict (higher score wins). A
+// legitimate listing with a clean image stays LOW; a "Nikee Air Max"
+// title whose image shows a real Nike logo + clean packaging
+// stays MEDIUM/needs-review (the typosquat is suspicious but the
+// image suggests genuine product, so we want manual review, not
+// auto-reject).
+//
+// Privacy contract preserved: we send the product's text + the
+// reference image URL (OpenAI/OpenRouter) or base64-encoded bytes
+// (Anthropic). NEVER the API key, runner token, or workspace
+// cookies.
+
+const IP_RISK_VISION_SYSTEM_PROMPT = `You are a COUNTERFEIT / brand-
+impersonation screener for TikTok Shop product listings. You have
+access to both the product TITLE and the PRODUCT IMAGE.
+
+Use the image to verify (or refute) the title's brand claims.
+This is the most useful signal we have — most counterfeit products
+look "off" in ways the text can't capture.
+
+WHAT THE IMAGE TELLS YOU:
+
+1. **Logo authenticity** — does the brand mark on the product /
+   packaging match the real brand's logo? Counterfeits often have
+   subtly wrong proportions, fonts, or colors. Authentic logos
+   look like the brand's official marks. Examples:
+   - Real Nike swoosh: clean curve, specific proportions.
+   - Counterfeit Nike: slight asymmetry, wrong angle.
+   - Real Apple logo: bite on right side, specific leaf shape.
+   - Counterfeit Apple: missing leaf, wrong bite ratio.
+
+2. **Text misspellings on the product or packaging** — this is
+   one of the strongest signals. If the title says "Apple iPhone"
+   but the image shows "Apel" or "Aplle" on the product, that's
+   a CLEAR counterfeit signal.
+
+3. **Packaging quality** — authentic brand packaging has
+   consistent printing, accurate colors, professional layout.
+   Counterfeits often show:
+   - Slightly off colors
+   - Pixellation / blurry logos
+   - Wrong font weights
+   - Generic-looking boxes
+   - "Made in <wrong country>" labels (e.g., "Made in China" on a
+     Stanley Cup that's actually US-made; minor signal — many
+     brands manufacture overseas)
+
+4. **Brand consistency** — does the image actually show the brand
+   claimed in the title? A title claiming "Lego Star Wars" but
+   showing a generic block set with no Lego logo is a strong
+   counterfeit signal.
+
+5. **Product category match** — does the visible product match the
+   title? Photo of generic shoes captioned "Nike Air Jordan 1" =
+   probably counterfeit if the swoosh / Jumpman logo is absent or
+   wrong.
+
+ALL THE TEXT-LAYER RULES STILL APPLY (you saw them in the
+non-vision prompt — they're not repeated here, but: never say
+"illegal", default LOW for legitimate listings, only HIGH on clear
+counterfeit signals, brand mention alone is NOT a counterfeit
+signal).
+
+RULES SPECIFIC TO VISION:
+
+- **A clean, professional product image of the named brand is a
+  STRONG positive signal.** If the title says "Eufy Video
+  Doorbell" and the image shows a clean Eufy product with the
+  proper Eufy logo, this is a legitimate listing — mark LOW.
+- **A clearly off / counterfeit-looking image is a STRONG negative
+  signal.** Even if the title is innocent, an image with
+  misspelled brand text or fake-looking logo = HIGH.
+- **Image alone is rarely conclusive.** A blurry photo doesn't
+  mean counterfeit (it might just be a bad seller photo). Weight
+  the image WITH the text, not in isolation.
+- **If the image doesn't clearly show the product** (placeholder,
+  stock photo, screenshot, watermark-only) flag the verdict as
+  needs_manual_review and explain in reasons.
+- **If you can't see the image** for any reason, fall back to the
+  text-only assessment and note that vision was unavailable in
+  your reasons.
+
+OUTPUT — same strict JSON as the text-only version:
+
+{
+  "ipRiskStatus": "low" | "medium" | "high" | "needs_manual_review",
+  "reasons": ["<observations from text AND image>"],
+  "recommendation": "approve" | "review" | "reject",
+  "notes": "<one short sentence summarising your verdict>"
+}
+
+Prefix any image-derived observations with "[image]" so the user
+can see which signals came from where:
+  - "[image] Logo appears authentic — clean Eufy mark with
+    correct font."
+  - "[image] Packaging shows 'Adiidas' misspelling — strong
+    counterfeit signal."
+  - "[image] Generic-looking shoe with no visible Nike branding
+    despite 'Nike Air Max' title."
+
+If no counterfeit/impersonation signal in EITHER text or image:
+  status="low", reasons=[], recommendation="approve",
+  notes="No counterfeit or impersonation signals in text or
+  image."`;
+
+/**
+ * Fetch a public URL and return it base64-encoded. Used by the
+ * Anthropic vision path which doesn't accept raw URLs.
+ *
+ * Limits: 8 MiB max (Anthropic's per-request image cap is ~5 MiB
+ * for most models; we leave headroom). Throws on non-image
+ * content-type or oversized payload.
+ */
+async function fetchImageAsBase64(
+  url: string,
+): Promise<{ data: string; mediaType: "image/jpeg" | "image/png" | "image/webp" | "image/gif" }> {
+  const resp = await fetch(url);
+  if (!resp.ok) {
+    throw new Error(`Image fetch failed: HTTP ${resp.status} ${resp.statusText}`);
+  }
+  const ct = (resp.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+  if (!ct.startsWith("image/")) {
+    throw new Error(`Image fetch returned non-image content-type: ${ct || "?"}`);
+  }
+  const buf = Buffer.from(await resp.arrayBuffer());
+  const MAX = 8 * 1024 * 1024;
+  if (buf.byteLength > MAX) {
+    throw new Error(
+      `Image too large (${buf.byteLength} bytes, max ${MAX}).`,
+    );
+  }
+  // Anthropic accepts jpeg / png / webp / gif. Coerce anything else
+  // to image/jpeg (still works on server side; we already verified
+  // the bytes via content-type).
+  const allowed = ["image/jpeg", "image/png", "image/webp", "image/gif"] as const;
+  const mediaType = (allowed.includes(ct as typeof allowed[number])
+    ? ct
+    : "image/jpeg") as (typeof allowed)[number];
+  return { data: buf.toString("base64"), mediaType };
+}
+
+async function openaiIpRiskVision(
+  input: ProductForRiskCheck,
+  settings: AiProviderSettings,
+  imageUrl: string,
+): Promise<AiRiskCallResult> {
+  const apiKey = (settings.openaiApiKey ?? "").trim();
+  if (!apiKey) throw new Error("OpenAI API key is empty.");
+  const model = (settings.openaiModel || "").trim() || DEFAULT_MODELS.openai;
+  const client = new OpenAI({ apiKey });
+  const resp = await client.chat.completions.create({
+    model,
+    response_format: { type: "json_object" },
+    temperature: 0.2,
+    messages: [
+      { role: "system", content: IP_RISK_VISION_SYSTEM_PROMPT },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: formatIpRiskUserPrompt(input) },
+          { type: "image_url", image_url: { url: imageUrl } },
+        ],
+      },
+    ],
+  });
+  const content = resp.choices?.[0]?.message?.content ?? "";
+  return {
+    verdict: normaliseAiVerdict(extractJson(content)),
+    provider: "openai",
+    model,
+  };
+}
+
+async function anthropicIpRiskVision(
+  input: ProductForRiskCheck,
+  settings: AiProviderSettings,
+  imageUrl: string,
+): Promise<AiRiskCallResult> {
+  const apiKey = (settings.anthropicApiKey ?? "").trim();
+  if (!apiKey) throw new Error("Anthropic API key is empty.");
+  const model =
+    (settings.anthropicModel || "").trim() || DEFAULT_MODELS.anthropic;
+  const client = new Anthropic({ apiKey });
+  const { data, mediaType } = await fetchImageAsBase64(imageUrl);
+  const message = await client.messages.create({
+    model,
+    max_tokens: 1024,
+    temperature: 0.2,
+    system: IP_RISK_VISION_SYSTEM_PROMPT + "\n\nReturn JSON only. No markdown.",
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "image",
+            source: { type: "base64", media_type: mediaType, data },
+          },
+          { type: "text", text: formatIpRiskUserPrompt(input) },
+        ],
+      },
+    ],
+  });
+  const text = message.content
+    .map((b) => (b.type === "text" ? b.text : ""))
+    .join("");
+  return {
+    verdict: normaliseAiVerdict(extractJson(text)),
+    provider: "anthropic",
+    model,
+  };
+}
+
+async function openrouterIpRiskVision(
+  input: ProductForRiskCheck,
+  settings: AiProviderSettings,
+  imageUrl: string,
+): Promise<AiRiskCallResult> {
+  const apiKey = (settings.openrouterApiKey ?? "").trim();
+  if (!apiKey) throw new Error("OpenRouter API key is empty.");
+  const model =
+    (settings.openrouterModel || "").trim() || DEFAULT_MODELS.openrouter;
+  const defaultHeaders: Record<string, string> = {};
+  if (settings.openrouterSiteUrl)
+    defaultHeaders["HTTP-Referer"] = settings.openrouterSiteUrl;
+  if (settings.openrouterAppName)
+    defaultHeaders["X-Title"] = settings.openrouterAppName;
+  const client = new OpenAI({
+    apiKey,
+    baseURL: "https://openrouter.ai/api/v1",
+    defaultHeaders: Object.keys(defaultHeaders).length
+      ? defaultHeaders
+      : undefined,
+  });
+  const resp = await client.chat.completions.create({
+    model,
+    temperature: 0.2,
+    messages: [
+      {
+        role: "system",
+        content: IP_RISK_VISION_SYSTEM_PROMPT + "\n\nReturn JSON only.",
+      },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: formatIpRiskUserPrompt(input) },
+          { type: "image_url", image_url: { url: imageUrl } },
+        ],
+      },
+    ],
+  });
+  const content = resp.choices?.[0]?.message?.content ?? "";
+  return {
+    verdict: normaliseAiVerdict(extractJson(content)),
+    provider: "openrouter",
+    model,
+  };
+}
+
+/**
+ * Vision-assisted IP risk check. Same entry-point contract as
+ * `aiAssessIpRisk` but uses a vision-capable model and sends the
+ * reference image along with the product text.
+ *
+ * Returns `null` for the manual provider (no model to call).
+ * Throws on transport errors — caller decides whether to fall
+ * back to text-only or surface the failure.
+ *
+ * `imageUrl` MUST be absolute and publicly fetchable. The
+ * SaaS-side `toAgentAssetUrl` helper turns `/uploads/...` paths
+ * into the right shape.
+ */
+export async function aiAssessIpRiskWithVision(
+  input: ProductForRiskCheck,
+  settings: AiProviderSettings,
+  imageUrl: string,
+): Promise<AiRiskCallResult | null> {
+  switch (settings.provider) {
+    case "manual":
+      return null;
+    case "openai":
+      return openaiIpRiskVision(input, settings, imageUrl);
+    case "anthropic":
+      return anthropicIpRiskVision(input, settings, imageUrl);
+    case "openrouter":
+      return openrouterIpRiskVision(input, settings, imageUrl);
     default:
       throw new Error(`Unknown AI provider: ${settings.provider}`);
   }

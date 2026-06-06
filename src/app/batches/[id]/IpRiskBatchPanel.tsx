@@ -56,6 +56,7 @@ export default function IpRiskBatchPanel({
   onFilterChange: (next: IpRiskFilter) => void;
 }) {
   const [useAi, setUseAi] = useState(false);
+  const [useVision, setUseVision] = useState(false);
   const [running, setRunning] = useState(false);
   const [runStates, setRunStates] = useState<Map<string, ProductRunState>>(
     new Map(),
@@ -103,6 +104,7 @@ export default function IpRiskBatchPanel({
             batchId,
             productId: p.id,
             useAi,
+            useVision: useAi && useVision,
           });
           setRunStates((prev) => {
             const next = new Map(prev);
@@ -217,15 +219,36 @@ export default function IpRiskBatchPanel({
             />
             with AI second opinion
           </label>
+          <label
+            className={`inline-flex items-center gap-1.5 text-[11px] select-none pb-2 ${
+              useAi ? "text-muted" : "text-muted2 cursor-not-allowed"
+            }`}
+            title={
+              !useAi
+                ? "Vision check requires 'with AI second opinion' to be enabled."
+                : "Vision-assisted check on each product's reference image. Catches logo authenticity issues, misspelled brand text on packaging, and counterfeit-looking visuals that pure text can't see. Requires a vision-capable AI model (gpt-4o, claude-3.5-sonnet, etc.)."
+            }
+          >
+            <input
+              type="checkbox"
+              checked={useVision}
+              onChange={(e) => setUseVision(e.target.checked)}
+              disabled={running || !useAi}
+              className="accent-accent"
+            />
+            + check reference images
+          </label>
           <button
             type="button"
             className="btn btn-primary"
             disabled={running || products.length === 0}
             onClick={runBatch}
             title={
-              useAi
-                ? "Run the heuristic + AI on every product. Uses your configured AI provider."
-                : "Run the deterministic heuristic on every product. No API key required."
+              useAi && useVision
+                ? "Run heuristic + AI + vision on every product. Sends each product's reference image to the AI for counterfeit-visual screening."
+                : useAi
+                  ? "Run the heuristic + AI on every product. Uses your configured AI provider."
+                  : "Run the deterministic heuristic on every product. No API key required."
             }
           >
             {running

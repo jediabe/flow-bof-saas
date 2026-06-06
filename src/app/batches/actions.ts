@@ -1566,7 +1566,11 @@ import {
   type IpRiskAssessment,
   type IpRiskStatus,
 } from "@/lib/ip-risk";
-import { aiAssessIpRisk } from "@/lib/ai/ip-risk-ai";
+import {
+  aiAssessIpRisk,
+  aiAssessIpRiskWithVision,
+} from "@/lib/ai/ip-risk-ai";
+import { toAgentAssetUrl } from "@/lib/uploads";
 
 export interface CheckProductIpRiskResult {
   ok: boolean;
@@ -1600,8 +1604,18 @@ export async function checkProductIpRisk(input: {
   batchId: string;
   productId: string;
   useAi?: boolean;
+  /** Phase 9 v2 — when true AND useAi is true AND the product has
+   *  a reference image, runs the vision-assisted AI check
+   *  (catches misspellings on packaging, fake logos, etc. that
+   *  text-only can't see). Falls back to text-only AI on failure. */
+  useVision?: boolean;
 }): Promise<CheckProductIpRiskResult> {
-  const { batchId, productId, useAi = false } = input;
+  const {
+    batchId,
+    productId,
+    useAi = false,
+    useVision = false,
+  } = input;
   if (!batchId || !productId) {
     return _emptyIpRiskResult(productId, "missing batchId or productId");
   }
@@ -1621,6 +1635,8 @@ export async function checkProductIpRisk(input: {
       originalTitle: true,
       category: true,
       tiktokUrl: true,
+      // Phase 9 v2 — fetch the primary image URL for vision check.
+      referenceImageUrl: true,
     },
   });
   if (!product) return _emptyIpRiskResult(productId, "product not found");
@@ -1639,32 +1655,85 @@ export async function checkProductIpRisk(input: {
   if (useAi) {
     const settingsRow = await loadOrCreateSettings(workspace.id);
     const settings = toServerSettings(settingsRow);
+
+    // Vision-assisted check needs an absolute, publicly fetchable
+    // image URL. Fall back to text-only when vision is requested
+    // but no image is available (don't make the user re-click).
+    const visionImageUrl =
+      useVision && product.referenceImageUrl
+        ? toAgentAssetUrl(product.referenceImageUrl)
+        : null;
+    const visionWanted = useVision && visionImageUrl !== null;
+
     try {
-      const aiResult = await aiAssessIpRisk(
-        {
-          productName:   product.productName,
-          originalTitle: product.originalTitle,
-          category:      product.category,
-          tiktokUrl:     product.tiktokUrl,
-        },
-        settings,
-      );
+      const aiResult = visionWanted
+        ? await aiAssessIpRiskWithVision(
+            {
+              productName:   product.productName,
+              originalTitle: product.originalTitle,
+              category:      product.category,
+              tiktokUrl:     product.tiktokUrl,
+            },
+            settings,
+            visionImageUrl!,
+          )
+        : await aiAssessIpRisk(
+            {
+              productName:   product.productName,
+              originalTitle: product.originalTitle,
+              category:      product.category,
+              tiktokUrl:     product.tiktokUrl,
+            },
+            settings,
+          );
       if (aiResult) {
         aiVerdict = aiResult.verdict;
-        providerLabel = `heuristic + ${aiResult.provider} (${aiResult.model})`;
+        const visionTag = visionWanted ? " + vision" : "";
+        providerLabel = `heuristic + ${aiResult.provider}${visionTag} (${aiResult.model})`;
       } else {
         // Provider was "manual" — no AI call to make.
         providerLabel = "heuristic-only (manual provider)";
       }
     } catch (err) {
       const e = err as Error;
-      // AI failure shouldn't block persistence of the heuristic
-      // verdict. Log the failure as a synthetic reason so the user
-      // sees what happened, but persist the heuristic-only result.
-      heuristic.reasons.push(
-        `AI check failed: ${e.name}: ${String(e.message ?? e).slice(0, 160)}`,
-      );
-      providerLabel = "heuristic-only (AI call failed)";
+      // Vision failure → try text-only as a graceful fallback
+      // before giving up. A bad image URL or rate-limited vision
+      // model shouldn't block the AI check entirely.
+      if (visionWanted) {
+        try {
+          const fallback = await aiAssessIpRisk(
+            {
+              productName:   product.productName,
+              originalTitle: product.originalTitle,
+              category:      product.category,
+              tiktokUrl:     product.tiktokUrl,
+            },
+            settings,
+          );
+          if (fallback) {
+            aiVerdict = fallback.verdict;
+            providerLabel = `heuristic + ${fallback.provider} (${fallback.model}) [vision failed: ${e.name}]`;
+            // Skip the heuristic-error pushback below; we got a
+            // successful text-only verdict.
+            heuristic.reasons.push(
+              `Vision check failed (${e.name}: ${String(e.message ?? e).slice(0, 120)}); fell back to text-only AI.`,
+            );
+          } else {
+            providerLabel = "heuristic-only (AI call failed)";
+          }
+        } catch (fallbackErr) {
+          const fe = fallbackErr as Error;
+          heuristic.reasons.push(
+            `AI check failed: ${fe.name}: ${String(fe.message ?? fe).slice(0, 160)}`,
+          );
+          providerLabel = "heuristic-only (AI call failed)";
+        }
+      } else {
+        heuristic.reasons.push(
+          `AI check failed: ${e.name}: ${String(e.message ?? e).slice(0, 160)}`,
+        );
+        providerLabel = "heuristic-only (AI call failed)";
+      }
     }
   }
 
