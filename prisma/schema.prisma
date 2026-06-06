@@ -196,6 +196,13 @@ model Product {
   // AI-generated supporting copy. Optional — populated by
   // generateAiPrompts; manual / deterministic fallback leaves them null.
   hook                    String?
+  // JSON-encoded array of all hook variants the AI generated.
+  // Shape: [{label: "A1"|...|"lever-1"|..., text: "...", lever_name?: string}]
+  // The `hook` field above is hookVariants[0].text — kept as a
+  // denormalised cache so mobile-posting / cooldown-banner consumers
+  // that read a single hook keep working untouched. Empty / null
+  // for products generated before this column existed.
+  hookVariants            String?
   caption                 String?
   // JSON-encoded string[] (SQLite has no array type). Read with
   // parseJson<string[]>(p.hashtags) on the consumer side.

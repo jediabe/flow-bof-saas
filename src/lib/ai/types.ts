@@ -93,6 +93,21 @@ export interface AiPromptOutput {
   retailEnvironment?: string;
   imagePrompt:  string;
   hook?:        string;
+  /**
+   * All hook variants the AI generated for this product. For UK
+   * that's 5 or 6 templates (A1/A2/A3/B1/B2, optionally B3 when a
+   * price was supplied). For US that's all 7 levers. `hook` above
+   * mirrors hookVariants[0].text for back-compat — older consumers
+   * that read a single hook keep working.
+   */
+  hookVariants?: Array<{
+    label: string;
+    text: string;
+    /** US-only: human-readable lever name ("Reflected Social
+     *  Proof", "Identity Forecasting", …) so the UI can show the
+     *  lever's intent next to the hook text. */
+    leverName?: string;
+  }>;
   caption?:     string;
   hashtags?:    string[];
   /**

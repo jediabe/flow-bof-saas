@@ -89,6 +89,56 @@ function asString(value: unknown): string {
 }
 
 /**
+ * Coerce a "hook_variants" value into our typed shape. Tolerates:
+ *   - Array of {label, text, lever_name?} (the spec shape)
+ *   - Array of plain strings (model returned a flat list without
+ *     labels — we synthesise positional labels v1/v2/…)
+ *   - Object with label keys ({A1: "...", A2: "..."}) — flattened
+ *
+ * Returns undefined when nothing usable comes back so the caller
+ * can preserve back-compat with single-hook responses.
+ */
+function coerceHookVariants(
+  value: unknown,
+):
+  | Array<{ label: string; text: string; leverName?: string }>
+  | undefined {
+  const collect: Array<{ label: string; text: string; leverName?: string }> =
+    [];
+
+  function pushEntry(label: string, text: unknown, leverName?: unknown) {
+    const t = asString(text);
+    const l = asString(label) || `v${collect.length + 1}`;
+    if (!t) return;
+    const ln = asString(leverName);
+    collect.push({ label: l, text: t, ...(ln ? { leverName: ln } : {}) });
+  }
+
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      if (entry && typeof entry === "object" && !Array.isArray(entry)) {
+        const obj = entry as Record<string, unknown>;
+        pushEntry(
+          (obj.label ?? obj.template ?? obj.lever ?? "") as string,
+          obj.text ?? obj.hook ?? "",
+          (obj.lever_name ?? obj.leverName) as string | undefined,
+        );
+      } else if (typeof entry === "string") {
+        pushEntry(`v${collect.length + 1}`, entry);
+      }
+    }
+  } else if (value && typeof value === "object") {
+    for (const [label, text] of Object.entries(
+      value as Record<string, unknown>,
+    )) {
+      pushEntry(label, text);
+    }
+  }
+
+  return collect.length > 0 ? collect : undefined;
+}
+
+/**
  * Shape a parsed model response into the SaaS's standard
  * AiPromptOutput. Fills in retailerName from the original input when
  * the model omitted it; that lets the manual deterministic fallback
@@ -137,7 +187,14 @@ export function normaliseAiOutput(
   const productDescription =
     asString(r.product_description ?? r.productDescription) || undefined;
 
-  const hook    = asString(r.hook) || undefined;
+  const hookVariants = coerceHookVariants(r.hook_variants ?? r.hookVariants);
+  // Single-hook field stays populated for back-compat: prefer the
+  // first variant when the AI returned a list, fall back to the
+  // legacy `hook` string when that's all we got (older prompts).
+  const hook =
+    hookVariants && hookVariants.length > 0
+      ? hookVariants[0].text
+      : asString(r.hook) || undefined;
   const caption = asString(r.caption) || undefined;
   const hashtags = coerceHashtags(r.hashtags);
 
@@ -146,6 +203,7 @@ export function normaliseAiOutput(
     retailEnvironment,
     imagePrompt,
     hook,
+    hookVariants,
     caption,
     hashtags,
     productDescription,

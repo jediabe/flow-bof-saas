@@ -138,12 +138,13 @@ write a per-product video prompt under any circumstances:
     morphing, no dramatic camera move, no cinematic lighting.
 
 ============================================================
-HOOK — UK STYLE (Apex Initiative curriculum)
+HOOKS — UK STYLE (Apex Initiative curriculum)
 ============================================================
-Pick exactly ONE template from the two families below. Fill in
-[PRODUCT NAME] verbatim from the input (shorten if needed for
-readability — keep proper nouns). The hook is multi-line — keep
-the line breaks as shown by using "\\n" in the JSON string.
+Generate ALL applicable templates from the two families below
+(not just one). Each template is filled in with [PRODUCT NAME]
+verbatim from the input (shorten if needed for readability —
+keep proper nouns). Each hook is multi-line — keep the line
+breaks as shown by using "\\n" in the JSON string.
 
 FAMILY 1 — "I'M SO SORRY" hooks:
 
@@ -179,26 +180,29 @@ FAMILY 2 — "WAIT..." hooks:
     nah that's a proper bargain
 
 Rules:
-- Pick ONE template. Don't combine families.
-- Only pick Template B3 if a PRICE is explicitly given in the
-  input. Otherwise pick any of the other five.
+- Generate ALL templates that apply. By default that's 5 templates
+  (A1, A2, A3, B1, B2). Include B3 ONLY when a PRICE is explicitly
+  supplied in the input — otherwise SKIP B3 entirely (don't fake
+  a price).
 - Use [PRODUCT NAME] from the input. Shorten if the full name is
   long (e.g. "Halara High Waisted Drawstring Pocket Wide Leg Baggy
   Joggers" → "Halara wide-leg joggers" — keep brand if present).
+  Use the SAME shortened product name across every template so the
+  variants stay consistent.
 - Keep the emojis exactly where shown.
-- Encode the line breaks as "\\n" inside the JSON string field.
-- Vary template choice from product to product where possible;
-  don't repeat the same template across a whole batch.
+- Encode the line breaks as "\\n" inside each JSON string.
+- The "hook" field is the FIRST variant (template A1 by default,
+  the first one you generated). The full ordered list goes in
+  "hook_variants".
 
 ============================================================
 CAPTION
 ============================================================
-Short caption to post UNDER the video: product name + a 4-word
-"trust" tail like "selling out fast", "absolute bargain", "this
-just dropped", "stock running low". UK English. No emojis. No
-hashtags in the caption (hashtags are a separate field).
+The caption is the product name verbatim. Nothing else — no
+trust tails, no hashtags, no emojis, no punctuation tails. Just
+the shortened product name you used in the hooks.
 
-Example: "Halara wide-leg joggers — selling out fast"
+Example: "Halara wide-leg joggers"
 
 ============================================================
 HASHTAGS — UK STYLE
@@ -224,9 +228,16 @@ nothing outside the JSON object. Use exactly these keys:
   "placement_type": "<'in-store display' — UK template is generic>",
   "image_prompt": "<the four-paragraph UK image prompt, paragraphs separated by a blank line>",
   "video_prompt": "<the universal blanket video prompt verbatim>",
-  "hook": "<chosen template, line breaks encoded as \\n>",
-  "hook_template": "<one of: A1, A2, A3, B1, B2, B3>",
-  "caption": "<product name + short trust tail, no hashtags>",
+  "hook": "<first variant — same as hook_variants[0].text, line breaks encoded as \\n>",
+  "hook_variants": [
+    {"label": "A1", "text": "<template A1 filled in, \\n line breaks>"},
+    {"label": "A2", "text": "<template A2 filled in, \\n line breaks>"},
+    {"label": "A3", "text": "<template A3 filled in, \\n line breaks>"},
+    {"label": "B1", "text": "<template B1 filled in, \\n line breaks>"},
+    {"label": "B2", "text": "<template B2 filled in, \\n line breaks>"}
+    // Append {"label": "B3", "text": "..."} ONLY when PRICE was supplied.
+  ],
+  "caption": "<product name only, no trust tail, no hashtags>",
   "hashtags": ["#TikTokShopUK", "#DealDrops", "#TikTokMadeMeBuyIt", "#WeekendSale"],
   "warnings": ["<any concerns: regulated product, missing info, etc.>"]
 }
@@ -234,7 +245,10 @@ nothing outside the JSON object. Use exactly these keys:
 If you have no warnings, return an empty list for "warnings".
 Never include any text outside the JSON object. The image_prompt
 MUST be the four-paragraph structure — not a single sentence.
-The hashtags array MUST be exactly the four UK hashtags above.`;
+The hashtags array MUST be exactly the four UK hashtags above.
+hook_variants MUST contain at least 5 entries (A1, A2, A3, B1, B2);
+add B3 only when a price was supplied. The caption MUST be the
+product name verbatim with no additions.`;
 
 /**
  * Format a product into the user-message body that goes with

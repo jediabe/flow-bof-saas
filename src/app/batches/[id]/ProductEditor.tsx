@@ -34,6 +34,9 @@ export interface ProductRow {
   referenceImagePathLocal: string | null;
   imagePrompt: string | null;
   hook: string | null;
+  /** All hook variants the AI generated. Empty when none ran or
+   *  the row predates the multi-hook feature. */
+  hookVariants: Array<{ label: string; text: string; leverName?: string }>;
   caption: string | null;
   hashtags: string[];
   aiPromptError: string | null;
@@ -563,6 +566,7 @@ export default function ProductEditor({
               AiPromptsPanel above is the one place that writes these
               fields, by design. */}
           {(product.hook ||
+            product.hookVariants.length > 0 ||
             product.caption ||
             product.hashtags.length > 0 ||
             product.aiPromptError) && (
@@ -578,11 +582,45 @@ export default function ProductEditor({
               {product.aiPromptError && (
                 <div className="text-bad">{product.aiPromptError}</div>
               )}
-              {product.hook && (
-                <div>
-                  <span className="text-muted">hook:</span>{" "}
-                  <span className="text-text">{product.hook}</span>
+              {/* Hook variants — show ALL options the AI generated so
+                  the user can pick / rotate. Each block is selectable
+                  for easy copy. The single `product.hook` field
+                  (kept for back-compat with mobile-posting / cooldown
+                  banner consumers) is just hookVariants[0] when both
+                  exist, so we don't render it twice. */}
+              {product.hookVariants.length > 0 ? (
+                <div className="space-y-1.5">
+                  <div className="text-muted">
+                    hook variants ({product.hookVariants.length}):
+                  </div>
+                  {product.hookVariants.map((v, i) => (
+                    <div
+                      key={`${v.label}-${i}`}
+                      className="rounded-lg border border-border bg-bg/30 p-2 space-y-1"
+                    >
+                      <div className="flex items-baseline gap-2 text-[10px] text-muted">
+                        <span className="font-mono uppercase tracking-wider">
+                          {v.label}
+                        </span>
+                        {v.leverName && (
+                          <span className="text-muted2">— {v.leverName}</span>
+                        )}
+                      </div>
+                      <div className="text-text whitespace-pre-line leading-snug">
+                        {v.text}
+                      </div>
+                    </div>
+                  ))}
                 </div>
+              ) : (
+                product.hook && (
+                  <div>
+                    <span className="text-muted">hook:</span>{" "}
+                    <span className="text-text whitespace-pre-line">
+                      {product.hook}
+                    </span>
+                  </div>
+                )
               )}
               {product.caption && (
                 <div>

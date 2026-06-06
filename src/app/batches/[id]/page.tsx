@@ -267,6 +267,12 @@ export default async function BatchDetail({
     referenceImagePathLocal: p.referenceImagePathLocal,
     imagePrompt:             p.imagePrompt,
     hook:                    p.hook,
+    hookVariants:
+      (parseJson(p.hookVariants) as Array<{
+        label: string;
+        text: string;
+        leverName?: string;
+      }> | null) ?? [],
     caption:                 p.caption,
     hashtags:                (parseJson(p.hashtags) as string[] | null) ?? [],
     aiPromptError:           p.aiPromptError,

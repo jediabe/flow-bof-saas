@@ -1321,6 +1321,9 @@ export async function generateAiPrompts(input: {
           imagePrompt:         output.imagePrompt,
           retailerName:        output.retailerName,
           hook:                output.hook ?? null,
+          hookVariants:        output.hookVariants && output.hookVariants.length > 0
+            ? encodeJson(output.hookVariants)
+            : null,
           caption:             output.caption ?? null,
           hashtags:            output.hashtags
             ? encodeJson(output.hashtags)
@@ -1500,6 +1503,9 @@ export async function generateAiPromptForProduct(input: {
         imagePrompt:         output.imagePrompt,
         retailerName:        output.retailerName,
         hook:                output.hook ?? null,
+        hookVariants:        output.hookVariants && output.hookVariants.length > 0
+          ? encodeJson(output.hookVariants)
+          : null,
         caption:             output.caption ?? null,
         hashtags:            output.hashtags
           ? encodeJson(output.hashtags)

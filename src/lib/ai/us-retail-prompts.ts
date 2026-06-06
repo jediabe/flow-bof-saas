@@ -203,12 +203,13 @@ write a per-product video prompt under any circumstances:
     lighting.
 
 ============================================================
-HOOK — US STYLE (Apex Initiative 7 Levers)
+HOOKS — US STYLE (Apex Initiative 7 Levers)
 ============================================================
-Pick exactly ONE of the 7 psychological levers below and write a
-single-sentence hook following its structure. The hook is one
-long sentence — no line breaks — that uses the lever's framing
-to drive purchase intent without sounding like a hard sell.
+Generate ONE hook for EVERY lever below (all 7). Each hook is a
+single long sentence — no line breaks — that uses that lever's
+framing to drive purchase intent without sounding like a hard
+sell. The user picks which lever to use per post, so they need
+the full set of 7 options for each product.
 
 LEVER 1 — Reflected Social Proof
   Frames the purchase as "others like me are already doing this."
@@ -264,25 +265,28 @@ LEVER 7 — Economic Relief
     nothing today with shipping covered
 
 Rules:
-- Pick exactly ONE lever. Don't combine.
+- Generate ONE hook for EACH of the 7 levers. Don't skip any —
+  the output array must contain exactly 7 entries.
+- Don't combine levers within a single hook; each is pure to its
+  lever's framing.
 - Fill in PRODUCT, FEATURES, SEASON / SEASONAL CONTEXT, BENEFIT,
   DOMAIN from the product input. Keep features short (3-5 words
   max each).
 - "shipping covered" must appear in every hook.
-- One long sentence, no line breaks, no exclamation marks, no
-  exact prices, no "X% off" / "$Y off".
+- Each hook is one long sentence, no line breaks, no exclamation
+  marks, no exact prices, no "X% off" / "$Y off".
 - American English. Lowercase opening word unless it's a brand
   or proper noun.
-- Vary lever choice product-to-product when possible — don't
-  repeat the same lever across a whole batch.
+- The "hook" field is the FIRST variant (Lever 1, Reflected
+  Social Proof). The full ordered list of 7 goes in
+  "hook_variants" so the user can pick any lever per post.
 
 ============================================================
 CAPTION & PRODUCT DESCRIPTION
 ============================================================
-- caption: short post caption (no hashtags — hashtags are a
-  separate field). Product name + a 3-5 word trust tail like
-  "selling out today" or "shipping covered today". American
-  English, no emojis.
+- caption: the product name verbatim — nothing else. No trust
+  tail, no hashtags, no emojis. Use the same shortened product
+  name the hooks reference. Example: "X7 video doorbell".
 - productDescription: 2-3 sentence neutral product blurb the
   posting-assist page uses next to the hook. Neutral tone — no
   marketing superlatives, no claims, no comparisons.
@@ -312,9 +316,17 @@ nothing outside the JSON object. Use exactly these keys:
   "placement_type": "'in-store display'",
   "image_prompt": "<the three-paragraph US image prompt, paragraphs separated by a blank line>",
   "video_prompt": "<the universal blanket video prompt verbatim>",
-  "hook": "<single-sentence hook in the chosen lever's style>",
-  "hook_lever": "<integer 1-7 identifying which lever you used>",
-  "caption": "<product name + short trust tail, no hashtags>",
+  "hook": "<first variant — same as hook_variants[0].text (Lever 1 hook)>",
+  "hook_variants": [
+    {"label": "lever-1", "lever_name": "Reflected Social Proof",     "text": "<Lever 1 hook>"},
+    {"label": "lever-2", "lever_name": "Identity Forecasting",       "text": "<Lever 2 hook>"},
+    {"label": "lever-3", "lever_name": "Exclusivity Inversion",      "text": "<Lever 3 hook>"},
+    {"label": "lever-4", "lever_name": "Discovered Secret",          "text": "<Lever 4 hook>"},
+    {"label": "lever-5", "lever_name": "Reverse Urgency",            "text": "<Lever 5 hook>"},
+    {"label": "lever-6", "lever_name": "Emotional Permission Slip",  "text": "<Lever 6 hook>"},
+    {"label": "lever-7", "lever_name": "Economic Relief",            "text": "<Lever 7 hook>"}
+  ],
+  "caption": "<product name only, no trust tail, no hashtags>",
   "hashtags": ["#TikTokShop", "<#tag2>", "<#tag3>"],
   "product_description": "<2-3 sentence neutral blurb>",
   "warnings": ["<any concerns: regulated product, missing info, etc.>"]
