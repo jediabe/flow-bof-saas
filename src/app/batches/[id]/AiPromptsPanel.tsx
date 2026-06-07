@@ -67,6 +67,13 @@ export default function AiPromptsPanel({
   // failures shouldn't unmount the whole panel.
   const [aiRunning, setAiRunning] = useState(false);
   const [rowStates, setRowStates] = useState<Map<string, RowState>>(new Map());
+  // Opt-in vision-enabled generation. When on, each AI call sends
+  // the product's reference image alongside the text so the model
+  // can describe specific visible details (exact colors, branding
+  // placement, hardware) instead of guessing from the product
+  // name. Requires a vision-capable model in Settings. Off by
+  // default — vision tokens are more expensive than text.
+  const [useVision, setUseVision] = useState(false);
 
   const disabledAi =
     aiRunning || pendingManual || (provider !== "manual" && !providerHasKey);
@@ -116,6 +123,7 @@ export default function AiPromptsPanel({
             batchId,
             productId: p.id,
             force: mode === "all",
+            useVision,
           });
           if (r.ok) {
             setRowState(p.id, { kind: "done", message: r.message });
@@ -149,6 +157,7 @@ export default function AiPromptsPanel({
         batchId,
         productId,
         force: true,
+        useVision,
       });
       if (r.ok) {
         setRowState(productId, { kind: "done", message: r.message });
@@ -231,6 +240,25 @@ export default function AiPromptsPanel({
             <option value="missing">Products missing imagePrompt</option>
             <option value="all">All products (overwrite)</option>
           </select>
+        </label>
+        <label
+          className={`inline-flex items-center gap-1.5 text-[11px] select-none pb-2 ${
+            provider === "manual" ? "text-muted2 cursor-not-allowed" : "text-muted"
+          }`}
+          title={
+            provider === "manual"
+              ? "Vision requires a non-manual AI provider (OpenAI / Anthropic / OpenRouter) configured in Settings."
+              : "When on, the AI sees each product's reference image during prompt generation and describes specific visible details (exact colors, branding placement, hardware). Costs more per call but produces much more faithful prompts. Requires a vision-capable model (gpt-4o, claude-3.5-sonnet, etc.)."
+          }
+        >
+          <input
+            type="checkbox"
+            checked={useVision}
+            onChange={(e) => setUseVision(e.target.checked)}
+            disabled={aiRunning || pendingManual || provider === "manual"}
+            className="accent-accent"
+          />
+          analyse reference image (vision)
         </label>
         <div className="flex flex-wrap items-end gap-2 ml-auto">
           <button

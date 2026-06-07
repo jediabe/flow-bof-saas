@@ -15,6 +15,7 @@
 
 import OpenAI from "openai";
 import Anthropic from "@anthropic-ai/sdk";
+import { Buffer } from "node:buffer";
 
 import {
   DEFAULT_MODELS,
@@ -304,17 +305,248 @@ export async function testProvider(
  * Dispatch one call against whichever provider the settings select.
  * Returns the normalised AiPromptOutput; throws on transport failure
  * so the bulk runner can record a per-product error.
+ *
+ * Phase 9.5+ — `options.useVision`: when true AND
+ * `input.referenceImageUrl` is a fetchable absolute URL AND the
+ * provider isn't "manual", the AI receives the product image
+ * alongside the text. Lets the model describe specific visible
+ * details (exact colors, branding placement, hardware, packaging
+ * copy) in the image_prompt instead of guessing from the product
+ * name. Falls back to text-only when vision can't be used.
  */
 export async function callProvider(
   input: ProductPromptInput,
   settings: AiProviderSettings,
+  options: { useVision?: boolean } = {},
 ): Promise<ProviderCallResult> {
+  const wantVision =
+    options.useVision === true &&
+    typeof input.referenceImageUrl === "string" &&
+    input.referenceImageUrl.length > 0 &&
+    settings.provider !== "manual";
   switch (settings.provider) {
     case "manual":     return manualGenerate(input);
-    case "openai":     return await openaiGenerate(input, settings);
-    case "anthropic":  return await anthropicGenerate(input, settings);
-    case "openrouter": return await openrouterGenerate(input, settings);
+    case "openai":
+      return wantVision
+        ? await openaiGenerateVision(input, settings)
+        : await openaiGenerate(input, settings);
+    case "anthropic":
+      return wantVision
+        ? await anthropicGenerateVision(input, settings)
+        : await anthropicGenerate(input, settings);
+    case "openrouter":
+      return wantVision
+        ? await openrouterGenerateVision(input, settings)
+        : await openrouterGenerate(input, settings);
   }
   // Exhaustive switch above; this is unreachable but keeps tsc happy.
   throw new Error(`Unknown AI provider: ${(settings as AiProviderSettings).provider}`);
+}
+
+// ---------------------------------------------------------------------
+// Vision-enabled provider variants
+// ---------------------------------------------------------------------
+//
+// Each one mirrors its text-only sibling but appends a vision
+// addendum to the system prompt and includes the product's
+// reference image in the user message. The AI is instructed to
+// describe specific visible details (colors, materials, branding
+// placement, hardware) so the image_prompt is faithful to what's
+// actually in the reference instead of guessing from the product
+// name alone.
+//
+// Failures throw — caller catches and maps to a per-product error.
+// We do NOT silently fall back to text-only here; the caller has
+// the option-flag context to decide whether to retry without
+// vision.
+
+const VISION_PROMPT_ADDENDUM = `
+
+============================================================
+VISION ANALYSIS — REFERENCE IMAGE ATTACHED
+============================================================
+You can see the product's reference image attached to this
+message. Look at it carefully and incorporate what you actually
+see into the image_prompt's product-detail descriptions.
+
+In particular, when writing the image_prompt:
+  - Reference the exact colors and color blocking you see (not
+    just "blue" — specify the shade if distinctive, e.g.
+    "heather charcoal", "matte navy").
+  - Reference visible materials and textures (brushed jersey,
+    knit, polished metal, matte plastic, glossy ceramic).
+  - Reference branding marks you see and their precise placement
+    (logo on chest left, embossed mark on cap, screen-printed
+    text on side).
+  - Reference distinctive hardware (drawstring with metal-tipped
+    cords, magnetic clasp, ribbed grip).
+  - Reference visible packaging copy or graphics, if any.
+
+The goal: instructions specific enough that Flow's image model
+can reproduce the EXACT product in front of you, not a generic
+example of the product category.
+
+You still produce the SAME JSON output schema; vision just makes
+the image_prompt's detail descriptions concrete instead of
+generic.`;
+
+export async function openaiGenerateVision(
+  input: ProductPromptInput,
+  settings: AiProviderSettings,
+): Promise<ProviderCallResult> {
+  const apiKey = (settings.openaiApiKey ?? "").trim();
+  if (!apiKey) throw new Error("OpenAI API key is empty.");
+  if (!input.referenceImageUrl) {
+    throw new Error("Reference image URL required for vision generation.");
+  }
+  const model = (settings.openaiModel || "").trim() || DEFAULT_MODELS.openai;
+  const client = new OpenAI({ apiKey });
+  const { systemPrompt, formatUserPrompt } = templateForMarket(input.market);
+  const resp = await client.chat.completions.create({
+    model,
+    response_format: { type: "json_object" },
+    temperature: 0.4,
+    messages: [
+      { role: "system", content: systemPrompt + VISION_PROMPT_ADDENDUM },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: formatUserPrompt(input) },
+          {
+            type: "image_url",
+            image_url: { url: input.referenceImageUrl },
+          },
+        ],
+      },
+    ],
+  });
+  const content = resp.choices?.[0]?.message?.content ?? "";
+  return { remote: true, output: normaliseAiOutput(extractJson(content), input) };
+}
+
+export async function anthropicGenerateVision(
+  input: ProductPromptInput,
+  settings: AiProviderSettings,
+): Promise<ProviderCallResult> {
+  const apiKey = (settings.anthropicApiKey ?? "").trim();
+  if (!apiKey) throw new Error("Anthropic API key is empty.");
+  if (!input.referenceImageUrl) {
+    throw new Error("Reference image URL required for vision generation.");
+  }
+  const model =
+    (settings.anthropicModel || "").trim() || DEFAULT_MODELS.anthropic;
+  const client = new Anthropic({ apiKey });
+  const { systemPrompt, formatUserPrompt } = templateForMarket(input.market);
+
+  // Anthropic doesn't accept raw URLs — fetch + base64-encode the
+  // image first. Same helper shape Phase 9 vision uses.
+  const { data, mediaType } = await _fetchImageForAnthropic(
+    input.referenceImageUrl,
+  );
+
+  const message = await client.messages.create({
+    model,
+    max_tokens: 4096,
+    temperature: 0.4,
+    system: systemPrompt + VISION_PROMPT_ADDENDUM + "\n\nReturn JSON only. No markdown.",
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "image",
+            source: { type: "base64", media_type: mediaType, data },
+          },
+          { type: "text", text: formatUserPrompt(input) },
+        ],
+      },
+    ],
+  });
+  const text = message.content
+    .map((b) => (b.type === "text" ? b.text : ""))
+    .join("");
+  return { remote: true, output: normaliseAiOutput(extractJson(text), input) };
+}
+
+export async function openrouterGenerateVision(
+  input: ProductPromptInput,
+  settings: AiProviderSettings,
+): Promise<ProviderCallResult> {
+  const apiKey = (settings.openrouterApiKey ?? "").trim();
+  if (!apiKey) throw new Error("OpenRouter API key is empty.");
+  if (!input.referenceImageUrl) {
+    throw new Error("Reference image URL required for vision generation.");
+  }
+  const model =
+    (settings.openrouterModel || "").trim() || DEFAULT_MODELS.openrouter;
+  const defaultHeaders: Record<string, string> = {};
+  if (settings.openrouterSiteUrl)
+    defaultHeaders["HTTP-Referer"] = settings.openrouterSiteUrl;
+  if (settings.openrouterAppName)
+    defaultHeaders["X-Title"] = settings.openrouterAppName;
+  const client = new OpenAI({
+    apiKey,
+    baseURL: "https://openrouter.ai/api/v1",
+    defaultHeaders: Object.keys(defaultHeaders).length
+      ? defaultHeaders
+      : undefined,
+  });
+  const { systemPrompt, formatUserPrompt } = templateForMarket(input.market);
+  const resp = await client.chat.completions.create({
+    model,
+    temperature: 0.4,
+    messages: [
+      {
+        role: "system",
+        content:
+          systemPrompt + VISION_PROMPT_ADDENDUM + "\n\nReturn JSON only.",
+      },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: formatUserPrompt(input) },
+          {
+            type: "image_url",
+            image_url: { url: input.referenceImageUrl },
+          },
+        ],
+      },
+    ],
+  });
+  const content = resp.choices?.[0]?.message?.content ?? "";
+  return { remote: true, output: normaliseAiOutput(extractJson(content), input) };
+}
+
+/** Anthropic-only helper: fetch a public URL → base64 + media-type
+ *  triple. Mirrors the Phase 9 vision helper but lives here so the
+ *  prompt-generator path doesn't depend on the IP-risk module. */
+async function _fetchImageForAnthropic(url: string): Promise<{
+  data: string;
+  mediaType: "image/jpeg" | "image/png" | "image/webp" | "image/gif";
+}> {
+  const resp = await fetch(url);
+  if (!resp.ok) {
+    throw new Error(
+      `Reference image fetch failed: HTTP ${resp.status} ${resp.statusText}`,
+    );
+  }
+  const ct = (resp.headers.get("content-type") || "")
+    .split(";")[0]
+    .trim()
+    .toLowerCase();
+  if (!ct.startsWith("image/")) {
+    throw new Error(
+      `Reference image fetch returned non-image content-type: ${ct || "?"}`,
+    );
+  }
+  const buf = Buffer.from(await resp.arrayBuffer());
+  const MAX = 8 * 1024 * 1024;
+  if (buf.byteLength > MAX) {
+    throw new Error(`Reference image too large (${buf.byteLength} bytes).`);
+  }
+  const allowed = ["image/jpeg", "image/png", "image/webp", "image/gif"] as const;
+  const mediaType = (
+    allowed.includes(ct as (typeof allowed)[number]) ? ct : "image/jpeg"
+  ) as (typeof allowed)[number];
+  return { data: buf.toString("base64"), mediaType };
 }

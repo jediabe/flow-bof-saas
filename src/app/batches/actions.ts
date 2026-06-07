@@ -1242,8 +1242,13 @@ export interface AiBulkReport {
 export async function generateAiPrompts(input: {
   batchId: string;
   mode: AiOverwriteMode;
+  /** Opt-in vision-enabled generation. When true AND a product has
+   *  a referenceImageUrl AND the provider isn't "manual", the AI
+   *  receives the product image alongside the text and can
+   *  describe specific visible details. More expensive per call. */
+  useVision?: boolean;
 }): Promise<AiBulkReport> {
-  const { batchId, mode } = input;
+  const { batchId, mode, useVision = false } = input;
   if (!batchId) {
     return emptyAiReport("missing batchId");
   }
@@ -1303,6 +1308,14 @@ export async function generateAiPrompts(input: {
       p.market === "us" ? "us" : p.market === "uk" ? "uk" : batchMarket;
 
     try {
+      // For vision, the AI needs an absolute URL it can fetch.
+      // Product.referenceImageUrl is `/uploads/...`; promote it
+      // via toAgentAssetUrl (same helper the runner dispatch
+      // uses). Skip vision when there's no reference image.
+      const visionUrl =
+        useVision && p.referenceImageUrl
+          ? toAgentAssetUrl(p.referenceImageUrl)
+          : null;
       const { output } = await callProvider(
         {
           productName:       p.productName,
@@ -1310,10 +1323,11 @@ export async function generateAiPrompts(input: {
           category:          p.category,
           retailerName:      p.retailerName,
           tiktokUrl:         p.tiktokUrl,
-          referenceImageUrl: p.referenceImageUrl,
+          referenceImageUrl: visionUrl ?? p.referenceImageUrl,
           market:            effectiveMarket,
         },
         settings,
+        { useVision: visionUrl !== null },
       );
       await db.product.update({
         where: { id: p.id },
@@ -1425,8 +1439,13 @@ export async function generateAiPromptForProduct(input: {
    *  When false (default), products with a prompt are skipped — useful
    *  for the bulk "missing only" mode driven from the client. */
   force?: boolean;
+  /** Phase 9.5 — opt-in vision: send the product's reference image
+   *  alongside the text so the AI can describe specific visible
+   *  details (colors, branding placement, hardware) in the
+   *  image_prompt instead of guessing from the product name. */
+  useVision?: boolean;
 }): Promise<AiSingleResult> {
-  const { batchId, productId, force = false } = input;
+  const { batchId, productId, force = false, useVision = false } = input;
   if (!batchId || !productId) {
     return {
       ok: false,
@@ -1485,6 +1504,10 @@ export async function generateAiPromptForProduct(input: {
         : batchMarket;
 
   try {
+    const visionUrl =
+      useVision && product.referenceImageUrl
+        ? toAgentAssetUrl(product.referenceImageUrl)
+        : null;
     const { output } = await callProvider(
       {
         productName:       product.productName,
@@ -1492,10 +1515,11 @@ export async function generateAiPromptForProduct(input: {
         category:          product.category,
         retailerName:      product.retailerName,
         tiktokUrl:         product.tiktokUrl,
-        referenceImageUrl: product.referenceImageUrl,
+        referenceImageUrl: visionUrl ?? product.referenceImageUrl,
         market:            effectiveMarket,
       },
       settings,
+      { useVision: visionUrl !== null },
     );
     await db.product.update({
       where: { id: productId },

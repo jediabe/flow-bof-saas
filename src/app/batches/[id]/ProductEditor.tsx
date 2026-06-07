@@ -317,6 +317,10 @@ export default function ProductEditor({
   const [aiBusy, startAiTransition] = useTransition();
   const [aiError, setAiError] = useState<string | null>(null);
   const [aiOk, setAiOk] = useState<string | null>(null);
+  // Phase-9.5: per-product vision toggle. Defaults off; tick before
+  // clicking Regenerate to have the AI study the reference image
+  // during prompt generation.
+  const [aiVision, setAiVision] = useState(false);
 
   function regenerateAi() {
     setAiError(null);
@@ -326,6 +330,7 @@ export default function ProductEditor({
         batchId,
         productId: product.id,
         force: true,
+        useVision: aiVision,
       });
       if (r.ok) {
         setAiOk(r.message);
@@ -533,12 +538,29 @@ export default function ProductEditor({
                     ⚠ {aiError}
                   </span>
                 )}
+                <label
+                  className="inline-flex items-center gap-1 text-[10px] text-muted select-none"
+                  title="When on, the AI sees this product's reference image and writes a more detail-faithful prompt. Costs more per call."
+                >
+                  <input
+                    type="checkbox"
+                    checked={aiVision}
+                    onChange={(e) => setAiVision(e.target.checked)}
+                    disabled={aiBusy || pending}
+                    className="accent-accent"
+                  />
+                  vision
+                </label>
                 <button
                   type="button"
                   className="btn btn-ghost text-[11px] px-2 py-1"
                   onClick={regenerateAi}
                   disabled={aiBusy || pending}
-                  title="Re-run the AI provider on just this product. Overwrites the existing prompt + hook + caption + hashtags."
+                  title={
+                    aiVision
+                      ? "Re-run the AI with the reference image attached — describes specific visible details."
+                      : "Re-run the AI provider on just this product. Overwrites the existing prompt + hook + caption + hashtags."
+                  }
                 >
                   {aiBusy ? "Regenerating…" : "↻ Regenerate AI"}
                 </button>
