@@ -27,6 +27,15 @@ export interface MobilePostingProduct {
   referenceImageUrl: string | null;
   imageUrl: string | null;
   hook: string | null;
+  /** All hook variants the AI generated for this product. UK = 5
+   *  or 6 templates (A1..B3); US = 7 levers. Empty for products
+   *  generated before the multi-hook prompts shipped — in that
+   *  case the UI falls back to the single `hook` field. */
+  hookVariants: Array<{
+    label: string;
+    text: string;
+    leverName?: string;
+  }>;
   caption: string | null;
   hashtags: string[];
   productDescription: string | null;
@@ -223,11 +232,40 @@ export default function MobilePostingClient({
 
       {/* Copy blocks */}
       <section className="px-4 pt-5 space-y-3">
-        <CopyBlock
-          label="Hook"
-          value={current.hook}
-          placeholder="No hook generated yet. Run AI prompts on the desktop."
-        />
+        {/* Hook variants — one CopyBlock per variant so the user
+            can pick the framing they want for THIS post. Each
+            block shows the variant label (A1 / lever-1 / ...) so
+            the user can rotate variants across posts without
+            having to remember which one they used. Falls back to
+            the single hook field for older products that don't
+            have variants stored. */}
+        {current.hookVariants.length > 0 ? (
+          <div className="space-y-2.5">
+            <div className="text-[11px] text-zinc-400 uppercase tracking-wide">
+              Hook variants ({current.hookVariants.length}) — pick one per post
+            </div>
+            {current.hookVariants.map((v, i) => (
+              <CopyBlock
+                key={`${v.label}-${i}`}
+                label={
+                  v.leverName
+                    ? `Hook · ${v.label} — ${v.leverName}`
+                    : `Hook · ${v.label}`
+                }
+                value={v.text}
+                placeholder=""
+                multiline
+              />
+            ))}
+          </div>
+        ) : (
+          <CopyBlock
+            label="Hook"
+            value={current.hook}
+            placeholder="No hook generated yet. Run AI prompts on the desktop."
+            multiline
+          />
+        )}
         <CopyBlock
           label="Caption"
           value={current.caption}

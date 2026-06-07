@@ -44,9 +44,14 @@ EXACTLY this sentence structure, filling the four slots:
 
     Editorial retail product shot of the [PRODUCT NAME] displayed
     exactly as shown in the reference image on a [DISPLAY METHOD]
-    inside a modern [STORE TYPE]. Match the product's color,
-    texture, size, and details precisely as they appear in the
-    reference. The product is the clear hero focus with open
+    inside a modern [STORE TYPE]. Study the reference image
+    carefully and reproduce every visible detail of the product
+    with high fidelity: exact colors and color blocking, materials,
+    textures, surface finishes, branding marks and their precise
+    placement, visible buttons, ports, hardware, stitching, edge
+    profiles, packaging copy and graphics, and the product's
+    proportions. Anything visible on the reference should be
+    visible here. The product is the clear hero focus with open
     negative space surrounding it, nothing else nearby. No store
     logos, no brand signage, no price tags visible anywhere.
 

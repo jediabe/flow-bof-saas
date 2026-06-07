@@ -57,6 +57,11 @@ export default async function MobilePostingPage({
           referenceImageUrl: true,
           imageUrl: true,
           hook: true,
+          // New — full hook variant list so the mobile page can
+          // surface every option with its own copy button. Older
+          // products without variants fall back to the single
+          // `hook` field below.
+          hookVariants: true,
           caption: true,
           hashtags: true,
           productDescription: true,
@@ -82,6 +87,14 @@ export default async function MobilePostingPage({
     referenceImageUrl: p.referenceImageUrl,
     imageUrl:          p.imageUrl,
     hook:              p.hook,
+    // Defensive JSON parse — older rows have null hookVariants;
+    // newer rows store an array of {label, text, leverName?}.
+    hookVariants:
+      (parseJson(p.hookVariants) as Array<{
+        label: string;
+        text: string;
+        leverName?: string;
+      }> | null) ?? [],
     caption:           p.caption,
     hashtags:          (parseJson(p.hashtags) as string[] | null) ?? [],
     productDescription: p.productDescription,

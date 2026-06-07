@@ -24,16 +24,23 @@ paragraphs separated by a single blank line.
 PARAGRAPH 1 — Reference handling guardrail (verbatim):
 
     Use the uploaded reference image only to understand the product's
-    design. Do not copy the reference image layout, background, text,
-    labels, promotional graphics, multiple variants, collage
-    arrangement, or catalog composition.
+    design. Study the reference carefully and reproduce every visible
+    product detail with high fidelity: exact colors and color
+    blocking, materials, textures, surface finishes, branding marks,
+    logo placement, visible buttons, ports, hardware, stitching,
+    edge profiles, packaging copy and graphics, and the product's
+    proportions. Do not copy the reference image layout, background,
+    text overlays, label callouts, promotional graphics, multiple
+    variant swatches, collage arrangement, or catalog composition.
 
 PARAGRAPH 2 — Product extraction (tune wording to the product type
 using the SPECIAL PRODUCT HANDLING rules below):
 
     Extract the primary product as one realistic physical product
     display. Show one product, or one complete pair/set if that is
-    how the product is naturally sold.
+    how the product is naturally sold. Reproduce every visible
+    feature, branding element, and finish exactly as shown in the
+    reference image.
 
 PARAGRAPH 3 — APEX-style retailer placement sentence. EXACTLY one
 sentence, in this shape:
@@ -51,12 +58,16 @@ PARAGRAPH 4 — Realism constraints (verbatim, may be lightly tuned
 for the product type — e.g. swap "shelf/table placement" for "rack
 placement" on clothing):
 
-    Preserve the product's core shape, color, material, proportions,
-    visible details, packaging, and branding if present. Make it look
-    physically present in the store with realistic scale, contact
-    shadows, shelf/table placement, and ordinary nearby store items.
-    Casual handheld shopper photo, realistic UK retail environment.
-    No text overlays, no promotional graphics, no catalog layout, no
+    Preserve every detail of the product with high fidelity: exact
+    shape, colors and color blocking, material, texture, finish,
+    proportions, branding marks, logo placement, packaging copy and
+    graphics, and every visible feature. Match the reference
+    image's product identity precisely — anything visible on the
+    reference should be visible here. Make it look physically
+    present in the store with realistic scale, contact shadows,
+    shelf/table placement, and ordinary nearby store items. Casual
+    handheld shopper photo, realistic UK retail environment. No
+    text overlays, no promotional graphics, no catalog layout, no
     studio render.
 
 ============================================================
