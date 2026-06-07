@@ -67,7 +67,7 @@ export interface LastImageJobSummary {
 }
 
 type WaitMode = "submit_only" | "capture";
-type AutomationMode = "safe" | "balanced" | "fast";
+type AutomationMode = "safe" | "balanced" | "fast" | "family_plan";
 
 /**
  * "Generate Product Images" workbench section. Collects the eligible
@@ -383,10 +383,12 @@ export default function GenerateImagesPanel({
             onChange={(e) =>
               setAutomationMode(e.target.value as AutomationMode)
             }
+            title="Controls inter-item delays on the runner. family_plan is the slowest — designed for Google Family Plan accounts that get blocked on stricter abuse heuristics. Switch to family_plan if you keep seeing FLOW_RATE_LIMIT_OR_SUSPICIOUS_ACTIVITY."
           >
             <option value="safe">safe</option>
             <option value="balanced">balanced</option>
             <option value="fast">fast</option>
+            <option value="family_plan">family plan (slow, anti-block)</option>
           </select>
         </label>
         <label className="block">
