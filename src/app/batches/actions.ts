@@ -1895,6 +1895,62 @@ export async function setProductIpRiskOverride(formData: FormData): Promise<{
 // import them directly from "@/lib/ip-risk".
 
 // ---------------------------------------------------------------------
+// Kill switch — cancel all queued / running jobs in a batch
+// ---------------------------------------------------------------------
+//
+// User clicks "Stop generation" → all running + queued jobs in the
+// batch get marked status="cancelled". Effects:
+//
+//   - Queued jobs: never claimed by the runner (it filters by
+//     status="queued" on the /next route).
+//   - Running job: the runner is mid-loop. On its next /events POST
+//     (one per item), the API returns {cancelled: true} in the
+//     response body and the runner-side image loop exits cleanly
+//     at the next iteration boundary. The runner's /complete call
+//     then reports the partial result.
+//   - Currently in-flight item: cannot be interrupted mid-Playwright
+//     action. User waits up to ~30s for the current item to finish.
+//
+// Workspace-scoped via the batch.
+export async function cancelBatchJobs(formData: FormData): Promise<{
+  ok: boolean;
+  cancelled: number;
+  message: string;
+}> {
+  const batchId = String(formData.get("batchId") || "");
+  if (!batchId) return { ok: false, cancelled: 0, message: "Missing batchId" };
+
+  const { workspace } = await getCurrentWorkspace();
+  const batch = await db.batch.findFirst({
+    where: { id: batchId, workspaceId: workspace.id },
+    select: { id: true },
+  });
+  if (!batch) return { ok: false, cancelled: 0, message: "Batch not found" };
+
+  // Update queued + running together. The runner sees the new
+  // status through its next /events POST (running) or skips
+  // the job entirely (queued).
+  const result = await db.job.updateMany({
+    where: {
+      workspaceId: workspace.id,
+      batchId: batch.id,
+      status: { in: ["queued", "running"] },
+    },
+    data: { status: "cancelled" },
+  });
+
+  revalidatePath(`/batches/${batchId}`);
+  return {
+    ok: true,
+    cancelled: result.count,
+    message:
+      result.count === 0
+        ? "No queued or running jobs to cancel."
+        : `Cancelled ${result.count} job${result.count === 1 ? "" : "s"}. Runner will stop at the next item.`,
+  };
+}
+
+// ---------------------------------------------------------------------
 // Phase 6 — Flow reconciliation server actions
 // ---------------------------------------------------------------------
 //

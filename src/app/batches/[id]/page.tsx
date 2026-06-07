@@ -29,6 +29,7 @@ import ProductEditor, {
 } from "./ProductEditor";
 import BatchTabs from "./BatchTabs";
 import ProductsWithIpRisk from "./ProductsWithIpRisk";
+import StopGenerationButton from "./StopGenerationButton";
 import FlowItemsTab, {
   type FlowItemRow,
   type FlowItemsTabProduct,
@@ -361,6 +362,17 @@ export default async function BatchDetail({
   // QR cards share the same value.
   const baseUrl = await _reviewBaseUrl();
 
+  // Kill-switch indicator. Count queued + running jobs in this
+  // batch so the Stop button only renders (with a live count) when
+  // there's actually something to cancel.
+  const activeJobsCount = await db.job.count({
+    where: {
+      workspaceId: workspace.id,
+      batchId: batch.id,
+      status: { in: ["queued", "running"] },
+    },
+  });
+
   // Phase 6 — ingest scan results into FlowItem rows before render.
   // Idempotent; runs on every batch page render so the Flow items
   // tab always reflects the latest successful scan. Failures are
@@ -451,12 +463,21 @@ export default async function BatchDetail({
             </form>
           </div>
         </div>
-        <form action={deleteBatch}>
-          <input type="hidden" name="id" value={batch.id} />
-          <button className="btn btn-danger" type="submit">
-            Delete batch
-          </button>
-        </form>
+        <div className="flex flex-col items-end gap-2 shrink-0">
+          {/* Kill switch — only renders when there's something to
+              cancel. Sits ABOVE Delete so the visual hierarchy is
+              "stop the active thing" first. */}
+          <StopGenerationButton
+            batchId={batch.id}
+            activeJobs={activeJobsCount}
+          />
+          <form action={deleteBatch}>
+            <input type="hidden" name="id" value={batch.id} />
+            <button className="btn btn-danger" type="submit">
+              Delete batch
+            </button>
+          </form>
+        </div>
       </header>
 
       {/* ----- Latest task result (inline, when ?job=<id>) ------------ */}

@@ -25,9 +25,12 @@ export async function POST(
 
   // Scope by both jobId AND agentId — a token compromise on one
   // agent should never let it write to another agent's jobs.
+  // Pull `status` too so we can echo a cancellation hint back in
+  // the response — the runner uses this to exit cooperative-cancel
+  // mid-loop without needing a separate polling endpoint.
   const job = await db.job.findFirst({
     where: { id, agentId: agent.id },
-    select: { id: true },
+    select: { id: true, status: true },
   });
   if (!job) return notFound("job not found for this agent");
 
@@ -59,8 +62,17 @@ export async function POST(
     },
   });
 
+  // Cooperative cancel: when a user clicks "Stop generation" the
+  // SaaS sets the Job's status to "cancelled" in the DB. The runner
+  // is mid-loop and can't be reached directly, but it ALREADY POSTs
+  // an event between items (progress callback). We echo the
+  // cancellation hint in the response here so the runner can read
+  // it and exit cleanly at the next iteration boundary without
+  // needing a separate /should-continue endpoint.
+  const cancelled = job.status === "cancelled";
+
   return NextResponse.json(
-    { ok: true },
+    { ok: true, cancelled },
     { headers: { "Cache-Control": "no-store" } },
   );
 }

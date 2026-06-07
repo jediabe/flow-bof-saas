@@ -40,7 +40,7 @@ export async function POST(
   const { id } = await ctx.params;
   const job = await db.job.findFirst({
     where: { id, agentId: agent.id },
-    select: { id: true, batchId: true },
+    select: { id: true, batchId: true, status: true },
   });
   if (!job) return notFound("job not found for this agent");
 
@@ -56,7 +56,19 @@ export async function POST(
   if (!env) return badRequest("missing `envelope` in request body");
 
   const succeeded = env.status === "succeeded";
-  const newStatus = succeeded ? "succeeded" : "failed";
+  // Preserve a SaaS-side "cancelled" status — set by the kill-switch
+  // server action (cancelBatchJobs). Without this guard, the runner's
+  // final /complete POST would overwrite "cancelled" back to
+  // "succeeded" or "failed" and erase the user's explicit stop intent
+  // from the audit trail. The result + error payloads still persist
+  // either way so the timeline shows what work the runner did
+  // complete before exiting.
+  const newStatus =
+    job.status === "cancelled"
+      ? "cancelled"
+      : succeeded
+        ? "succeeded"
+        : "failed";
 
   await recordRunnerActivity({
     id: agent.id,
