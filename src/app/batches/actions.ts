@@ -1895,6 +1895,120 @@ export async function setProductIpRiskOverride(formData: FormData): Promise<{
 // import them directly from "@/lib/ip-risk".
 
 // ---------------------------------------------------------------------
+// Phase 10 — pipeline drag-and-drop server action
+// ---------------------------------------------------------------------
+//
+// One action that turns "the user dropped product X on lane Y" into
+// the right state transition. The mapping:
+//
+//   targetStage = "needs_review" → setReviewStatus("needs_review")
+//                                  (rework path — useful from any
+//                                  later stage back to the start)
+//   targetStage = "ready"        → setReviewStatus("approved")
+//                                  Note: the product may not
+//                                  actually appear in "ready" if
+//                                  it's still missing a prompt or
+//                                  a ref image; the stage helper
+//                                  will keep it in needs_review
+//                                  with the gates surfaced. That's
+//                                  correct UX: dropping on ready
+//                                  expresses intent, not magic.
+//   targetStage = "generating"   → NOT a valid drop target. A
+//                                  product enters "generating"
+//                                  because a job is running, not
+//                                  because the user dragged it
+//                                  there. Returns an error.
+//   targetStage = "generated"    → NOT a valid drop target either.
+//                                  Generated state is derived from
+//                                  having a bound FlowItem.
+//   targetStage = "posted"       → setPostingStatus("posted")
+//                                  Marks the product as posted
+//                                  (mirrors the mobile-posting QR
+//                                  button).
+//
+// Workspace-scoped via the batch lookup. Returns a structured
+// result so the client can render a toast on rejection.
+
+export async function moveProductToStage(formData: FormData): Promise<{
+  ok: boolean;
+  message: string;
+}> {
+  const batchId = String(formData.get("batchId") || "");
+  const productId = String(formData.get("productId") || "");
+  const targetStage = String(formData.get("targetStage") || "");
+
+  if (!batchId || !productId || !targetStage) {
+    return {
+      ok: false,
+      message: "Missing batchId / productId / targetStage",
+    };
+  }
+
+  const { workspace } = await getCurrentWorkspace();
+  const batch = await db.batch.findFirst({
+    where: { id: batchId, workspaceId: workspace.id },
+    select: { id: true },
+  });
+  if (!batch) return { ok: false, message: "Batch not found" };
+
+  const product = await db.product.findFirst({
+    where: { id: productId, batchId: batch.id, deletedAt: null },
+    select: { id: true },
+  });
+  if (!product) return { ok: false, message: "Product not found" };
+
+  switch (targetStage) {
+    case "needs_review":
+      await db.product.update({
+        where: { id: productId },
+        data: { reviewStatus: "needs_review" },
+      });
+      revalidatePath(`/batches/${batchId}`);
+      return { ok: true, message: "Sent back to review." };
+
+    case "ready":
+      await db.product.update({
+        where: { id: productId },
+        data: { reviewStatus: "approved" },
+      });
+      revalidatePath(`/batches/${batchId}`);
+      return {
+        ok: true,
+        message:
+          "Approved. If the card stays in 'Needs review', it's missing a prompt, a reference image, or has unresolved IP risk.",
+      };
+
+    case "generating":
+      return {
+        ok: false,
+        message:
+          "Can't drop a product into Generating directly. Use the 'Generate' button on a Ready card to start a generation job.",
+      };
+
+    case "generated":
+      return {
+        ok: false,
+        message:
+          "Generated is set when Flow produces an image for this product. Drag works in either direction across the other stages.",
+      };
+
+    case "posted":
+      await db.product.update({
+        where: { id: productId },
+        data: { postingStatus: "posted" },
+      });
+      revalidatePath(`/batches/${batchId}`);
+      return { ok: true, message: "Marked as posted." };
+
+    default:
+      return {
+        ok: false,
+        message: `Unknown target stage: ${targetStage}`,
+      };
+  }
+}
+
+// ---------------------------------------------------------------------
 // Kill switch — cancel all queued / running jobs in a batch
 // ---------------------------------------------------------------------
 //

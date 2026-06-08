@@ -1,34 +1,23 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { headers } from "next/headers";
 import { db } from "@/lib/db";
 import { getCurrentWorkspace } from "@/lib/workspace";
 import { parseJson } from "@/lib/json-column";
-// (json-column already imported; AI types use it for hashtags JSON.)
-import Panel from "@/components/ui/Panel";
-import EmptyState from "@/components/ui/EmptyState";
-import MetricCard from "@/components/ui/MetricCard";
 import StatusChip from "@/components/StatusChip";
-import { friendlyJobType } from "@/lib/job-types";
 import {
   loadOrCreateSettings,
   toMaskedSettings,
 } from "@/lib/workspace-settings";
 import { DEFAULT_MODELS } from "@/lib/ai/types";
 import { addProduct, deleteBatch, setBatchMarket } from "../actions";
-import BatchWorkbench from "./BatchWorkbench";
-import GenerateImagesPanel from "./GenerateImagesPanel";
 import MobileReviewQRCard from "./MobileReviewQRCard";
 import MobilePostingQRCard from "./MobilePostingQRCard";
-import { headers } from "next/headers";
 import KalodataImportPanel from "./KalodataImportPanel";
 import AiPromptsPanel from "./AiPromptsPanel";
+import GenerateImagesPanel from "./GenerateImagesPanel";
+import BatchWorkbench from "./BatchWorkbench";
 import LatestTaskResult from "./LatestTaskResult";
-import ProductEditor, {
-  type ProductRow,
-  type SubmittedStatus,
-} from "./ProductEditor";
-import BatchTabs from "./BatchTabs";
-import ProductsWithIpRisk from "./ProductsWithIpRisk";
 import StopGenerationButton from "./StopGenerationButton";
 import FlowItemsTab, {
   type FlowItemRow,
@@ -39,98 +28,73 @@ import {
   ingestFlowItemsForBatch,
   countFlowItemsByState,
 } from "@/lib/flow-items";
+import BatchPageClient from "./BatchPageClient";
+import type {
+  PipelineProduct,
+  LaneActionConfig,
+} from "./pipeline/BatchPipeline";
+import type {
+  ExpandedCardProduct,
+} from "./pipeline/ExpandedPipelineCard";
 
 export const dynamic = "force-dynamic";
 
 /**
- * Resolve the public origin for building a full mobile-review
- * URL. Prefers NEXT_PUBLIC_APP_URL when set; falls back to the
- * incoming request's host header so dev / preview deploys work
- * without env config. Strips trailing slash so the QR card can
- * safely concatenate with a relative path.
+ * Resolve the public origin for building a full mobile QR URL.
+ * Prefers NEXT_PUBLIC_APP_URL when set; falls back to the
+ * incoming request's host header.
  */
 async function _reviewBaseUrl(): Promise<string> {
   const explicit = (process.env.NEXT_PUBLIC_APP_URL || "").trim();
   if (explicit) return explicit.replace(/\/+$/, "");
-  // Fall back to the request host. Next 15 — headers() is async.
   const h = await headers();
   const host = h.get("host") || "localhost:3000";
-  // Default to https unless we're clearly on a local dev port.
-  const isLocal = /^(localhost|127\.|0\.0\.0\.0)/.test(host) ||
-                  /:\d+$/.test(host) && host.startsWith("localhost");
+  const isLocal =
+    /^(localhost|127\.|0\.0\.0\.0)/.test(host) ||
+    (/:\d+$/.test(host) && host.startsWith("localhost"));
   const proto = isLocal ? "http" : "https";
   return `${proto}://${host}`;
 }
 
-const JOB_STATUS_VARIANT: Record<string, "ok" | "warn" | "bad" | "muted"> = {
-  queued:    "muted",
-  running:   "warn",
-  succeeded: "ok",
-  failed:    "bad",
-  cancelled: "muted",
-};
-
-function timeAgo(d: Date | string | null | undefined): string {
-  if (!d) return "—";
-  const ms = Date.now() - new Date(d).getTime();
-  const s = Math.floor(ms / 1000);
-  if (s < 60)    return `${s}s ago`;
-  if (s < 3600)  return `${Math.floor(s / 60)}m ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-  return `${Math.floor(s / 86400)}d ago`;
-}
-
 /**
- * The local runner's generate_flow_images result puts a status on each
- * item. We map runner-status strings to the SubmittedStatus union the
- * ProductEditor renders. Anything we don't recognise becomes "unknown"
- * so the chip stays muted instead of mis-coloured.
+ * Phase 10 batch detail page (full redesign).
+ *
+ * Server component. Loads everything the new pipeline-based UI
+ * needs, hands off to BatchPageClient for the interactive
+ * surface. The legacy tab-based layout (BatchTabs +
+ * ProductsWithIpRisk + FlowItemsTab tab) is replaced by:
+ *
+ *   - <BatchPipeline>: 5 vertical swim lanes, compact cards
+ *   - <BatchDrawer>:    right-side overlay with Mobile / Flow /
+ *                       Activity / Settings panels
+ *   - <EmptyBatchHero>: full-bleed CTA on a fresh empty batch
+ *
+ * Kalodata import + Add-manually still live as sections below
+ * the pipeline (low-frequency but reachable).
  */
-function mapStatus(s: string | undefined): SubmittedStatus {
-  if (!s) return "unknown";
-  if (s === "submitted" || s === "captured") return "submitted";
-  if (s === "failed")                         return "failed";
-  if (s.startsWith("skipped"))                return "skipped";
-  if (s === "pending" || s === "queued")      return "pending";
-  return "unknown";
-}
-
 export default async function BatchDetail({
   params,
   searchParams,
 }: {
   params: Promise<{ id: string }>;
-  /**
-   * `?job=<id>` is set when a workflow action redirects back to the
-   * batch page. Drives the LatestTaskResult inline summary so users
-   * stay on /batches/[id] across the full image → favorite → video
-   * loop.
-   */
   searchParams?: Promise<{ job?: string | string[] }>;
 }) {
   const { id } = await params;
   const sp = (await searchParams) ?? {};
   const latestJobId = Array.isArray(sp.job) ? sp.job[0] : sp.job;
   const { workspace } = await getCurrentWorkspace();
+
   const batch = await db.batch.findFirst({
     where: { id, workspaceId: workspace.id },
     include: {
-      // Hide soft-deleted products from every default view. The
-      // batch detail page, generation eligibility, and product
-      // counts all consume this list, so filtering here is the
-      // single chokepoint. A future "Show deleted (N)" toggle
-      // could broaden the where clause — Phase 7 follow-up.
       products: {
         where: { deletedAt: null },
         orderBy: { createdAt: "asc" },
         include: {
-          // Phase 3 — multi-reference images. Ordered by role
-          // alphabetically ("primary" < "ref2" < "ref3") so the
-          // client always sees them in the canonical order.
           images: { orderBy: { role: "asc" } },
         },
       },
-      jobs: { orderBy: { createdAt: "desc" }, take: 12 },
+      jobs: { orderBy: { createdAt: "desc" }, take: 20 },
     },
   });
   if (!batch) notFound();
@@ -141,9 +105,6 @@ export default async function BatchDetail({
     select: { id: true, name: true, baseUrl: true, status: true },
   });
 
-  // Latest-task result for the optional `?job=<id>` panel. Scoped to
-  // this workspace + batch so a stale URL from a different batch
-  // can't leak job state across tenants.
   const latestJob = latestJobId
     ? await db.job.findFirst({
         where: {
@@ -152,219 +113,37 @@ export default async function BatchDetail({
           batchId: batch.id,
         },
         select: {
-          id: true,
-          jobType: true,
-          status: true,
-          result: true,
-          error: true,
-          createdAt: true,
-          updatedAt: true,
+          id: true, jobType: true, status: true, result: true,
+          error: true, createdAt: true, updatedAt: true,
         },
       })
     : null;
 
-  // Pull the latest scan + video results so the workbench can show
-  // counts above the action buttons (the user wants to see what state
-  // they're in before pressing buttons).
-  const [lastScan, lastVideoRun, lastImageRun] = await Promise.all([
-    db.job.findFirst({
-      where: {
-        workspaceId: workspace.id,
-        batchId: batch.id,
-        jobType: "scan_favorited_images",
-        status: "succeeded",
-      },
-      orderBy: { createdAt: "desc" },
-      select: { id: true, result: true, createdAt: true },
-    }),
-    db.job.findFirst({
-      where: {
-        workspaceId: workspace.id,
-        batchId: batch.id,
-        jobType: "generate_flow_videos_from_favorites",
-        status: "succeeded",
-      },
-      orderBy: { createdAt: "desc" },
-      select: { id: true, result: true, createdAt: true },
-    }),
-    db.job.findFirst({
-      where: {
-        workspaceId: workspace.id,
-        batchId: batch.id,
-        jobType: "generate_flow_images",
-      },
-      orderBy: { createdAt: "desc" },
-      select: { id: true, result: true, createdAt: true, status: true },
-    }),
-  ]);
-
-  const scanSummary = lastScan?.result
-    ? (parseJson(lastScan.result) as {
-        tiles_scanned?: number;
-        favorited_images_count?: number;
-      } | null)
-    : null;
-  const videoSummary = lastVideoRun?.result
-    ? (parseJson(lastVideoRun.result) as {
-        submitted?: number;
-        skipped_already_submitted?: number;
-        failed?: number;
-        // Generate Videos scans Flow's grid itself before animating
-        // — the runner returns the live count here so the page can
-        // show fresh "favorited" numbers without requiring a
-        // separate scan_favorited_images run.
-        favorited_images_found?: number;
-      } | null)
-    : null;
-  const imageSummary = lastImageRun?.result
-    ? (parseJson(lastImageRun.result) as {
-        submitted?: number;
-        failed?: number;
-        skipped?: number;
-        items?: { item_id?: string; status?: string }[];
-      } | null)
-    : null;
-
-  // Live "favorited images" count for the metric card + workbench.
-  // The runner's generate_flow_videos_from_favorites job ALSO scans
-  // the Flow grid before animating, and returns favorited_images_found
-  // in its result envelope. Whichever job ran most recently has the
-  // freshest number — typically that's the video job right after the
-  // user favorites a new image. Falls back through (newer source →
-  // scan → video → null) so a user who has only ever clicked
-  // "Generate Videos" still sees a meaningful count.
-  const videoNewerThanScan =
-    !!lastVideoRun &&
-    (!lastScan || lastVideoRun.createdAt > lastScan.createdAt);
-  const favoritedImagesLive: number | null =
-    videoNewerThanScan
-      ? (videoSummary?.favorited_images_found ?? scanSummary?.favorited_images_count ?? null)
-      : (scanSummary?.favorited_images_count ?? videoSummary?.favorited_images_found ?? null);
-  const favoritedImagesAsOf: Date | null =
-    videoNewerThanScan
-      ? (lastVideoRun?.createdAt ?? lastScan?.createdAt ?? null)
-      : (lastScan?.createdAt ?? lastVideoRun?.createdAt ?? null);
-
-  // Build a Map<productId → SubmittedStatus> from the latest image
-  // job's items so the product cards can show their per-row status.
-  const submittedStatusByProduct = new Map<string, SubmittedStatus>();
-  for (const it of imageSummary?.items ?? []) {
-    if (it.item_id) {
-      submittedStatusByProduct.set(it.item_id, mapStatus(it.status));
+  // Active-job map: which product IDs have an in-flight generation?
+  // Used to flip a card into the "generating" stage.
+  const runningJobs = await db.job.findMany({
+    where: {
+      workspaceId: workspace.id,
+      batchId: batch.id,
+      jobType: "generate_flow_images",
+      status: { in: ["queued", "running"] },
+    },
+    select: { id: true, payload: true },
+  });
+  const inFlightProductIds = new Set<string>();
+  for (const j of runningJobs) {
+    try {
+      const p = j.payload ? JSON.parse(j.payload) : null;
+      const items = Array.isArray(p?.items) ? p.items : [];
+      for (const it of items) {
+        const pid = (it?.item_id as string | undefined)?.trim();
+        if (pid) inFlightProductIds.add(pid);
+      }
+    } catch {
+      // ignore malformed payloads
     }
   }
 
-  // Reshape products into the ProductEditor's row shape (handles
-  // null/undefined explicitly so the client component doesn't need to).
-  const productRows: ProductRow[] = batch.products.map((p) => ({
-    id: p.id,
-    productName:             p.productName,
-    originalTitle:           p.originalTitle,
-    tiktokUrl:               p.tiktokUrl,
-    category:                p.category,
-    retailerName:            p.retailerName,
-    imageUrl:                p.imageUrl,
-    referenceImageUrl:       p.referenceImageUrl,
-    referenceImagePathLocal: p.referenceImagePathLocal,
-    imagePrompt:             p.imagePrompt,
-    hook:                    p.hook,
-    hookVariants:
-      (parseJson(p.hookVariants) as Array<{
-        label: string;
-        text: string;
-        leverName?: string;
-      }> | null) ?? [],
-    caption:                 p.caption,
-    hashtags:                (parseJson(p.hashtags) as string[] | null) ?? [],
-    aiPromptError:           p.aiPromptError,
-    aiPromptGeneratedAt:     p.aiPromptGeneratedAt?.toISOString() ?? null,
-    submittedStatus:         submittedStatusByProduct.get(p.id) ?? null,
-    // Phase-1 review workflow. The string is one of the four
-    // ReviewStatus values; ProductEditor casts to its union type.
-    reviewStatus:            (p.reviewStatus as "needs_review" | "approved" | "rejected" | "maybe"),
-    deletedAt:               p.deletedAt?.toISOString() ?? null,
-    // Phase-3 multi-reference images. Filter to the three valid
-    // roles to be defensive against any stray rows the DB might
-    // have (no path is expected to write them but it's free to
-    // guard here).
-    images: p.images
-      .filter(
-        (i): i is typeof i & {
-          role: "primary" | "ref2" | "ref3";
-        } => i.role === "primary" || i.role === "ref2" || i.role === "ref3",
-      )
-      .map((i) => ({
-        id: i.id,
-        role: i.role,
-        url: i.url,
-        source: i.source,
-      })),
-    // Phase-9 IP risk fields. Cast status to the IpRiskStatus union
-    // — Prisma stores it as a string but we know the values per
-    // schema default + server-action validation.
-    ipRiskStatus: (p.ipRiskStatus as
-      | "unchecked" | "low" | "medium" | "high" | "needs_manual_review"
-    ),
-    ipRiskReasons:        (parseJson(p.ipRiskReasons) as string[] | null) ?? [],
-    ipRiskCheckedAt:      p.ipRiskCheckedAt?.toISOString() ?? null,
-    ipRiskOverride:       p.ipRiskOverride,
-    ipRiskOverrideReason: p.ipRiskOverrideReason,
-    ipRiskOverrideAt:     p.ipRiskOverrideAt?.toISOString() ?? null,
-  }));
-
-  // "Ready" = has both a reference (URL or local override) AND a prompt.
-  // Two refs are equivalent on the runner side — it tries the path
-  // first and falls back to the URL.
-  const readyCount = productRows.filter(
-    (p) =>
-      !!p.imagePrompt &&
-      (!!p.referenceImageUrl || !!p.referenceImagePathLocal),
-  ).length;
-  const missingPromptCount = productRows.filter((p) => !p.imagePrompt).length;
-  const missingRefCount = productRows.filter(
-    (p) => !p.referenceImageUrl && !p.referenceImagePathLocal,
-  ).length;
-
-  // Fallback chain for the URL the runner uses to fetch reference
-  // images: explicit override wins, then the SaaS's public URL
-  // (right answer for hosted prod), then host.docker.internal for
-  // local dev where the runner and SaaS share a Docker Desktop host.
-  const agentAssetBaseUrl =
-    process.env.AGENT_ASSET_BASE_URL ||
-    process.env.NEXT_PUBLIC_APP_URL ||
-    "http://host.docker.internal:3000";
-
-  // AI provider status for the AiPromptsPanel — only the *masked*
-  // projection lands on the client (provider key + model only; no
-  // raw API keys).
-  const settingsRow = await loadOrCreateSettings(workspace.id);
-  const masked = toMaskedSettings(settingsRow);
-  const aiProvider = masked.provider;
-  const aiProviderLabel =
-    aiProvider === "openai"
-      ? `OpenAI · ${masked.openai.model || DEFAULT_MODELS.openai}`
-      : aiProvider === "anthropic"
-        ? `Anthropic · ${masked.anthropic.model || DEFAULT_MODELS.anthropic}`
-        : aiProvider === "openrouter"
-          ? `OpenRouter · ${masked.openrouter.model || DEFAULT_MODELS.openrouter}`
-          : "Manual (deterministic UK prompt)";
-  const aiProviderHasKey =
-    aiProvider === "openai"
-      ? masked.openai.keySet
-      : aiProvider === "anthropic"
-        ? masked.anthropic.keySet
-        : aiProvider === "openrouter"
-          ? masked.openrouter.keySet
-          : true;
-
-  // Resolve the public origin once and reuse for both QR cards.
-  // Previously this was awaited inline twice; now both Mobile share
-  // QR cards share the same value.
-  const baseUrl = await _reviewBaseUrl();
-
-  // Kill-switch indicator. Count queued + running jobs in this
-  // batch so the Stop button only renders (with a live count) when
-  // there's actually something to cancel.
   const activeJobsCount = await db.job.count({
     where: {
       workspaceId: workspace.id,
@@ -373,16 +152,10 @@ export default async function BatchDetail({
     },
   });
 
-  // Phase 6 — ingest scan results into FlowItem rows before render.
-  // Idempotent; runs on every batch page render so the Flow items
-  // tab always reflects the latest successful scan. Failures are
-  // logged but never block the page render (the tab will just show
-  // stale/empty data).
-  let flowIngestSummary: Awaited<
-    ReturnType<typeof ingestFlowItemsForBatch>
-  > | null = null;
+  // Phase 6 — ingest FlowItem rows so the drawer's Flow panel
+  // shows fresh data.
   try {
-    flowIngestSummary = await ingestFlowItemsForBatch({
+    await ingestFlowItemsForBatch({
       workspaceId: workspace.id,
       batchId: batch.id,
     });
@@ -391,10 +164,7 @@ export default async function BatchDetail({
   }
   const flowItemRows = await db.flowItem.findMany({
     where: { workspaceId: workspace.id, batchId: batch.id },
-    orderBy: [
-      { bindState: "asc" }, // unbound (asc) first
-      { firstSeenAt: "desc" },
-    ],
+    orderBy: [{ bindState: "asc" }, { firstSeenAt: "desc" }],
   });
   const flowItemRowsForTab: FlowItemRow[] = flowItemRows.map((it) => ({
     id:           it.id,
@@ -419,17 +189,199 @@ export default async function BatchDetail({
     batchId: batch.id,
   });
 
+  // Track which products have a bound FlowItem — drives stage
+  // promotion to "generated."
+  const boundProductIds = new Set<string>();
+  for (const it of flowItemRows) {
+    if (
+      (it.bindState === "bound" || it.bindState === "auto") &&
+      it.productId
+    ) {
+      boundProductIds.add(it.productId);
+    }
+  }
+
+  // AI provider status for the AiPromptsPanel + drawer Settings.
+  const settingsRow = await loadOrCreateSettings(workspace.id);
+  const masked = toMaskedSettings(settingsRow);
+  const aiProvider = masked.provider;
+  const aiProviderLabel =
+    aiProvider === "openai"
+      ? `OpenAI · ${masked.openai.model || DEFAULT_MODELS.openai}`
+      : aiProvider === "anthropic"
+        ? `Anthropic · ${masked.anthropic.model || DEFAULT_MODELS.anthropic}`
+        : aiProvider === "openrouter"
+          ? `OpenRouter · ${masked.openrouter.model || DEFAULT_MODELS.openrouter}`
+          : "Manual (deterministic UK prompt)";
+  const aiProviderHasKey =
+    aiProvider === "openai"
+      ? masked.openai.keySet
+      : aiProvider === "anthropic"
+        ? masked.anthropic.keySet
+        : aiProvider === "openrouter"
+          ? masked.openrouter.keySet
+          : true;
+
+  const baseUrl = await _reviewBaseUrl();
+  const agentAssetBaseUrl =
+    process.env.AGENT_ASSET_BASE_URL ||
+    process.env.NEXT_PUBLIC_APP_URL ||
+    "http://host.docker.internal:3000";
+
+  // Shape products for the compact pipeline cards.
+  const productsCompact: PipelineProduct[] = batch.products.map((p) => {
+    const hookVariantsArr =
+      (parseJson(p.hookVariants) as
+        | Array<{ label: string; text: string; leverName?: string }>
+        | null) ?? [];
+    return {
+      id: p.id,
+      productName: p.productName,
+      category: p.category,
+      referenceImageUrl: p.referenceImageUrl,
+      imagePrompt: p.imagePrompt,
+      hookVariantsCount: hookVariantsArr.length,
+      reviewStatus: p.reviewStatus as PipelineProduct["reviewStatus"],
+      postingStatus: p.postingStatus as PipelineProduct["postingStatus"],
+      ipRiskStatus: p.ipRiskStatus as PipelineProduct["ipRiskStatus"],
+      ipRiskOverride: p.ipRiskOverride,
+      referenceImagesCount: p.images.length,
+      hasBoundFlowItem: boundProductIds.has(p.id),
+      isInActiveGenerationJob: inFlightProductIds.has(p.id),
+      gates: [],
+      stage: "needs_review", // overridden by client; kept for type
+    };
+  });
+
+  // Shape full product data for expanded cards. Keyed by id so
+  // the client can look up on demand without re-fetching.
+  const productsExpandedById: Record<string, ExpandedCardProduct> = {};
+  for (const p of batch.products) {
+    productsExpandedById[p.id] = {
+      id:                     p.id,
+      productName:            p.productName,
+      originalTitle:          p.originalTitle,
+      tiktokUrl:              p.tiktokUrl,
+      category:               p.category,
+      retailerName:           p.retailerName,
+      referenceImagePathLocal: p.referenceImagePathLocal,
+      imagePrompt:            p.imagePrompt,
+      hook:                   p.hook,
+      hookVariants:
+        (parseJson(p.hookVariants) as
+          | Array<{ label: string; text: string; leverName?: string }>
+          | null) ?? [],
+      caption:                p.caption,
+      hashtags:               (parseJson(p.hashtags) as string[] | null) ?? [],
+      productDescription:     p.productDescription,
+      aiPromptError:          p.aiPromptError,
+      aiPromptGeneratedAt:    p.aiPromptGeneratedAt?.toISOString() ?? null,
+      reviewStatus:           p.reviewStatus as ExpandedCardProduct["reviewStatus"],
+      postingStatus:          p.postingStatus as ExpandedCardProduct["postingStatus"],
+      images: p.images
+        .filter(
+          (i): i is typeof i & { role: "primary" | "ref2" | "ref3" } =>
+            i.role === "primary" || i.role === "ref2" || i.role === "ref3",
+        )
+        .map((i) => ({
+          id: i.id,
+          role: i.role,
+          url: i.url,
+          source: i.source,
+        })),
+      ipRiskStatus: p.ipRiskStatus as ExpandedCardProduct["ipRiskStatus"],
+      ipRiskReasons:
+        (parseJson(p.ipRiskReasons) as string[] | null) ?? [],
+      ipRiskCheckedAt:        p.ipRiskCheckedAt?.toISOString() ?? null,
+      ipRiskOverride:         p.ipRiskOverride,
+      ipRiskOverrideReason:   p.ipRiskOverrideReason,
+      ipRiskOverrideAt:       p.ipRiskOverrideAt?.toISOString() ?? null,
+    };
+  }
+
+  // Stage-specific lane actions. Stage helper handles auto-
+  // advance via state; these are the user-driven actions on a
+  // lane header (e.g. "Generate all").
+  const laneActions: LaneActionConfig = {
+    needs_review: (
+      <Link
+        href={`${baseUrl.replace(/\/+$/, "")}/mobile-review/${batch.reviewToken ?? ""}`}
+        target="_blank"
+        rel="noreferrer"
+        className="btn btn-sm"
+      >
+        Review on phone ↗
+      </Link>
+    ),
+    ready: null,
+    generating: null,
+    generated: null,
+    posted: (
+      <Link
+        href={`${baseUrl.replace(/\/+$/, "")}/mobile-posting/${batch.postingToken ?? ""}`}
+        target="_blank"
+        rel="noreferrer"
+        className="btn btn-sm"
+      >
+        Posting QR ↗
+      </Link>
+    ),
+  };
+
+  // Drawer content: Mobile / Flow / Activity / Settings.
+  const needsReviewCount = batch.products.filter(
+    (p) => p.reviewStatus === "needs_review",
+  ).length;
+  const approvedCount = batch.products.filter(
+    (p) => p.reviewStatus === "approved",
+  ).length;
+  const needsPostingCount = batch.products.filter(
+    (p) => p.reviewStatus === "approved" && p.postingStatus === "needs_posting",
+  ).length;
+
+  const mobilePanel = (
+    <div className="space-y-4">
+      <MobileReviewQRCard
+        batchId={batch.id}
+        reviewToken={batch.reviewToken}
+        reviewBaseUrl={baseUrl}
+        needsReviewCount={needsReviewCount}
+      />
+      <MobilePostingQRCard
+        batchId={batch.id}
+        postingToken={batch.postingToken}
+        postingBaseUrl={baseUrl}
+        approvedCount={approvedCount}
+        needsPostingCount={needsPostingCount}
+      />
+    </div>
+  );
+
+  const flowPanel = (
+    <FlowItemsTab
+      batchId={batch.id}
+      items={flowItemRowsForTab}
+      products={flowProductsForTab}
+      lastScanAt={null}
+    />
+  );
+
   return (
-    <div className="space-y-8">
+    <div className="space-y-6">
       <header className="flex items-baseline justify-between gap-4">
         <div>
-          <Link href="/batches" className="text-xs text-muted hover:text-text">
+          <Link
+            href="/batches"
+            className="text-xs text-muted hover:text-text"
+          >
             ← Batches
           </Link>
           <h1 className="h-page mt-1">{batch.name}</h1>
           <div className="flex flex-wrap items-center gap-2 mt-2">
             <StatusChip
-              label={batch.market === "us" ? "US TikTok Shop" : "UK TikTok Shop"}
+              label={
+                batch.market === "us" ? "US TikTok Shop" : "UK TikTok Shop"
+              }
               variant={batch.market === "us" ? "accent" : "ok"}
             />
             <StatusChip label={batch.status} variant="muted" />
@@ -437,9 +389,6 @@ export default async function BatchDetail({
               {batch.products.length} products · created{" "}
               {new Date(batch.createdAt).toLocaleDateString()}
             </span>
-            {/* Phase-1 market switcher. Lives inline next to the
-                batch metadata so it's available without scrolling.
-                Submits via the server action; page revalidates after. */}
             <form
               action={setBatchMarket}
               className="inline-flex items-center gap-1.5"
@@ -464,9 +413,6 @@ export default async function BatchDetail({
           </div>
         </div>
         <div className="flex flex-col items-end gap-2 shrink-0">
-          {/* Kill switch — only renders when there's something to
-              cancel. Sits ABOVE Delete so the visual hierarchy is
-              "stop the active thing" first. */}
           <StopGenerationButton
             batchId={batch.id}
             activeJobs={activeJobsCount}
@@ -480,367 +426,180 @@ export default async function BatchDetail({
         </div>
       </header>
 
-      {/* ----- Latest task result (inline, when ?job=<id>) ------------ */}
       {latestJob && <LatestTaskResult job={latestJob} />}
 
-      {/* ----- Overview metrics --------------------------------------- */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <MetricCard
-          label="Products"
-          value={batch.products.length}
-          hint={`${readyCount} ready`}
-          tone={readyCount > 0 ? "ok" : "default"}
+      {/* AI generation panel — stays above the pipeline because
+          generation is the main cross-product action; users hit
+          it often and shouldn't have to drill into individual
+          cards to regenerate a batch. */}
+      <AiPromptsPanel
+        batchId={batch.id}
+        provider={aiProvider}
+        providerLabel={aiProviderLabel}
+        providerHasKey={aiProviderHasKey}
+        products={batch.products.map((p) => ({
+          id: p.id,
+          productName: p.productName,
+          hasPrompt: !!p.imagePrompt,
+        }))}
+      />
+
+      {/* Pipeline + drawer (client-rendered) */}
+      <BatchPageClient
+        batchId={batch.id}
+        batchName={batch.name}
+        productsCompact={productsCompact}
+        productsExpandedById={productsExpandedById}
+        laneActions={laneActions}
+        drawer={{
+          mobilePanel,
+          flowPanel,
+          activityJobs: batch.jobs.map((j) => ({
+            id: j.id,
+            jobType: j.jobType,
+            status: j.status,
+            createdAt: j.createdAt.toISOString(),
+          })),
+          settingsInfo: {
+            aiProviderLabel,
+            aiProviderHasKey,
+            runnerVersion:
+              agents.find((a) => a.status === "connected")?.name ?? null,
+            runnerConnected: agents.some((a) => a.status === "connected"),
+            batchMarket:
+              batch.market === "us" ? "us" : "uk",
+          },
+          badges: {
+            mobile:
+              needsReviewCount > 0
+                ? { text: String(needsReviewCount), tone: "warn" }
+                : undefined,
+            flow:
+              flowItemCounts.unbound > 0
+                ? { text: String(flowItemCounts.unbound), tone: "warn" }
+                : undefined,
+            activity:
+              activeJobsCount > 0
+                ? { text: String(activeJobsCount), tone: "accent" }
+                : undefined,
+          },
+        }}
+      />
+
+      {/* Generate Images workbench — full-batch dispatch surface.
+          Stays as a separate panel because Generate Images is the
+          one-time-per-batch action that needs all its controls
+          visible (mode, limit, agent picker, etc.). The pipeline's
+          drag-to-Generating path is the per-product surface. */}
+      {agents.length === 0 ? (
+        <div className="panel p-5">
+          <div className="text-sm text-muted">
+            No runner registered.{" "}
+            <Link href="/agents" className="text-accent hover:underline">
+              Set one up
+            </Link>{" "}
+            before generating images.
+          </div>
+        </div>
+      ) : (
+        <GenerateImagesPanel
+          batchId={batch.id}
+          agents={agents.map((a) => ({
+            id: a.id, name: a.name, status: a.status,
+          }))}
+          products={batch.products.map((p) => ({
+            id:                      p.id,
+            productName:             p.productName,
+            referenceImageUrl:       p.referenceImageUrl,
+            referenceImagePathLocal: p.referenceImagePathLocal,
+            imagePrompt:             p.imagePrompt,
+            reviewStatus:            p.reviewStatus,
+            images: p.images
+              .filter(
+                (i): i is typeof i & { role: "primary" | "ref2" | "ref3" } =>
+                  i.role === "primary" || i.role === "ref2" || i.role === "ref3",
+              )
+              .map((i) => ({
+                role: i.role,
+                url: i.url,
+                pathLocal: i.pathLocal,
+              })),
+            ipRiskStatus: p.ipRiskStatus as
+              | "unchecked" | "low" | "medium"
+              | "high" | "needs_manual_review",
+            ipRiskOverride: p.ipRiskOverride,
+          }))}
+          agentAssetBaseUrl={agentAssetBaseUrl}
+          lastJob={null}
         />
-        <MetricCard
-          label="Images submitted"
-          value={imageSummary?.submitted ?? scanSummary?.tiles_scanned ?? "—"}
-          tone={
-            (imageSummary?.submitted ?? scanSummary?.tiles_scanned) ? "accent" : "muted"
-          }
-          hint={
-            imageSummary?.failed
-              ? `${imageSummary.failed} failed`
-              : undefined
-          }
+      )}
+
+      {agents.length > 0 && (
+        <BatchWorkbench
+          batchId={batch.id}
+          agents={agents}
+          scanSummary={{
+            favoritedImages: null,
+            tilesScanned: null,
+            lastScanJobId: null,
+            lastScanAt: null,
+          }}
+          videoSummary={{
+            submitted: null,
+            skipped: null,
+            failed: null,
+            lastVideoJobId: null,
+            lastVideoAt: null,
+          }}
         />
-        <MetricCard
-          label="Favorited images"
-          value={favoritedImagesLive ?? "—"}
-          tone={favoritedImagesLive ? "ok" : "muted"}
-        />
-        <MetricCard
-          label="Videos submitted"
-          value={videoSummary?.submitted ?? "—"}
-          tone={videoSummary?.submitted ? "accent" : "muted"}
-          hint={
-            videoSummary?.skipped_already_submitted
-              ? `${videoSummary.skipped_already_submitted} skipped`
-              : undefined
-          }
-        />
+      )}
+
+      {/* Kalodata import — anchored for the empty-state CTA. */}
+      <div id="kalodata-importer">
+        <KalodataImportPanel batchId={batch.id} />
       </div>
 
-      {/* Phase-3: split the long single-column layout into three top-
-          level tabs (Products / Mobile share / Activity). All data is
-          already server-rendered above; the BatchTabs client component
-          just toggles which panel is visible. Counts in the tab badges
-          are computed once from the products list so a glance at the
-          tab strip tells the user what work is outstanding. */}
-      <BatchTabs
-        initialTab="products"
-        tabs={[
-          {
-            key: "products",
-            label: "Products",
-            badge: String(batch.products.length),
-            badgeTone: "muted",
-            content: (
-              <>
-                <KalodataImportPanel batchId={batch.id} />
-                <AiPromptsPanel
-                  batchId={batch.id}
-                  provider={aiProvider}
-                  providerLabel={aiProviderLabel}
-                  providerHasKey={aiProviderHasKey}
-                  products={batch.products.map((p) => ({
-                    id: p.id,
-                    productName: p.productName,
-                    hasPrompt: !!p.imagePrompt,
-                  }))}
-                />
-                <ProductsWithIpRisk
-                  batchId={batch.id}
-                  products={productRows}
-                  productsPanelAction={
-                    <div className="flex items-baseline gap-3 text-[11px] text-muted">
-                      <span className="text-ok">{readyCount} ready</span>
-                      {missingPromptCount > 0 && (
-                        <span className="text-warn">
-                          {missingPromptCount} no prompt
-                        </span>
-                      )}
-                      {missingRefCount > 0 && (
-                        <span className="text-warn">
-                          {missingRefCount} no reference
-                        </span>
-                      )}
-                      <a
-                        href="#add-product"
-                        className="text-accent hover:underline ml-1"
-                      >
-                        Add manually ↓
-                      </a>
-                    </div>
-                  }
-                />
-                {agents.length === 0 ? (
-                  <Panel title="Generate Product Images">
-                    <EmptyState
-                      icon="◆"
-                      title="No runner registered"
-                      hint="Register a local runner before you can drive Flow from this batch."
-                      action={
-                        <Link href="/agents" className="btn btn-primary">
-                          Open Runner
-                        </Link>
-                      }
-                    />
-                  </Panel>
-                ) : (
-                  <GenerateImagesPanel
-                    batchId={batch.id}
-                    agents={agents.map((a) => ({
-                      id:     a.id,
-                      name:   a.name,
-                      status: a.status,
-                    }))}
-                    products={batch.products.map((p) => ({
-                      id:                      p.id,
-                      productName:             p.productName,
-                      referenceImageUrl:       p.referenceImageUrl,
-                      referenceImagePathLocal: p.referenceImagePathLocal,
-                      imagePrompt:             p.imagePrompt,
-                      reviewStatus:            p.reviewStatus,
-                      // Phase 3 — pass through the full reference-
-                      // image list. Filter to known roles defensively.
-                      images: p.images
-                        .filter(
-                          (
-                            i,
-                          ): i is typeof i & {
-                            role: "primary" | "ref2" | "ref3";
-                          } =>
-                            i.role === "primary" ||
-                            i.role === "ref2" ||
-                            i.role === "ref3",
-                        )
-                        .map((i) => ({
-                          role: i.role,
-                          url: i.url,
-                          pathLocal: i.pathLocal,
-                        })),
-                      // Phase 9 — IP risk gating fields.
-                      ipRiskStatus: (p.ipRiskStatus as
-                        | "unchecked" | "low" | "medium"
-                        | "high" | "needs_manual_review"
-                      ),
-                      ipRiskOverride: p.ipRiskOverride,
-                    }))}
-                    agentAssetBaseUrl={agentAssetBaseUrl}
-                    lastJob={
-                      lastImageRun && imageSummary
-                        ? {
-                            jobId:     lastImageRun.id,
-                            createdAt: lastImageRun.createdAt.toISOString(),
-                            submitted: imageSummary.submitted ?? 0,
-                            failed:    imageSummary.failed ?? 0,
-                            total:     imageSummary.items?.length ?? 0,
-                          }
-                        : null
-                    }
-                  />
-                )}
-                {agents.length > 0 && (
-                  <BatchWorkbench
-                    batchId={batch.id}
-                    agents={agents}
-                    scanSummary={{
-                      favoritedImages: favoritedImagesLive,
-                      tilesScanned: scanSummary?.tiles_scanned ?? null,
-                      lastScanJobId: lastScan?.id ?? null,
-                      lastScanAt: favoritedImagesAsOf?.toISOString() ?? null,
-                    }}
-                    videoSummary={{
-                      submitted: videoSummary?.submitted ?? null,
-                      skipped: videoSummary?.skipped_already_submitted ?? null,
-                      failed: videoSummary?.failed ?? null,
-                      lastVideoJobId: lastVideoRun?.id ?? null,
-                      lastVideoAt:
-                        lastVideoRun?.createdAt?.toISOString() ?? null,
-                    }}
-                  />
-                )}
-                <Panel
-                  title="Add product manually"
-                  action={<span id="add-product" />}
-                >
-                  <form
-                    action={addProduct}
-                    className="grid grid-cols-1 md:grid-cols-2 gap-3"
-                  >
-                    <input type="hidden" name="batchId" value={batch.id} />
-                    <div>
-                      <label className="label">Product name</label>
-                      <input className="field" name="productName" required />
-                    </div>
-                    <div>
-                      <label className="label">Category</label>
-                      <input className="field" name="category" />
-                    </div>
-                    <div>
-                      <label className="label">TikTok URL</label>
-                      <input className="field" name="tiktokUrl" />
-                    </div>
-                    <div>
-                      <label className="label">Retailer / store</label>
-                      <input
-                        className="field"
-                        name="retailerName"
-                        placeholder="e.g. boots, sephora_uk (or leave blank)"
-                      />
-                    </div>
-                    <div>
-                      <label className="label">
-                        Local reference image path
-                      </label>
-                      <input
-                        className="field"
-                        name="referenceImagePathLocal"
-                        placeholder="inputs/reference_images/01_primary.jpg"
-                      />
-                    </div>
-                    <div>
-                      <label className="label">
-                        Reference image URL (cloud, optional)
-                      </label>
-                      <input className="field" name="referenceImageUrl" />
-                    </div>
-                    <div className="md:col-span-2">
-                      <label className="label">Image prompt</label>
-                      <textarea
-                        className="field"
-                        name="imagePrompt"
-                        rows={4}
-                      />
-                    </div>
-                    <div className="md:col-span-2">
-                      <button className="btn btn-primary" type="submit">
-                        Add product
-                      </button>
-                    </div>
-                  </form>
-                </Panel>
-              </>
-            ),
-          },
-          {
-            key: "mobile",
-            label: "Mobile share",
-            // Show a "needs review" count badge only when there's
-            // something to review, otherwise omit the badge.
-            badge: (() => {
-              const n = batch.products.filter(
-                (p) => p.reviewStatus === "needs_review",
-              ).length;
-              return n > 0 ? String(n) : null;
-            })(),
-            badgeTone: "warn",
-            content: (
-              <>
-                <MobileReviewQRCard
-                  batchId={batch.id}
-                  reviewToken={batch.reviewToken}
-                  reviewBaseUrl={baseUrl}
-                  needsReviewCount={
-                    batch.products.filter(
-                      (p) => p.reviewStatus === "needs_review",
-                    ).length
-                  }
-                />
-                <MobilePostingQRCard
-                  batchId={batch.id}
-                  postingToken={batch.postingToken}
-                  postingBaseUrl={baseUrl}
-                  approvedCount={
-                    batch.products.filter((p) => p.reviewStatus === "approved")
-                      .length
-                  }
-                  needsPostingCount={
-                    batch.products.filter(
-                      (p) =>
-                        p.reviewStatus === "approved" &&
-                        p.postingStatus === "needs_posting",
-                    ).length
-                  }
-                />
-              </>
-            ),
-          },
-          {
-            // Phase 6 — Flow reconciliation. Badge shows the count
-            // of unmatched tiles (the actionable backlog); falls back
-            // to total when nothing's unmatched but there's still
-            // tracked data, so the user knows the tab has content.
-            key: "flow",
-            label: "Flow items",
-            badge:
-              flowItemCounts.unbound > 0
-                ? String(flowItemCounts.unbound)
-                : flowItemCounts.total > 0
-                  ? String(flowItemCounts.total)
-                  : null,
-            badgeTone: flowItemCounts.unbound > 0 ? "warn" : "muted",
-            content: (
-              <FlowItemsTab
-                batchId={batch.id}
-                items={flowItemRowsForTab}
-                products={flowProductsForTab}
-                lastScanAt={flowIngestSummary?.lastScanAt ?? null}
-              />
-            ),
-          },
-          {
-            key: "activity",
-            label: "Activity",
-            badge: String(batch.jobs.length),
-            badgeTone: "muted",
-            content: (
-              <Panel
-                title={`Activity (${batch.jobs.length})`}
-                action={
-                  <Link
-                    href="/jobs"
-                    className="text-xs text-accent hover:underline"
-                  >
-                    All jobs →
-                  </Link>
-                }
-              >
-                {batch.jobs.length === 0 ? (
-                  <EmptyState
-                    icon="≡"
-                    title="No jobs run for this batch yet"
-                    hint="Trigger one of the actions above."
-                  />
-                ) : (
-                  <ul className="divide-y divide-border">
-                    {batch.jobs.map((j) => (
-                      <li
-                        key={j.id}
-                        className="py-3 flex items-center gap-3 text-sm"
-                      >
-                        <StatusChip
-                          label={j.status}
-                          variant={JOB_STATUS_VARIANT[j.status] ?? "muted"}
-                        />
-                        <Link
-                          href={`/jobs/${j.id}`}
-                          className="text-text hover:text-accent transition-colors"
-                        >
-                          {friendlyJobType(j.jobType)}
-                        </Link>
-                        <span className="text-xs text-muted ml-auto">
-                          {timeAgo(j.createdAt)}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </Panel>
-            ),
-          },
-        ]}
-      />
+      {/* Add product manually — collapsible since it's rarely used. */}
+      <details className="panel p-5" id="add-product">
+        <summary className="cursor-pointer text-sm font-medium text-muted hover:text-text">
+          Add a product manually
+        </summary>
+        <form
+          action={addProduct}
+          className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-4"
+        >
+          <input type="hidden" name="batchId" value={batch.id} />
+          <div>
+            <label className="label">Product name</label>
+            <input className="field mt-1" name="productName" required />
+          </div>
+          <div>
+            <label className="label">Category</label>
+            <input className="field mt-1" name="category" />
+          </div>
+          <div>
+            <label className="label">TikTok URL</label>
+            <input className="field mt-1" name="tiktokUrl" />
+          </div>
+          <div>
+            <label className="label">Retailer / store</label>
+            <input
+              className="field mt-1"
+              name="retailerName"
+              placeholder="e.g. boots, sephora_uk (or blank)"
+            />
+          </div>
+          <div className="md:col-span-2">
+            <label className="label">Image prompt</label>
+            <textarea className="field mt-1" name="imagePrompt" rows={3} />
+          </div>
+          <div className="md:col-span-2">
+            <button className="btn btn-primary" type="submit">
+              Add product
+            </button>
+          </div>
+        </form>
+      </details>
     </div>
   );
 }

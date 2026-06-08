@@ -1,0 +1,1165 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Batch page redesign · prototype</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<style>
+:root {
+  --bg:           #070a10;
+  --panel:        #0f141c;
+  --panel2:       #141a25;
+  --border:       #1d2433;
+  --border-strong:#283044;
+  --muted:        #7a8499;
+  --muted2:       #5e6679;
+  --text:         #e6e9f2;
+  --accent:       #38bdf8;
+  --accent-soft:  #0ea5e9;
+  --pink:         #f472b6;
+  --ok:           #34d399;
+  --warn:         #fbbf24;
+  --bad:          #f87171;
+  --radius-lg:    1.1rem;
+  --radius-md:    0.65rem;
+  --radius-sm:    0.4rem;
+  --font: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  font-family: var(--font);
+  background: var(--bg);
+  background-image:
+    radial-gradient(ellipse 80% 60% at 50% 0%, rgba(56,189,248,0.07), transparent 60%),
+    radial-gradient(ellipse 50% 40% at 100% 100%, rgba(244,114,182,0.05), transparent 60%);
+  background-attachment: fixed;
+  color: var(--text);
+  min-height: 100vh;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+/* ============================================================
+   TOP BAR — fixed across all views
+   ============================================================ */
+.appbar {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.8rem 1.4rem;
+  border-bottom: 1px solid var(--border);
+  background: rgba(15, 20, 28, 0.7);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+.appbar-left { display: flex; align-items: center; gap: 0.85rem; min-width: 0; flex: 1; }
+.appbar-crumb { color: var(--muted); font-size: 12px; }
+.appbar-crumb a { color: var(--muted); text-decoration: none; }
+.appbar-crumb a:hover { color: var(--text); }
+.appbar-title { font-weight: 600; font-size: 17px; letter-spacing: -0.005em; }
+.appbar-meta { color: var(--muted); font-size: 12px; }
+.appbar-right { display: flex; align-items: center; gap: 0.5rem; }
+
+/* Chip */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.15rem 0.55rem;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel2);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.chip.ok     { color: var(--ok);     border-color: rgba(52,211,153,0.4);  background: rgba(52,211,153,0.06); }
+.chip.warn   { color: var(--warn);   border-color: rgba(251,191,36,0.4);  background: rgba(251,191,36,0.06); }
+.chip.bad    { color: var(--bad);    border-color: rgba(248,113,113,0.4); background: rgba(248,113,113,0.06); }
+.chip.accent { color: var(--accent); border-color: rgba(56,189,248,0.4);  background: rgba(56,189,248,0.06); }
+.chip.pink   { color: var(--pink);   border-color: rgba(244,114,182,0.4); background: rgba(244,114,182,0.06); }
+
+/* Button */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  padding: 0.42rem 0.85rem;
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.btn:hover { background: var(--border); }
+.btn-primary {
+  background: var(--accent-soft);
+  color: var(--bg);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px rgba(56,189,248,0.30), 0 0 24px -8px rgba(56,189,248,0.45);
+}
+.btn-primary:hover { background: var(--accent); }
+.btn-ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+}
+.btn-ghost:hover { background: var(--panel2); color: var(--text); }
+.btn-danger {
+  color: var(--bad);
+  border-color: rgba(248,113,113,0.4);
+}
+.btn-danger:hover { background: rgba(248,113,113,0.1); }
+.btn-sm { padding: 0.2rem 0.55rem; font-size: 12px; border-radius: var(--radius-sm); }
+
+/* ============================================================
+   VIEW SWITCHER — top-right inline. Prototype only.
+   ============================================================ */
+.view-switcher {
+  position: fixed;
+  bottom: 1rem;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 0.25rem;
+  padding: 0.3rem;
+  background: rgba(15, 20, 28, 0.95);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  z-index: 30;
+  box-shadow: 0 12px 32px -16px rgba(0,0,0,0.6);
+}
+.view-switcher button {
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  padding: 0.4rem 0.85rem;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: color 0.12s, background 0.12s;
+}
+.view-switcher button:hover { color: var(--text); }
+.view-switcher button[aria-pressed="true"] {
+  color: var(--bg);
+  background: var(--accent);
+}
+.view-switcher .label-tag {
+  font-size: 10px;
+  color: var(--muted2);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  padding: 0.4rem 0.5rem 0.4rem 0.85rem;
+  align-self: center;
+}
+
+/* ============================================================
+   LANES (vertical swim lanes)
+   ============================================================ */
+.main {
+  padding: 1.25rem 1.4rem 6rem;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+.lane + .lane { margin-top: 0.9rem; }
+
+.lane {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+.lane-head {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.7rem 1rem;
+  border-bottom: 1px solid var(--border);
+  background: rgba(20, 26, 37, 0.4);
+  cursor: pointer;
+  user-select: none;
+}
+.lane-caret {
+  color: var(--muted);
+  font-size: 10px;
+  width: 12px;
+  transition: transform 0.15s;
+}
+.lane.collapsed .lane-caret { transform: rotate(-90deg); }
+.lane.collapsed .lane-body { display: none; }
+
+.lane-title {
+  font-weight: 600;
+  font-size: 14px;
+  letter-spacing: -0.005em;
+}
+.lane-count {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 400;
+}
+.lane-actions { margin-left: auto; display: flex; gap: 0.4rem; }
+
+.lane-body {
+  display: flex;
+  gap: 0.65rem;
+  padding: 0.85rem 1rem;
+  overflow-x: auto;
+}
+.lane.empty .lane-body {
+  display: block;
+  color: var(--muted2);
+  font-size: 12px;
+  font-style: italic;
+  text-align: center;
+  padding: 1.3rem;
+}
+
+/* Stage-specific accent — left edge tinted */
+.lane-needs   .lane-head { border-left: 3px solid var(--warn); padding-left: calc(1rem - 3px); }
+.lane-ready   .lane-head { border-left: 3px solid var(--accent); padding-left: calc(1rem - 3px); }
+.lane-running .lane-head { border-left: 3px solid var(--pink); padding-left: calc(1rem - 3px); }
+.lane-done    .lane-head { border-left: 3px solid var(--ok); padding-left: calc(1rem - 3px); }
+.lane-posted  .lane-head { border-left: 3px solid var(--muted); padding-left: calc(1rem - 3px); }
+
+/* ============================================================
+   CARDS — compact by default; one is expanded in the prototype
+   ============================================================ */
+.card {
+  flex: 0 0 14rem;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  cursor: grab;
+  transition: border-color 0.12s, background 0.12s, transform 0.08s;
+  position: relative;
+  overflow: hidden;
+}
+.card:hover { border-color: var(--border-strong); }
+.card:active { cursor: grabbing; transform: scale(0.99); }
+
+.card-head {
+  display: flex;
+  gap: 0.55rem;
+  padding: 0.55rem 0.65rem 0.6rem;
+  align-items: flex-start;
+}
+.card-thumb {
+  width: 44px;
+  height: 44px;
+  flex: 0 0 44px;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(135deg, #1d2433 0%, #283044 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  color: var(--muted2);
+  overflow: hidden;
+  background-size: cover;
+  background-position: center;
+}
+.card-thumb.t1 { background-image: linear-gradient(135deg, #3b3a52 0%, #5e3a5e 100%); }
+.card-thumb.t2 { background-image: linear-gradient(135deg, #2e4a3a 0%, #1d3a4a 100%); }
+.card-thumb.t3 { background-image: linear-gradient(135deg, #4a3a2e 0%, #5e2e2e 100%); }
+.card-thumb.t4 { background-image: linear-gradient(135deg, #2e3a4a 0%, #2e4a5e 100%); }
+.card-thumb.t5 { background-image: linear-gradient(135deg, #4a2e4a 0%, #2e2e5e 100%); }
+.card-thumb.t6 { background-image: linear-gradient(135deg, #3a4a3a 0%, #1d4a4a 100%); }
+.card-thumb.t7 { background-image: linear-gradient(135deg, #5e3a3a 0%, #4a4a2e 100%); }
+.card-thumb.t8 { background-image: linear-gradient(135deg, #2e5e4a 0%, #3a3a5e 100%); }
+.card-thumb.t9 { background-image: linear-gradient(135deg, #5e4a2e 0%, #4a5e2e 100%); }
+
+.card-body {
+  flex: 1;
+  min-width: 0;
+}
+.card-name {
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.card-sub {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 0.15rem;
+}
+.card-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  padding: 0 0.65rem 0.6rem;
+}
+.card-chips .chip {
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 10px;
+  padding: 0.1rem 0.45rem;
+}
+
+/* Spinning indicator for generating */
+.card-spinner {
+  position: absolute;
+  top: 0.55rem;
+  right: 0.55rem;
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  border: 2px solid var(--border);
+  border-top-color: var(--pink);
+  animation: spin 0.9s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---- Expanded card ---- */
+.card.expanded {
+  flex: 0 0 28rem;
+  cursor: default;
+  border-color: var(--accent);
+  box-shadow:
+    0 0 0 1px rgba(56,189,248,0.30),
+    0 0 24px -8px rgba(56,189,248,0.45);
+}
+.card.expanded .card-head { padding-bottom: 0.4rem; }
+.card.expanded .card-thumb { width: 60px; height: 60px; flex-basis: 60px; }
+.card.expanded .card-name { font-size: 14px; white-space: normal; line-height: 1.3; }
+.card.expanded .card-extra {
+  padding: 0.4rem 0.65rem 0.65rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  border-top: 1px solid var(--border);
+  margin-top: 0.2rem;
+}
+.card.expanded .section-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+  margin: 0.1rem 0 0.35rem;
+}
+
+.ref-stack {
+  display: flex;
+  gap: 0.35rem;
+}
+.ref-slot {
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  position: relative;
+  background-size: cover;
+  background-position: center;
+}
+.ref-slot.r1 { background-image: linear-gradient(135deg, #3b3a52 0%, #5e3a5e 100%); }
+.ref-slot.r2 { background-image: linear-gradient(135deg, #2e4a3a 0%, #1d3a4a 100%); }
+.ref-slot.empty {
+  border-style: dashed;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  color: var(--muted2);
+}
+.ref-slot .primary-badge {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  font-size: 9px;
+  background: rgba(7,10,16,0.85);
+  padding: 0 4px;
+  border-radius: 3px;
+  color: var(--warn);
+}
+
+.hook-preview {
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.5rem 0.6rem;
+  white-space: pre-line;
+  font-weight: 500;
+  line-height: 1.4;
+}
+.hook-preview-meta {
+  margin-top: 0.3rem;
+  font-size: 10px;
+  color: var(--muted2);
+  letter-spacing: 0.05em;
+}
+
+.card.expanded .card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  padding-top: 0.2rem;
+}
+
+/* ============================================================
+   DRAWER (right-side overlay)
+   ============================================================ */
+.drawer-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(7, 10, 16, 0.55);
+  z-index: 40;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s;
+}
+body.drawer-open .drawer-overlay { opacity: 1; pointer-events: auto; }
+
+.drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  height: 100vh;
+  width: min(450px, 90vw);
+  background: var(--panel);
+  border-left: 1px solid var(--border-strong);
+  z-index: 50;
+  transform: translateX(100%);
+  transition: transform 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+  display: flex;
+  flex-direction: column;
+  box-shadow: -20px 0 60px -20px rgba(0,0,0,0.5);
+}
+body.drawer-open .drawer { transform: translateX(0); }
+
+.drawer-head {
+  padding: 0.9rem 1rem 0;
+  border-bottom: 1px solid var(--border);
+}
+.drawer-head h2 {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0 0 0.65rem;
+  letter-spacing: -0.005em;
+}
+.drawer-tabs {
+  display: flex;
+  gap: 0.2rem;
+  margin-bottom: -1px;
+}
+.drawer-tab {
+  font-family: var(--font);
+  font-size: 12px;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  padding: 0.5rem 0.7rem;
+  cursor: pointer;
+}
+.drawer-tab:hover { color: var(--text); }
+.drawer-tab[aria-selected="true"] {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
+.drawer-close {
+  position: absolute;
+  top: 0.7rem;
+  right: 0.7rem;
+  font-family: var(--font);
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  font-size: 18px;
+  cursor: pointer;
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+}
+.drawer-close:hover { background: var(--panel2); color: var(--text); }
+
+.drawer-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0.9rem 1rem;
+}
+.drawer-panel { display: none; }
+.drawer-panel.active { display: block; }
+
+.qr-card {
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 0.9rem;
+  margin-bottom: 0.9rem;
+}
+.qr-card-row { display: flex; gap: 0.85rem; }
+.qr-stub {
+  width: 110px; height: 110px;
+  flex: 0 0 110px;
+  background:
+    repeating-conic-gradient(#e6e9f2 0% 7%, #0f141c 0% 14%);
+  border-radius: 6px;
+  position: relative;
+  overflow: hidden;
+}
+.qr-stub::after {
+  content: "";
+  position: absolute;
+  inset: 35%;
+  background: var(--panel2);
+  border-radius: 50%;
+}
+.qr-card h3 { margin: 0 0 0.25rem; font-size: 13px; font-weight: 600; }
+.qr-card p { margin: 0; font-size: 11px; color: var(--muted); line-height: 1.4; }
+.qr-card .qr-url {
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  padding: 0.3rem 0.4rem;
+  border-radius: var(--radius-sm);
+  margin-top: 0.55rem;
+  color: var(--accent);
+  word-break: break-all;
+}
+
+.flow-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.4rem;
+  margin-bottom: 1rem;
+}
+.flow-tile {
+  aspect-ratio: 1;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(135deg, #2e3a5e, #3a2e5e);
+  border: 1px solid var(--border);
+  position: relative;
+  cursor: grab;
+}
+.flow-tile.t-a { background-image: linear-gradient(135deg, #5e3a3a, #4a4a2e); }
+.flow-tile.t-b { background-image: linear-gradient(135deg, #2e5e4a, #3a3a5e); }
+.flow-tile.t-c { background-image: linear-gradient(135deg, #5e4a2e, #4a5e2e); }
+.flow-tile.t-d { background-image: linear-gradient(135deg, #3b3a52, #5e3a5e); }
+.flow-tile.t-e { background-image: linear-gradient(135deg, #2e4a3a, #1d3a4a); }
+.flow-tile.t-f { background-image: linear-gradient(135deg, #4a3a2e, #5e2e2e); }
+
+.activity-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  padding: 0.55rem 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+.activity-row:last-child { border-bottom: 0; }
+.activity-dot {
+  width: 8px; height: 8px;
+  border-radius: 999px;
+  background: var(--ok);
+  flex: 0 0 8px;
+  align-self: center;
+}
+.activity-dot.warn { background: var(--warn); }
+.activity-dot.bad  { background: var(--bad); }
+.activity-text { flex: 1; }
+.activity-time { color: var(--muted2); font-size: 11px; }
+
+.setting-row {
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.setting-row:last-child { border-bottom: 0; }
+.setting-label { color: var(--muted); font-size: 12px; }
+.setting-value { color: var(--text); font-weight: 500; }
+
+/* ============================================================
+   EMPTY STATE
+   ============================================================ */
+.empty-hero {
+  margin: 4rem auto 0;
+  max-width: 32rem;
+  text-align: center;
+  padding: 2rem;
+}
+.empty-hero .hero-icon {
+  width: 64px;
+  height: 64px;
+  margin: 0 auto 1.2rem;
+  border-radius: 50%;
+  background: rgba(56,189,248,0.1);
+  border: 1px solid rgba(56,189,248,0.3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 26px;
+  color: var(--accent);
+}
+.empty-hero h1 {
+  font-size: 22px;
+  margin: 0 0 0.5rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.empty-hero p {
+  color: var(--muted);
+  margin: 0 0 1.5rem;
+  font-size: 14px;
+}
+.empty-actions { display: flex; gap: 0.55rem; justify-content: center; }
+
+/* View visibility */
+.view { display: none; }
+.view.active { display: block; }
+
+.icon { display: inline-block; }
+</style>
+</head>
+<body>
+
+<!-- ============================================================
+     APP BAR
+     ============================================================ -->
+<header class="appbar">
+  <div class="appbar-left">
+    <div class="appbar-crumb"><a href="#">← Batches</a></div>
+    <div class="appbar-title">Apex UK Drop 14</div>
+    <span class="chip ok">UK</span>
+    <span class="chip">active</span>
+    <span class="appbar-meta">12 products · created 2026-06-04</span>
+  </div>
+  <div class="appbar-right">
+    <button class="btn btn-danger btn-sm" id="stopBtn" style="display:none">■ Stop generation (1)</button>
+    <button class="btn" onclick="toggleDrawer()">≡ Panels</button>
+    <button class="btn btn-ghost btn-sm" title="Delete batch">⋯</button>
+  </div>
+</header>
+
+<!-- ============================================================
+     LOADED VIEW — vertical swim lanes
+     ============================================================ -->
+<main class="view active" id="view-loaded">
+  <div class="main">
+
+    <!-- Needs review -->
+    <section class="lane lane-needs">
+      <header class="lane-head" onclick="toggleLane(this)">
+        <span class="lane-caret">▼</span>
+        <span class="lane-title">Needs review</span>
+        <span class="lane-count">(3)</span>
+        <div class="lane-actions">
+          <button class="btn btn-sm">Review on phone</button>
+        </div>
+      </header>
+      <div class="lane-body">
+
+        <article class="card" draggable="true">
+          <div class="card-head">
+            <div class="card-thumb t1"></div>
+            <div class="card-body">
+              <div class="card-name">Halara high-waisted wide-leg drawstring joggers</div>
+              <div class="card-sub">Clothing</div>
+            </div>
+          </div>
+          <div class="card-chips">
+            <span class="chip warn">needs review</span>
+            <span class="chip">no AI prompt</span>
+          </div>
+        </article>
+
+        <article class="card" draggable="true">
+          <div class="card-head">
+            <div class="card-thumb t2"></div>
+            <div class="card-body">
+              <div class="card-name">Boots SPF 50 lightweight face cream</div>
+              <div class="card-sub">Beauty</div>
+            </div>
+          </div>
+          <div class="card-chips">
+            <span class="chip warn">needs review</span>
+            <span class="chip">no AI prompt</span>
+          </div>
+        </article>
+
+        <article class="card" draggable="true">
+          <div class="card-head">
+            <div class="card-thumb t3"></div>
+            <div class="card-body">
+              <div class="card-name">X7 Video Doorbell — no WiFi, no subscription</div>
+              <div class="card-sub">Electronics</div>
+            </div>
+          </div>
+          <div class="card-chips">
+            <span class="chip warn">needs review</span>
+            <span class="chip accent">IP review</span>
+          </div>
+        </article>
+
+      </div>
+    </section>
+
+    <!-- Ready (one card expanded) -->
+    <section class="lane lane-ready">
+      <header class="lane-head" onclick="toggleLane(this)">
+        <span class="lane-caret">▼</span>
+        <span class="lane-title">Ready</span>
+        <span class="lane-count">(3)</span>
+        <div class="lane-actions">
+          <button class="btn btn-primary btn-sm">⚡ Generate all (3)</button>
+        </div>
+      </header>
+      <div class="lane-body">
+
+        <article class="card" draggable="true">
+          <div class="card-head">
+            <div class="card-thumb t4"></div>
+            <div class="card-body">
+              <div class="card-name">Eufy Security Video Doorbell E340</div>
+              <div class="card-sub">Electronics</div>
+            </div>
+          </div>
+          <div class="card-chips">
+            <span class="chip ok">approved</span>
+            <span class="chip accent">★ AI ready</span>
+          </div>
+        </article>
+
+        <!-- EXPANDED CARD -->
+        <article class="card expanded" draggable="false">
+          <div class="card-head">
+            <div class="card-thumb t5"></div>
+            <div class="card-body">
+              <div class="card-name">Stanley 30oz Quencher H2.0 tumbler — cosmo pink</div>
+              <div class="card-sub">Drinkware · Primark / John Lewis</div>
+              <div class="card-chips" style="padding:0.35rem 0 0 0">
+                <span class="chip ok">approved</span>
+                <span class="chip accent">★ AI ready (5 hooks)</span>
+                <span class="chip ok">IP low</span>
+                <span class="chip">3 refs</span>
+              </div>
+            </div>
+            <button class="btn btn-ghost btn-sm" style="margin-left:auto">▲</button>
+          </div>
+
+          <div class="card-extra">
+            <div>
+              <div class="section-label">Reference images</div>
+              <div class="ref-stack">
+                <div class="ref-slot r1"><span class="primary-badge">★</span></div>
+                <div class="ref-slot r2"></div>
+                <div class="ref-slot empty">+</div>
+              </div>
+            </div>
+
+            <div>
+              <div class="section-label">Hook A1 (UK · "I'M SO SORRY")</div>
+              <div class="hook-preview">I'M SO SORRY...
+but the Stanley 30oz Quencher is absolutely flying out 😱
+if you wanted one don't wait</div>
+              <div class="hook-preview-meta">+ 4 more variants · click to cycle</div>
+            </div>
+
+            <div>
+              <div class="section-label">Caption · hashtags</div>
+              <div class="hook-preview">Stanley 30oz Quencher H2.0 tumbler</div>
+              <div class="card-chips" style="padding:0.45rem 0 0">
+                <span class="chip">#TikTokShopUK</span>
+                <span class="chip">#DealDrops</span>
+                <span class="chip">#TikTokMadeMeBuyIt</span>
+                <span class="chip">#WeekendSale</span>
+              </div>
+            </div>
+
+            <div class="card-actions">
+              <button class="btn btn-primary btn-sm">⚡ Generate now</button>
+              <button class="btn btn-sm">↻ Regenerate AI</button>
+              <button class="btn btn-sm">Edit prompt</button>
+              <button class="btn btn-ghost btn-sm">Send back to review</button>
+            </div>
+          </div>
+        </article>
+
+        <article class="card" draggable="true">
+          <div class="card-head">
+            <div class="card-thumb t6"></div>
+            <div class="card-body">
+              <div class="card-name">Currys Bluetooth 6.0 earbuds with charging dock</div>
+              <div class="card-sub">Electronics</div>
+            </div>
+          </div>
+          <div class="card-chips">
+            <span class="chip ok">approved</span>
+            <span class="chip accent">★ AI ready</span>
+          </div>
+        </article>
+
+      </div>
+    </section>
+
+    <!-- Generating -->
+    <section class="lane lane-running">
+      <header class="lane-head" onclick="toggleLane(this)">
+        <span class="lane-caret">▼</span>
+        <span class="lane-title">Generating</span>
+        <span class="lane-count">(1)</span>
+        <div class="lane-actions">
+          <button class="btn btn-danger btn-sm" onclick="document.getElementById('stopBtn').style.display='inline-flex'">■ Stop</button>
+        </div>
+      </header>
+      <div class="lane-body">
+
+        <article class="card" draggable="false">
+          <div class="card-spinner"></div>
+          <div class="card-head">
+            <div class="card-thumb t7"></div>
+            <div class="card-body">
+              <div class="card-name">JD Sports compression base layer top</div>
+              <div class="card-sub">Activewear</div>
+            </div>
+          </div>
+          <div class="card-chips">
+            <span class="chip pink">submitting…</span>
+            <span class="chip">item 4/12</span>
+          </div>
+        </article>
+
+      </div>
+    </section>
+
+    <!-- Generated -->
+    <section class="lane lane-done">
+      <header class="lane-head" onclick="toggleLane(this)">
+        <span class="lane-caret">▼</span>
+        <span class="lane-title">Generated</span>
+        <span class="lane-count">(4)</span>
+        <div class="lane-actions">
+          <button class="btn btn-sm">Favorite in Flow ↗</button>
+          <button class="btn btn-primary btn-sm">⚡ Generate videos (4)</button>
+        </div>
+      </header>
+      <div class="lane-body">
+
+        <article class="card" draggable="true">
+          <div class="card-head">
+            <div class="card-thumb t8"></div>
+            <div class="card-body">
+              <div class="card-name">Sephora UK Charlotte Tilbury lipstick</div>
+              <div class="card-sub">Beauty</div>
+            </div>
+          </div>
+          <div class="card-chips">
+            <span class="chip ok">image ready</span>
+            <span class="chip">2 variants</span>
+          </div>
+        </article>
+
+        <article class="card" draggable="true">
+          <div class="card-head">
+            <div class="card-thumb t9"></div>
+            <div class="card-body">
+              <div class="card-name">IKEA woven storage basket</div>
+              <div class="card-sub">Homeware</div>
+            </div>
+          </div>
+          <div class="card-chips">
+            <span class="chip ok">image ready</span>
+          </div>
+        </article>
+
+        <article class="card" draggable="true">
+          <div class="card-head">
+            <div class="card-thumb t1"></div>
+            <div class="card-body">
+              <div class="card-name">Schuh leather chelsea boots</div>
+              <div class="card-sub">Footwear</div>
+            </div>
+          </div>
+          <div class="card-chips">
+            <span class="chip ok">image ready</span>
+            <span class="chip warn">video failed</span>
+          </div>
+        </article>
+
+        <article class="card" draggable="true">
+          <div class="card-head">
+            <div class="card-thumb t2"></div>
+            <div class="card-body">
+              <div class="card-name">Argos board-game family set</div>
+              <div class="card-sub">Toys</div>
+            </div>
+          </div>
+          <div class="card-chips">
+            <span class="chip ok">image ready</span>
+          </div>
+        </article>
+
+      </div>
+    </section>
+
+    <!-- Posted -->
+    <section class="lane lane-posted">
+      <header class="lane-head" onclick="toggleLane(this)">
+        <span class="lane-caret">▼</span>
+        <span class="lane-title">Posted</span>
+        <span class="lane-count">(1)</span>
+        <div class="lane-actions">
+          <button class="btn btn-sm" onclick="toggleDrawer('mobile')">Open posting QR ↗</button>
+        </div>
+      </header>
+      <div class="lane-body">
+
+        <article class="card" draggable="true">
+          <div class="card-head">
+            <div class="card-thumb t3"></div>
+            <div class="card-body">
+              <div class="card-name">Tesco everyday-value face wash</div>
+              <div class="card-sub">Beauty · 2 days ago</div>
+            </div>
+          </div>
+          <div class="card-chips">
+            <span class="chip ok">posted ✓</span>
+          </div>
+        </article>
+
+      </div>
+    </section>
+
+  </div>
+</main>
+
+<!-- ============================================================
+     EMPTY VIEW
+     ============================================================ -->
+<main class="view" id="view-empty">
+  <div class="empty-hero">
+    <div class="hero-icon">⤵</div>
+    <h1>This batch is empty</h1>
+    <p>Start by importing products from a Kalodata XLSX export. Each row becomes a card you can review, generate, and post.</p>
+    <div class="empty-actions">
+      <button class="btn btn-primary">Import Kalodata .xlsx</button>
+      <button class="btn">Add a product manually</button>
+    </div>
+  </div>
+</main>
+
+<!-- ============================================================
+     DRAWER — right-side overlay
+     ============================================================ -->
+<div class="drawer-overlay" onclick="closeDrawer()"></div>
+<aside class="drawer" role="dialog" aria-label="Side panels">
+  <div class="drawer-head">
+    <button class="drawer-close" onclick="closeDrawer()" aria-label="Close">×</button>
+    <h2>Panels</h2>
+    <div class="drawer-tabs" role="tablist">
+      <button class="drawer-tab" role="tab" aria-selected="true"  data-panel="mobile">Mobile share</button>
+      <button class="drawer-tab" role="tab" aria-selected="false" data-panel="flow">Flow items</button>
+      <button class="drawer-tab" role="tab" aria-selected="false" data-panel="activity">Activity</button>
+      <button class="drawer-tab" role="tab" aria-selected="false" data-panel="settings">Settings</button>
+    </div>
+  </div>
+  <div class="drawer-body">
+
+    <section class="drawer-panel active" data-panel="mobile">
+      <div class="qr-card">
+        <div class="qr-card-row">
+          <div class="qr-stub"></div>
+          <div>
+            <h3>Review on phone</h3>
+            <p>Scan with your phone to approve / reject products from a 1-tap UI. 3 still need review.</p>
+            <div class="qr-url">app.autobof.xyz/mobile-review/DviV-sihscFArJ9-Qmfy0sb</div>
+          </div>
+        </div>
+      </div>
+      <div class="qr-card">
+        <div class="qr-card-row">
+          <div class="qr-stub"></div>
+          <div>
+            <h3>Posting assist</h3>
+            <p>Copy hooks, captions, hashtags to TikTok as you post manually-downloaded Flow videos.</p>
+            <div class="qr-url">app.autobof.xyz/mobile-posting/Tk94-postFGw6-23a-bC4d-eYL2</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="drawer-panel" data-panel="flow">
+      <div style="font-size:12px; color: var(--muted); margin-bottom:0.7rem;">
+        5 unmatched Flow tiles · 8 bound · last scan 6 min ago
+      </div>
+      <div class="flow-grid">
+        <div class="flow-tile t-a" draggable="true"></div>
+        <div class="flow-tile t-b" draggable="true"></div>
+        <div class="flow-tile t-c" draggable="true"></div>
+        <div class="flow-tile t-d" draggable="true"></div>
+        <div class="flow-tile t-e" draggable="true"></div>
+        <div class="flow-tile t-f" draggable="true"></div>
+      </div>
+      <button class="btn btn-sm" style="width:100%">Re-scan Flow</button>
+      <p style="font-size:11px;color:var(--muted2);margin-top:0.5rem">Drag a tile onto a product card to bind it.</p>
+    </section>
+
+    <section class="drawer-panel" data-panel="activity">
+      <div class="activity-row">
+        <span class="activity-dot"></span>
+        <div class="activity-text">Generated 4 images <span style="color:var(--muted)">· batch sub-set</span></div>
+        <span class="activity-time">2 m</span>
+      </div>
+      <div class="activity-row">
+        <span class="activity-dot warn"></span>
+        <div class="activity-text">AI prompt failed for <em>Pets at Home wet food</em></div>
+        <span class="activity-time">5 m</span>
+      </div>
+      <div class="activity-row">
+        <span class="activity-dot"></span>
+        <div class="activity-text">5 products approved on phone</div>
+        <span class="activity-time">14 m</span>
+      </div>
+      <div class="activity-row">
+        <span class="activity-dot"></span>
+        <div class="activity-text">12 products imported from Kalodata</div>
+        <span class="activity-time">28 m</span>
+      </div>
+      <div class="activity-row">
+        <span class="activity-dot bad"></span>
+        <div class="activity-text">Runner v0.6.10 disconnected briefly</div>
+        <span class="activity-time">1 h</span>
+      </div>
+    </section>
+
+    <section class="drawer-panel" data-panel="settings">
+      <div class="setting-row">
+        <span class="setting-label">AI provider</span>
+        <span class="setting-value">OpenRouter · gpt-4o</span>
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">Automation mode</span>
+        <span class="setting-value">family plan</span>
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">Vision for prompts</span>
+        <span class="setting-value">on</span>
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">Runner</span>
+        <span class="setting-value">v0.6.13-alpha · connected</span>
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">Market</span>
+        <span class="setting-value">UK TikTok Shop</span>
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">Reference image base</span>
+        <span class="setting-value">/uploads/...</span>
+      </div>
+    </section>
+
+  </div>
+</aside>
+
+<!-- ============================================================
+     PROTOTYPE VIEW SWITCHER (not part of the real UI)
+     ============================================================ -->
+<div class="view-switcher" role="tablist">
+  <span class="label-tag">prototype</span>
+  <button data-view="loaded" aria-pressed="true">Loaded batch</button>
+  <button data-view="empty"  aria-pressed="false">Empty batch</button>
+  <button data-view="drawer" aria-pressed="false">+ Drawer open</button>
+</div>
+
+<script>
+function toggleLane(headerEl) {
+  headerEl.parentElement.classList.toggle("collapsed");
+}
+
+function openDrawer(panelKey) {
+  document.body.classList.add("drawer-open");
+  if (panelKey) {
+    document.querySelectorAll(".drawer-tab").forEach(t => {
+      const on = t.dataset.panel === panelKey;
+      t.setAttribute("aria-selected", on ? "true" : "false");
+    });
+    document.querySelectorAll(".drawer-panel").forEach(p => {
+      p.classList.toggle("active", p.dataset.panel === panelKey);
+    });
+  }
+}
+function closeDrawer() { document.body.classList.remove("drawer-open"); }
+function toggleDrawer(panelKey) {
+  if (document.body.classList.contains("drawer-open")) {
+    closeDrawer();
+  } else {
+    openDrawer(panelKey);
+  }
+}
+
+// drawer tabs
+document.querySelectorAll(".drawer-tab").forEach(tab => {
+  tab.addEventListener("click", () => {
+    document.querySelectorAll(".drawer-tab").forEach(t => t.setAttribute("aria-selected", "false"));
+    tab.setAttribute("aria-selected", "true");
+    const target = tab.dataset.panel;
+    document.querySelectorAll(".drawer-panel").forEach(p => {
+      p.classList.toggle("active", p.dataset.panel === target);
+    });
+  });
+});
+
+// prototype view switcher
+document.querySelectorAll(".view-switcher button[data-view]").forEach(btn => {
+  btn.addEventListener("click", () => {
+    const view = btn.dataset.view;
+    document.querySelectorAll(".view-switcher button").forEach(b => b.setAttribute("aria-pressed", "false"));
+    btn.setAttribute("aria-pressed", "true");
+
+    if (view === "drawer") {
+      document.getElementById("view-loaded").classList.add("active");
+      document.getElementById("view-empty").classList.remove("active");
+      openDrawer("activity");
+    } else if (view === "empty") {
+      document.getElementById("view-loaded").classList.remove("active");
+      document.getElementById("view-empty").classList.add("active");
+      closeDrawer();
+    } else {
+      document.getElementById("view-loaded").classList.add("active");
+      document.getElementById("view-empty").classList.remove("active");
+      closeDrawer();
+    }
+  });
+});
+
+// expanded card click to collapse (demo)
+document.querySelector(".card.expanded .btn-ghost")?.addEventListener("click", () => {
+  document.querySelector(".card.expanded")?.classList.remove("expanded");
+});
+</script>
+
+</body>
+</html>
