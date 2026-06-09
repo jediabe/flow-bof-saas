@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
+import { useState, useEffect, type ReactNode } from "react";
 import {
   type Stage,
   STAGE_LABEL,
@@ -49,10 +49,21 @@ export default function StageLane({
   /** Visual highlight while a card is hovering over this lane. */
   isDropActive?: boolean;
 }) {
-  const [collapsed, setCollapsed] = useState(false);
-
   const empty = count === 0;
   const accent = STAGE_ACCENT[stage];
+
+  // Empty lanes start collapsed so the page reads "what's actually
+  // here" instead of three giant placeholders saying "nothing here."
+  // When a card arrives (e.g. dragged in, or a job promotes a product
+  // to Generating), auto-expand so the user sees the new card without
+  // hunting for the caret. Manual collapse always wins after that —
+  // we only auto-toggle on the empty→non-empty transition.
+  const [collapsed, setCollapsed] = useState(empty);
+  const [prevEmpty, setPrevEmpty] = useState(empty);
+  useEffect(() => {
+    if (prevEmpty && !empty) setCollapsed(false);
+    setPrevEmpty(empty);
+  }, [empty, prevEmpty]);
 
   return (
     <section
