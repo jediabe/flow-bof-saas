@@ -92,6 +92,14 @@ model WorkspaceSettings {
   openrouterSiteUrl String?
   openrouterAppName String?
 
+  // Phase 9 IP / trademark risk screening. When false (default
+  // after end-user feedback that the heuristic was too aggressive),
+  // the deterministic + AI risk checks no longer GATE any product
+  // from advancing to Ready or being dispatched for image
+  // generation. Existing ipRiskStatus values on Product rows stay
+  // for reference; they just stop blocking the workflow.
+  ipRiskChecksEnabled Boolean @default(false)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }

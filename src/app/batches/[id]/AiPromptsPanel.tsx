@@ -217,6 +217,19 @@ export default function AiPromptsPanel({
         </Link>
       </div>
 
+      {/* Workflow reminder — call out that the Mobile QR review
+          pass should happen FIRST so the user only spends AI
+          tokens on products that are actually sellable + in
+          stock on their TikTok Shop. */}
+      <div className="rounded-2xl border border-accent/40 bg-accent/[0.06] text-xs text-accent px-4 py-3 leading-relaxed">
+        <span className="font-semibold">Before generating image prompts:</span>{" "}
+        use the <span className="font-semibold">Mobile QR</span> in the panel
+        above to walk this batch on your phone — add each product to your
+        TikTok Shop first to confirm it&apos;s actually sellable and in
+        stock. Skipping that pass burns AI tokens on products you
+        can&apos;t list anyway.
+      </div>
+
       <div className="flex flex-wrap items-center gap-2">
         <StatusChip label={`Provider: ${providerLabel}`} variant="muted" />
         {provider === "manual" ? (

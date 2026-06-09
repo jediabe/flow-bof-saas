@@ -78,11 +78,16 @@ export default function ExpandedPipelineCard({
   batchId,
   stage,
   onClose,
+  ipRiskChecksEnabled = true,
 }: {
   product: ExpandedCardProduct;
   batchId: string;
   stage: Stage;
   onClose: () => void;
+  /** Workspace-level IP risk toggle. When false, the IP risk row
+   *  is hidden entirely so the user isn't reminded of a feature
+   *  they've opted out of. Defaults to true for back-compat. */
+  ipRiskChecksEnabled?: boolean;
 }) {
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
@@ -340,8 +345,9 @@ export default function ExpandedPipelineCard({
         </section>
       )}
 
-      {/* IP risk row — same component used by the legacy editor */}
-      <IpRiskRow product={ipRiskRowProduct} />
+      {/* IP risk row — same component used by the legacy editor.
+          Hidden when the workspace has IP risk screening off. */}
+      {ipRiskChecksEnabled && <IpRiskRow product={ipRiskRowProduct} />}
 
       {/* AI prompt / regenerate */}
       <section className="space-y-1.5">

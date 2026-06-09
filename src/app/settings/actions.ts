@@ -91,6 +91,26 @@ export async function saveAiSettings(formData: FormData): Promise<{
 }
 
 /**
+ * Toggle the workspace's IP risk screening on / off. Kept separate
+ * from saveAiSettings so the AI-providers form doesn't have to
+ * round-trip the IP risk checkbox every time someone saves keys.
+ *
+ * Returns void so it can be passed directly as a `<form action>`.
+ * The revalidatePath reflects the new state in the UI.
+ */
+export async function setIpRiskChecksEnabled(formData: FormData): Promise<void> {
+  const { workspace } = await getCurrentWorkspace();
+  await loadOrCreateSettings(workspace.id);
+  const enabled = formData.get("enabled") === "on";
+  await db.workspaceSettings.update({
+    where: { workspaceId: workspace.id },
+    data: { ipRiskChecksEnabled: enabled },
+  });
+  revalidatePath("/settings");
+  revalidatePath("/batches", "layout");
+}
+
+/**
  * Verify the configured provider responds. Uses the *currently saved*
  * settings — call saveAiSettings first if you want to test newly-typed
  * values.

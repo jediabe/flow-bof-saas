@@ -205,6 +205,26 @@ export default async function BatchDetail({
   const settingsRow = await loadOrCreateSettings(workspace.id);
   const masked = toMaskedSettings(settingsRow);
   const aiProvider = masked.provider;
+
+  // IP risk gating toggle. When disabled (the default after end-user
+  // feedback that the heuristic was too aggressive), we project
+  // every product's IP risk status down to "low" before passing it
+  // through to the client. That neutralises the gating logic in
+  // computeStage + GenerateImagesPanel without touching either; the
+  // raw ipRiskStatus on Product rows is preserved for the day the
+  // user flips it back on.
+  const ipRiskChecksEnabled = settingsRow.ipRiskChecksEnabled;
+  const projectIpStatus = (
+    raw: string,
+  ): "unchecked" | "low" | "medium" | "high" | "needs_manual_review" => {
+    if (!ipRiskChecksEnabled) return "low";
+    const valid: Array<
+      "unchecked" | "low" | "medium" | "high" | "needs_manual_review"
+    > = ["unchecked", "low", "medium", "high", "needs_manual_review"];
+    return (valid.includes(raw as (typeof valid)[number])
+      ? (raw as (typeof valid)[number])
+      : "unchecked");
+  };
   const aiProviderLabel =
     aiProvider === "openai"
       ? `OpenAI · ${masked.openai.model || DEFAULT_MODELS.openai}`
@@ -243,7 +263,7 @@ export default async function BatchDetail({
       hookVariantsCount: hookVariantsArr.length,
       reviewStatus: p.reviewStatus as PipelineProduct["reviewStatus"],
       postingStatus: p.postingStatus as PipelineProduct["postingStatus"],
-      ipRiskStatus: p.ipRiskStatus as PipelineProduct["ipRiskStatus"],
+      ipRiskStatus: projectIpStatus(p.ipRiskStatus) as PipelineProduct["ipRiskStatus"],
       ipRiskOverride: p.ipRiskOverride,
       referenceImagesCount: p.images.length,
       hasBoundFlowItem: boundProductIds.has(p.id),
@@ -289,7 +309,7 @@ export default async function BatchDetail({
           url: i.url,
           source: i.source,
         })),
-      ipRiskStatus: p.ipRiskStatus as ExpandedCardProduct["ipRiskStatus"],
+      ipRiskStatus: projectIpStatus(p.ipRiskStatus) as ExpandedCardProduct["ipRiskStatus"],
       ipRiskReasons:
         (parseJson(p.ipRiskReasons) as string[] | null) ?? [],
       ipRiskCheckedAt:        p.ipRiskCheckedAt?.toISOString() ?? null,
@@ -428,22 +448,6 @@ export default async function BatchDetail({
 
       {latestJob && <LatestTaskResult job={latestJob} />}
 
-      {/* AI generation panel — stays above the pipeline because
-          generation is the main cross-product action; users hit
-          it often and shouldn't have to drill into individual
-          cards to regenerate a batch. */}
-      <AiPromptsPanel
-        batchId={batch.id}
-        provider={aiProvider}
-        providerLabel={aiProviderLabel}
-        providerHasKey={aiProviderHasKey}
-        products={batch.products.map((p) => ({
-          id: p.id,
-          productName: p.productName,
-          hasPrompt: !!p.imagePrompt,
-        }))}
-      />
-
       {/* Pipeline + drawer (client-rendered) */}
       <BatchPageClient
         batchId={batch.id}
@@ -451,6 +455,7 @@ export default async function BatchDetail({
         productsCompact={productsCompact}
         productsExpandedById={productsExpandedById}
         laneActions={laneActions}
+        ipRiskChecksEnabled={ipRiskChecksEnabled}
         drawer={{
           mobilePanel,
           flowPanel,
@@ -484,6 +489,22 @@ export default async function BatchDetail({
                 : undefined,
           },
         }}
+      />
+
+      {/* AI Prompt Generation — moved below the pipeline so the
+          batch page reads as: review pipeline first, then run AI
+          prompt gen for the approved set, then dispatch image gen.
+          Workflow flows top-to-bottom. */}
+      <AiPromptsPanel
+        batchId={batch.id}
+        provider={aiProvider}
+        providerLabel={aiProviderLabel}
+        providerHasKey={aiProviderHasKey}
+        products={batch.products.map((p) => ({
+          id: p.id,
+          productName: p.productName,
+          hasPrompt: !!p.imagePrompt,
+        }))}
       />
 
       {/* Generate Images workbench — full-batch dispatch surface.
@@ -524,9 +545,7 @@ export default async function BatchDetail({
                 url: i.url,
                 pathLocal: i.pathLocal,
               })),
-            ipRiskStatus: p.ipRiskStatus as
-              | "unchecked" | "low" | "medium"
-              | "high" | "needs_manual_review",
+            ipRiskStatus: projectIpStatus(p.ipRiskStatus),
             ipRiskOverride: p.ipRiskOverride,
           }))}
           agentAssetBaseUrl={agentAssetBaseUrl}

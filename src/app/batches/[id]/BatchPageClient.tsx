@@ -49,6 +49,9 @@ export interface BatchPageClientProps {
     badges?: Partial<Record<DrawerPanel, { text: string; tone?: DrawerTabConfig["badgeTone"] }>>;
   };
   laneActions?: LaneActionConfig;
+  /** Workspace-level IP risk toggle. Forwarded to ExpandedPipelineCard
+   *  so the IP risk surface stays hidden when the user has opted out. */
+  ipRiskChecksEnabled?: boolean;
 }
 
 export default function BatchPageClient({
@@ -58,6 +61,7 @@ export default function BatchPageClient({
   productsExpandedById,
   drawer,
   laneActions,
+  ipRiskChecksEnabled = false,
 }: BatchPageClientProps) {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [drawerPanel, setDrawerPanel] = useState<DrawerPanel>("mobile");
@@ -172,6 +176,7 @@ export default function BatchPageClient({
               batchId={batchId}
               stage={p.stage}
               onClose={onClose}
+              ipRiskChecksEnabled={ipRiskChecksEnabled}
             />
           );
         }}

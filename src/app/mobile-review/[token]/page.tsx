@@ -40,6 +40,7 @@ export default async function MobileReviewPage({
       id: true,
       name: true,
       market: true,
+      workspaceId: true,
       products: {
         where: { deletedAt: null },
         select: {
@@ -75,6 +76,16 @@ export default async function MobileReviewPage({
     notFound();
   }
 
+  // Honour the workspace's IP-risk-checks toggle. When disabled,
+  // project every product's ipRiskStatus down to "low" so the
+  // mobile reviewer doesn't see warning chips for a feature the
+  // owner has opted out of.
+  const wsSettings = await db.workspaceSettings.findUnique({
+    where: { workspaceId: batch.workspaceId },
+    select: { ipRiskChecksEnabled: true },
+  });
+  const ipRiskChecksEnabled = wsSettings?.ipRiskChecksEnabled ?? false;
+
   // Decode Phase 9 IP risk reasons (JSON-encoded string[] in SQLite)
   // so the client component sees a clean array. Defensive parse
   // handles malformed JSON without breaking the page.
@@ -98,8 +109,10 @@ export default async function MobileReviewPage({
       imageUrl:          p.imageUrl,
       category:          p.category,
       reviewStatus:      p.reviewStatus as MobileProduct["reviewStatus"],
-      ipRiskStatus:      p.ipRiskStatus as MobileProduct["ipRiskStatus"],
-      ipRiskReasons:     reasons,
+      ipRiskStatus:      (ipRiskChecksEnabled
+        ? p.ipRiskStatus
+        : "low") as MobileProduct["ipRiskStatus"],
+      ipRiskReasons:     ipRiskChecksEnabled ? reasons : [],
       ipRiskOverride:    p.ipRiskOverride,
     };
   });
