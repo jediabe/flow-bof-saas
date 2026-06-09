@@ -31,7 +31,8 @@ PARAGRAPH 1 — Reference handling guardrail (verbatim):
     edge profiles, packaging copy and graphics, and the product's
     proportions. Do not copy the reference image layout, background,
     text overlays, label callouts, promotional graphics, multiple
-    variant swatches, collage arrangement, or catalog composition.
+    variant swatches, collage arrangement, catalog composition, or
+    the garment's pose if it was photographed flat-laid or folded.
 
 PARAGRAPH 2 — Product extraction (tune wording to the product type
 using the SPECIAL PRODUCT HANDLING rules below):
@@ -45,14 +46,14 @@ using the SPECIAL PRODUCT HANDLING rules below):
 PARAGRAPH 3 — APEX-style retailer placement sentence. EXACTLY one
 sentence, in this shape:
 
-    Put a display setup for this product inside of a [UK_RETAILER] store, no price tags.
+    Put a single hero display of this product inside of a [UK_RETAILER] store, no price tags, no shelf talkers, no promotional stickers.
 
 Pick exactly one [UK_RETAILER] from the table below. If the user
 supplied a "Store hint" in the request, USE THAT RETAILER VERBATIM
 and do not second-guess it. If absolutely nothing fits, use the
 master fallback:
 
-    Put a display setup for this product inside of a UK retail store, no price tags.
+    Put a single hero display of this product inside of a UK retail store, no price tags, no shelf talkers, no promotional stickers.
 
 PARAGRAPH 4 — Realism constraints (verbatim, may be lightly tuned
 for the product type — e.g. swap "shelf/table placement" for "rack
@@ -65,10 +66,14 @@ placement" on clothing):
     image's product identity precisely — anything visible on the
     reference should be visible here. Make it look physically
     present in the store with realistic scale, contact shadows,
-    shelf/table placement, and ordinary nearby store items. Casual
-    handheld shopper photo, realistic UK retail environment. No
-    text overlays, no promotional graphics, no catalog layout, no
-    studio render.
+    and clean placement. The product is the clear hero focus with
+    open negative space around it — no competing products in sharp
+    focus, no cluttered shelf neighbours, no stacked extras. Any
+    other store items exist only as soft, out-of-focus
+    background. Casual handheld shopper photo, realistic UK retail
+    environment. No price tags, no shelf talkers, no promotional
+    stickers, no discount signage, no text overlays, no
+    promotional graphics, no catalog layout, no studio render.
 
 ============================================================
 UK RETAILER MAPPING — pick exactly one
@@ -124,10 +129,22 @@ SPECIAL PRODUCT HANDLING
 Reflect these in PARAGRAPH 2 (product extraction):
 
 - Shoes / sandals / trainers / boots: show ONE matching pair only,
-  not multiple colorways. Use Schuh.
-- Clothing: paragraph 2 should mention a single mannequin, hanger,
-  folded display, or rack — pick whichever looks natural for the
-  garment. Use Primark.
+  not multiple colorways, on a single shoe-shelf plinth or
+  display stand. Use Schuh.
+- Clothing — tops / shirts / blouses / jumpers / hoodies /
+  dresses / jumpsuits / skirts / trousers / jeans / leggings /
+  joggers / shorts / activewear / sportswear: paragraph 2 MUST
+  place the garment on a single mannequin display, fully worn
+  as if a person were wearing it. Even when the reference image
+  shows the garment laid flat, folded, or photographed against
+  a plain background, IGNORE that pose and re-display the
+  garment on a mannequin. NEVER folded on a shelf or a table.
+  NEVER stacked. Use Primark.
+- Clothing — coats / jackets / outerwear: a single garment on a
+  hanger on a clothing rack is acceptable in addition to a
+  mannequin. NEVER folded. Use Primark.
+- Clothing — underwear / socks / swimwear: a clean retail shelf
+  display or hanger is acceptable. Use Primark.
 - Kits / accessories / multi-piece sets: show the complete set only
   if that is how it's sold. Otherwise show the single hero piece.
 - Collage / catalog references: explicitly say "choose the dominant

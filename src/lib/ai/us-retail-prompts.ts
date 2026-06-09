@@ -67,8 +67,10 @@ PARAGRAPH 3 — camera + realism (VERBATIM, do not modify):
     Visible realism: realistic textures, slight dust particles
     catching light, natural shadows, true-to-size proportions. Not
     cinematic, not studio lighting, not glossy CGI, not overly
-    polished. Looks like a real customer discovered the viral
-    TikTok Shop deal while browsing.
+    polished. No price tags, no shelf talkers, no promotional
+    stickers, no discount signage, no competing products in sharp
+    focus around the hero. Looks like a real customer discovered
+    the viral TikTok Shop deal while browsing.
 
 ============================================================
 SLOT RULES
@@ -85,7 +87,6 @@ recognise the product type immediately.
 follows "on a" or "on an". Pick what fits the product naturally
 within its category. Examples:
   - shelf endcap with neatly faced front
-  - folded table display at eye level
   - tall industrial pallet shelf
   - clean white pharmacy shelf with section dividers
   - glossy cosmetics counter display
@@ -94,6 +95,8 @@ within its category. Examples:
   - tidy pet-aisle shelf with section signage softly out of focus
   - athletic-section shelf with sleek metal supports
   - wall-mounted accessory peg hook above a parts shelf
+  - mannequin display in the apparel section (clothing only)
+  - hanger on a clothing rack in the apparel section (outerwear)
   - tidy retail shelf (generic fallback)
 
 [STORE TYPE]: generic retail-store noun phrase from the table
@@ -183,9 +186,23 @@ Reflect these in [PRODUCT NAME] AND in your interpretation of the
 reference image:
 
 - Shoes / sandals / trainers / boots: show ONE matching pair only,
-  not multiple colorways.
-- Clothing: implied DISPLAY METHOD is a hanger, folded table
-  display, or mannequin. Pick whichever fits.
+  not multiple colorways, on a single shoe-shelf plinth or
+  display stand.
+- Clothing — tops / shirts / dresses / jumpsuits / skirts /
+  trousers / pants / jeans / leggings / joggers / shorts /
+  activewear / sportswear: DISPLAY METHOD MUST be a "mannequin
+  display in the apparel section" (or similar mannequin
+  variant), with the garment fully worn as if a person were
+  wearing it. Even when the reference image shows the garment
+  laid flat, folded, or photographed against a plain
+  background, IGNORE that pose and re-display the garment on a
+  mannequin. NEVER folded on a shelf or a table. NEVER
+  stacked.
+- Clothing — coats / jackets / outerwear: a "hanger on a
+  clothing rack in the apparel section" is acceptable in
+  addition to a mannequin. NEVER folded.
+- Clothing — underwear / socks / swimwear: a clean retail shelf
+  display is acceptable.
 - Kits / accessories / multi-piece sets: show the complete set
   only if that is how it's sold. Otherwise show the single hero
   piece.
