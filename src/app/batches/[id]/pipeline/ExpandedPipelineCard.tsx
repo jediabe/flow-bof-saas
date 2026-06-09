@@ -252,8 +252,8 @@ export default function ExpandedPipelineCard({
     >
       {/* Header row — collapse button on the right */}
       <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="text-base font-medium text-text leading-tight">
+        <div className="min-w-0 flex-1">
+          <div className="text-base font-medium text-text leading-tight break-words [overflow-wrap:anywhere]">
             {product.productName}
           </div>
           <div className="text-[11px] text-muted mt-0.5 truncate">

@@ -208,28 +208,38 @@
 
   /* Card wrapper — needs to be its own div so the expanded
      panel can slot in below the card without breaking the row
-     wrap behaviour of .plane-cards. */
+     wrap behaviour of .plane-cards.
+
+     Width is owned by the wrap (not the card), so the inner
+     pcard can always be width:100% and never escape its slot.
+     Explicit max-width belt-and-suspenders prevents long
+     unbroken titles from blowing out the lane on browsers that
+     interpret flex-basis loosely. */
   .pcard-wrap {
     @apply flex flex-col;
-    flex: 0 0 auto;
+    flex: 0 0 14rem;
+    max-width: 14rem;
+    min-width: 0;
   }
   .pcard-wrap:has(.pcard--expanded) {
     /* Expanded card takes a wider lane slot so the inline
        expansion has room to breathe. */
-    flex-basis: min(34rem, 100%);
+    flex: 0 0 min(34rem, 100%);
+    max-width: min(34rem, 100%);
   }
 
   /* Card */
   .pcard {
     @apply bg-panel2 border border-border rounded-xl overflow-hidden
            cursor-grab transition-all relative;
-    width: 14rem;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
   }
   .pcard:hover { @apply border-border-strong; }
   .pcard:active { cursor: grabbing; transform: scale(0.99); }
   .pcard--expanded {
     @apply border-accent cursor-default;
-    width: 100%;
     box-shadow:
       0 0 0 1px rgba(56,189,248,0.30),
       0 0 24px -8px rgba(56,189,248,0.45);
@@ -238,6 +248,7 @@
 
   .pcard-head {
     @apply flex gap-2.5 px-3 pt-3 pb-2 items-start;
+    min-width: 0;
   }
   .pcard-thumb {
     @apply w-11 h-11 shrink-0 rounded-md overflow-hidden
@@ -249,9 +260,24 @@
     @apply w-full h-full object-cover;
   }
   .pcard-thumb-placeholder { @apply text-muted2; }
-  .pcard-body { @apply flex-1 min-w-0; }
+  .pcard-body {
+    @apply flex-1;
+    min-width: 0;
+    max-width: 100%;
+  }
+  /* Two-line clamp for the compact card name. Truncate alone
+     caused unbroken super-long titles ("ProductName NEW IMPROVED
+     FORMULA...") to clip mid-character without an ellipsis on
+     some viewports; clamp guarantees a clean 2-line cap with
+     overflow ellipsis regardless of card width. */
   .pcard-name {
-    @apply text-[13px] font-medium leading-tight truncate;
+    @apply text-[13px] font-medium leading-tight;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+    word-break: break-word;
   }
   .pcard-sub {
     @apply text-[11px] text-muted mt-0.5 truncate;
