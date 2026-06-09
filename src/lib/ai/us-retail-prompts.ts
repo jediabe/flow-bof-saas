@@ -39,21 +39,64 @@ The image prompt is EXACTLY THREE paragraphs, in this order. Do
 not add extra paragraphs. Do not add a reference-handling
 preamble. Output the paragraphs separated by a single blank line.
 
-PARAGRAPH 1 — placement + reference fidelity + hero focus.
-EXACTLY this sentence structure, filling the four slots:
+PARAGRAPH 1 — placement + concrete product description + hero
+focus. THIS IS THE MOST IMPORTANT PARAGRAPH and is where the
+previous prompt was weakest — it must contain an actual
+description of THIS product, not a generic "reproduce every
+visible feature" instruction.
+
+Structure: ONE opening sentence using the slot template, then
+2-4 sentences of CONCRETE product description, then ONE closing
+sentence for hero focus + restrictions:
 
     Editorial retail product shot of the [PRODUCT NAME] displayed
-    exactly as shown in the reference image on a [DISPLAY METHOD]
-    inside a modern [STORE TYPE]. Study the reference image
-    carefully and reproduce every visible detail of the product
-    with high fidelity: exact colors and color blocking, materials,
-    textures, surface finishes, branding marks and their precise
-    placement, visible buttons, ports, hardware, stitching, edge
-    profiles, packaging copy and graphics, and the product's
-    proportions. Anything visible on the reference should be
-    visible here. The product is the clear hero focus with open
+    on a [DISPLAY METHOD] inside a modern [STORE TYPE]. <Then
+    write 2-4 sentences naming THIS specific product's actual
+    visible details: product type and silhouette, primary colors
+    and color blocking with shade names, distinctive branding
+    marks and their placement, visible hardware/components, and
+    materials/finish — see examples below.> The product is the
+    clear hero focus with open negative space surrounding it,
+    nothing else nearby. No store logos, no brand signage, no
+    price tags visible anywhere.
+
+DO NOT write generic placeholders like "reproduce every visible
+feature" or "study the reference carefully." Those are
+instructions to YOU; do not echo them into the output. Write the
+actual description in your own words.
+
+If you cannot see the reference image (text-only mode), infer
+from the product name + category but stay specific ("a high-
+waisted wide-leg jogger in heather charcoal French terry with
+matte-black drawstring cords and side pockets" — NOT "a pair of
+joggers").
+
+Example paragraph 1 for clothing:
+    "Editorial retail product shot of the Halara wide-leg
+    joggers displayed on a mannequin display in the apparel
+    section inside a modern American lifestyle retail store. A
+    high-waisted, wide-leg pair of joggers in heather charcoal
+    French terry, worn fully extended on the mannequin. Matte
+    black drawstring cords with metal aglets at the waistband,
+    side seam pockets, and a small woven Halara tag on the left
+    hip. Brushed French-terry texture with a slight nap, no
+    sheen. The product is the clear hero focus with open
     negative space surrounding it, nothing else nearby. No store
-    logos, no brand signage, no price tags visible anywhere.
+    logos, no brand signage, no price tags visible anywhere."
+
+Example paragraph 1 for a kitchen appliance:
+    "Editorial retail product shot of the Russell Hobbs electric
+    kettle displayed on a clean white shelf endcap inside a
+    modern American big-box retail store. A 1.7L brushed
+    stainless-steel electric kettle with a matte-black plastic
+    handle and base, a cobalt-blue LED ring around the base, and
+    the 'Russell Hobbs' wordmark debossed near the spout. A
+    single rocker switch on the handle and a removable
+    limescale filter visible at the spout opening. Brushed-steel
+    body with high-gloss black plastic accents. The product is
+    the clear hero focus with open negative space surrounding
+    it, nothing else nearby. No store logos, no brand signage,
+    no price tags visible anywhere."
 
 PARAGRAPH 2 — lighting + atmosphere. EXACTLY this structure:
 

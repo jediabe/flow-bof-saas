@@ -21,27 +21,51 @@ The image prompt is EXACTLY FOUR paragraphs, in this order. Do not
 add extra paragraphs. Do not add headings or labels. Output the
 paragraphs separated by a single blank line.
 
-PARAGRAPH 1 — Reference handling guardrail (verbatim):
+PARAGRAPH 1 — Reference-handling guardrail. ONE short sentence:
 
-    Use the uploaded reference image only to understand the product's
-    design. Study the reference carefully and reproduce every visible
-    product detail with high fidelity: exact colors and color
-    blocking, materials, textures, surface finishes, branding marks,
-    logo placement, visible buttons, ports, hardware, stitching,
-    edge profiles, packaging copy and graphics, and the product's
-    proportions. Do not copy the reference image layout, background,
-    text overlays, label callouts, promotional graphics, multiple
-    variant swatches, collage arrangement, catalog composition, or
-    the garment's pose if it was photographed flat-laid or folded.
+    Use the reference image to understand this product's design. Do not copy the reference's layout, background, text overlays, label callouts, promotional graphics, variant swatches, collage arrangement, catalog composition, or a flat-laid / folded garment pose.
 
-PARAGRAPH 2 — Product extraction (tune wording to the product type
-using the SPECIAL PRODUCT HANDLING rules below):
+PARAGRAPH 2 — Concrete product description. This is the
+MOST IMPORTANT paragraph and is where the previous prompt was
+weakest. You MUST describe THIS specific product in 2-4
+sentences, naming actual visible details:
 
-    Extract the primary product as one realistic physical product
-    display. Show one product, or one complete pair/set if that is
-    how the product is naturally sold. Reproduce every visible
-    feature, branding element, and finish exactly as shown in the
-    reference image.
+    - Product type and silhouette (e.g. "a 1.7L chrome electric
+      kettle with a curved spout", not "a kettle").
+    - Primary colors and color blocking (e.g. "polished stainless
+      steel body with a matte black handle and base", not "metal
+      with black accents").
+    - Distinctive branding (e.g. "'Russell Hobbs' wordmark
+      debossed near the base", not "branded").
+    - Visible hardware / components (e.g. "single rocker switch
+      on the handle, blue LED ring around the base, removable
+      limescale filter at the spout").
+    - Materials / finish (e.g. "brushed steel with high-gloss
+      black plastic; subtle ribbed texture on the grip").
+    - End with the display method appropriate to the product
+      category (mannequin, shoe plinth, peg hook, shelf
+      placement, etc.) — see SPECIAL PRODUCT HANDLING below.
+
+DO NOT write generic placeholders like "reproduce every visible
+feature" or "show all branding faithfully." Those are
+instructions to YOU, not output. Write the actual description.
+If you cannot see the reference image (text-only mode), infer
+from the product name + category but stay specific ("a high-
+waisted wide-leg jogger in heather grey French terry with
+drawstring waist and side pockets" — not "a pair of joggers").
+
+Example for a clothing item:
+    "A high-waisted, wide-leg pair of joggers in heather charcoal
+    French terry with matte black drawstring cords, a small
+    Halara tag at the waistband, and side seam pockets — worn on
+    a mannequin in the apparel section, full length visible."
+
+Example for a kitchen appliance:
+    "A 1.7L brushed-stainless electric kettle with a matte
+    black handle and base, a cobalt-blue LED ring around the
+    base when on, the 'Russell Hobbs' wordmark debossed near
+    the spout, and a removable filter visible at the spout
+    opening — placed on a clean retail shelf at eye level."
 
 PARAGRAPH 3 — APEX-style retailer placement sentence. EXACTLY one
 sentence, in this shape:
@@ -55,25 +79,17 @@ master fallback:
 
     Put a single hero display of this product inside of a UK retail store, no price tags, no shelf talkers, no promotional stickers.
 
-PARAGRAPH 4 — Realism constraints (verbatim, may be lightly tuned
-for the product type — e.g. swap "shelf/table placement" for "rack
-placement" on clothing):
+PARAGRAPH 4 — Realism constraints. KEEP THIS SHORT — the product
+fidelity is already covered by paragraph 2. This paragraph is
+ENVIRONMENT-only:
 
-    Preserve every detail of the product with high fidelity: exact
-    shape, colors and color blocking, material, texture, finish,
-    proportions, branding marks, logo placement, packaging copy and
-    graphics, and every visible feature. Match the reference
-    image's product identity precisely — anything visible on the
-    reference should be visible here. Make it look physically
-    present in the store with realistic scale, contact shadows,
-    and clean placement. The product is the clear hero focus with
-    open negative space around it — no competing products in sharp
-    focus, no cluttered shelf neighbours, no stacked extras. Any
-    other store items exist only as soft, out-of-focus
-    background. Casual handheld shopper photo, realistic UK retail
-    environment. No price tags, no shelf talkers, no promotional
-    stickers, no discount signage, no text overlays, no
-    promotional graphics, no catalog layout, no studio render.
+    Casual handheld shopper photo in a realistic UK retail
+    environment. The product is the clear hero focus with open
+    negative space around it; other store items only as soft,
+    out-of-focus background. Realistic scale and contact shadows.
+    No price tags, no shelf talkers, no promotional stickers, no
+    discount signage, no text overlays, no catalog layout, no
+    studio render.
 
 ============================================================
 UK RETAILER MAPPING — pick exactly one
@@ -126,7 +142,8 @@ UK RETAILER MAPPING — pick exactly one
 ============================================================
 SPECIAL PRODUCT HANDLING
 ============================================================
-Reflect these in PARAGRAPH 2 (product extraction):
+Reflect these in PARAGRAPH 2 (product description) — they
+determine the display method you end the paragraph with:
 
 - Shoes / sandals / trainers / boots: show ONE matching pair only,
   not multiple colorways, on a single shoe-shelf plinth or
