@@ -1,6 +1,8 @@
 "use client";
 
 import { useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
+import BatchPageRefresher from "./BatchPageRefresher";
 import BatchPipeline, {
   type PipelineProduct,
   type LaneActionConfig,
@@ -63,6 +65,7 @@ export default function BatchPageClient({
   laneActions,
   ipRiskChecksEnabled = false,
 }: BatchPageClientProps) {
+  const router = useRouter();
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [drawerPanel, setDrawerPanel] = useState<DrawerPanel>("mobile");
   const [, startTransition] = useTransition();
@@ -112,6 +115,12 @@ export default function BatchPageClient({
       // Always surface the message — server returns clarifying
       // text for valid moves too ("approved but missing prompt").
       setMoveToast(r.message);
+      // Explicit router.refresh() so the new stage shows
+      // immediately. revalidatePath() in the server action only
+      // invalidates Next's cache; the already-rendered React tree
+      // doesn't re-fetch on its own when the action is awaited
+      // programmatically (vs. via a <form action={fn}> binding).
+      router.refresh();
       // Auto-clear after 4s.
       setTimeout(() => setMoveToast(null), 4000);
     });
@@ -120,6 +129,7 @@ export default function BatchPageClient({
   if (productsCompact.length === 0) {
     return (
       <>
+        <BatchPageRefresher />
         <div className="flex justify-end mb-2">
           <PanelLauncher badges={drawer.badges} onOpen={openPanel} />
         </div>
@@ -143,6 +153,7 @@ export default function BatchPageClient({
 
   return (
     <>
+      <BatchPageRefresher />
       <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
         <div className="text-xs text-muted">
           Drag any card between lanes to move it forward or back. Click a

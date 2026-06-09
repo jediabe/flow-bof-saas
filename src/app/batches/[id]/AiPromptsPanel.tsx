@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
 import StatusChip from "@/components/StatusChip";
 import {
   generateAiPromptForProduct,
@@ -57,6 +58,7 @@ export default function AiPromptsPanel({
    *  to the eligible set based on the mode selector. */
   products: AiPromptProductRow[];
 }) {
+  const router = useRouter();
   const [pendingManual, startManualTransition] = useTransition();
   const [mode, setMode] = useState<"missing" | "all">("missing");
   const [manualReport, setManualReport] = useState<BulkPromptReport | null>(null);
@@ -145,6 +147,10 @@ export default function AiPromptsPanel({
       ),
     );
     setAiRunning(false);
+    // Refresh the route so the pipeline cards reflect the new
+    // imagePrompt / hookVariants and migrate Needs Review → Ready
+    // without a manual reload.
+    router.refresh();
   }
 
   async function retryProduct(productId: string) {
@@ -171,6 +177,7 @@ export default function AiPromptsPanel({
         message: e.message || "unknown error",
       });
     }
+    router.refresh();
   }
 
   function runManual() {
@@ -184,6 +191,7 @@ export default function AiPromptsPanel({
       });
       setManualReport(r);
       if (!r.ok) setError(r.message);
+      router.refresh();
     });
   }
 

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
 import StatusChip from "@/components/StatusChip";
 import ProductImageStack, {
   type ProductImageRow,
@@ -89,6 +90,7 @@ export default function ExpandedPipelineCard({
    *  they've opted out of. Defaults to true for back-compat. */
   ipRiskChecksEnabled?: boolean;
 }) {
+  const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
   const [showDetails, setShowDetails] = useState(false);
@@ -177,6 +179,7 @@ export default function ExpandedPipelineCard({
         useVision: aiVision,
       });
       if (!r.ok) setError(r.message);
+      router.refresh();
     });
   }
 
@@ -193,6 +196,7 @@ export default function ExpandedPipelineCard({
     startTransition(async () => {
       await updateProduct(fd);
       setShowDetails(false);
+      router.refresh();
     });
   }
 
@@ -203,6 +207,7 @@ export default function ExpandedPipelineCard({
     fd.set("status", status);
     startTransition(async () => {
       await setProductReviewStatus(fd);
+      router.refresh();
     });
   }
 
@@ -220,6 +225,7 @@ export default function ExpandedPipelineCard({
     startTransition(async () => {
       await deleteProduct(fd);
       onClose();
+      router.refresh();
     });
   }
 
