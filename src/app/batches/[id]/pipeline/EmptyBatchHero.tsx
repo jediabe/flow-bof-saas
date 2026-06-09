@@ -11,7 +11,11 @@
  * longer rendered and the regular lane view takes over.
  */
 
-import Link from "next/link";
+// Plain <a> on purpose — these are in-page hash anchors. Using
+// next/link for a "#kalodata-importer" target made Next.js try to
+// prefetch the RSC at /batches/[id]/kalodata-importer (relative
+// path resolution against the current URL), 403ing in prod and
+// throwing "unexpected response" in the client router.
 
 export default function EmptyBatchHero({
   batchName,
@@ -35,15 +39,15 @@ export default function EmptyBatchHero({
         Each row becomes a card you can review, generate, and post.
       </p>
       <div className="empty-hero-actions">
-        <Link
+        <a
           href={`#${importTargetId}`}
           className="btn btn-primary"
         >
           Import Kalodata .xlsx
-        </Link>
-        <Link href={`#${addTargetId}`} className="btn">
+        </a>
+        <a href={`#${addTargetId}`} className="btn">
           Add a product manually
-        </Link>
+        </a>
       </div>
     </div>
   );

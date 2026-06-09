@@ -322,30 +322,35 @@ export default async function BatchDetail({
   // Stage-specific lane actions. Stage helper handles auto-
   // advance via state; these are the user-driven actions on a
   // lane header (e.g. "Generate all").
+  //
+  // Plain <a> on purpose — these open in a new tab and the URL is
+  // an absolute baseUrl, so next/link's prefetcher adds no value
+  // and triggered 404s in prod when the token was missing
+  // (postingToken / reviewToken null → href ended with "/").
   const laneActions: LaneActionConfig = {
-    needs_review: (
-      <Link
-        href={`${baseUrl.replace(/\/+$/, "")}/mobile-review/${batch.reviewToken ?? ""}`}
+    needs_review: batch.reviewToken ? (
+      <a
+        href={`${baseUrl.replace(/\/+$/, "")}/mobile-review/${batch.reviewToken}`}
         target="_blank"
         rel="noreferrer"
         className="btn btn-sm"
       >
         Review on phone ↗
-      </Link>
-    ),
+      </a>
+    ) : null,
     ready: null,
     generating: null,
     generated: null,
-    posted: (
-      <Link
-        href={`${baseUrl.replace(/\/+$/, "")}/mobile-posting/${batch.postingToken ?? ""}`}
+    posted: batch.postingToken ? (
+      <a
+        href={`${baseUrl.replace(/\/+$/, "")}/mobile-posting/${batch.postingToken}`}
         target="_blank"
         rel="noreferrer"
         className="btn btn-sm"
       >
         Posting QR ↗
-      </Link>
-    ),
+      </a>
+    ) : null,
   };
 
   // Drawer content: Mobile / Flow / Activity / Settings.
