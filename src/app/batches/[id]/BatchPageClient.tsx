@@ -19,6 +19,7 @@ import DrawerActivityPanel, {
 import DrawerSettingsPanel, {
   type DrawerSettingsInfo,
 } from "./pipeline/DrawerSettingsPanel";
+import PanelLauncher from "./pipeline/PanelLauncher";
 import { moveProductToStage } from "../actions";
 import { type Stage } from "@/lib/batch-stages";
 
@@ -59,8 +60,14 @@ export default function BatchPageClient({
   laneActions,
 }: BatchPageClientProps) {
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [drawerPanel, setDrawerPanel] = useState<DrawerPanel>("mobile");
   const [, startTransition] = useTransition();
   const [moveToast, setMoveToast] = useState<string | null>(null);
+
+  function openPanel(panel: DrawerPanel) {
+    setDrawerPanel(panel);
+    setDrawerOpen(true);
+  }
 
   const tabs: DrawerTabConfig[] = [
     {
@@ -110,19 +117,14 @@ export default function BatchPageClient({
     return (
       <>
         <div className="flex justify-end mb-2">
-          <button
-            type="button"
-            className="btn"
-            onClick={() => setDrawerOpen(true)}
-          >
-            ≡ Panels
-          </button>
+          <PanelLauncher badges={drawer.badges} onOpen={openPanel} />
         </div>
         <EmptyBatchHero batchName={batchName} />
         <BatchDrawer
           open={drawerOpen}
           onOpenChange={setDrawerOpen}
-          defaultPanel="settings"
+          activePanel={drawerPanel}
+          onPanelChange={setDrawerPanel}
           tabs={tabs}
           panels={{
             mobile:   drawer.mobilePanel,
@@ -137,18 +139,12 @@ export default function BatchPageClient({
 
   return (
     <>
-      <div className="flex items-center justify-between mb-3">
+      <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
         <div className="text-xs text-muted">
           Drag any card between lanes to move it forward or back. Click a
           card to expand.
         </div>
-        <button
-          type="button"
-          className="btn"
-          onClick={() => setDrawerOpen(true)}
-        >
-          ≡ Panels
-        </button>
+        <PanelLauncher badges={drawer.badges} onOpen={openPanel} />
       </div>
 
       {moveToast && (
@@ -184,7 +180,8 @@ export default function BatchPageClient({
       <BatchDrawer
         open={drawerOpen}
         onOpenChange={setDrawerOpen}
-        defaultPanel="mobile"
+        activePanel={drawerPanel}
+        onPanelChange={setDrawerPanel}
         tabs={tabs}
         panels={{
           mobile:   drawer.mobilePanel,

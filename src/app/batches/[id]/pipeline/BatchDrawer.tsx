@@ -38,18 +38,30 @@ export default function BatchDrawer({
   open,
   onOpenChange,
   defaultPanel = "mobile",
+  activePanel,
+  onPanelChange,
   tabs,
   panels,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   defaultPanel?: DrawerPanel;
+  /** Optional controlled-mode prop: when set, the active tab is
+   *  fully driven by the parent. Lets the PanelLauncher open the
+   *  drawer pre-selected to a specific tab. */
+  activePanel?: DrawerPanel;
+  onPanelChange?: (panel: DrawerPanel) => void;
   tabs: DrawerTabConfig[];
   /** Map of panel key → ReactNode. The drawer only renders
    *  one at a time (the selected tab). */
   panels: Partial<Record<DrawerPanel, ReactNode>>;
 }) {
-  const [active, setActive] = useState<DrawerPanel>(defaultPanel);
+  const [internalActive, setInternalActive] = useState<DrawerPanel>(defaultPanel);
+  const active = activePanel ?? internalActive;
+  const setActive = (p: DrawerPanel) => {
+    setInternalActive(p);
+    onPanelChange?.(p);
+  };
 
   // Sync the body class so the CSS overlay + transform fire.
   useEffect(() => {
