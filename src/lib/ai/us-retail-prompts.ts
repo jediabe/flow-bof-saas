@@ -39,64 +39,66 @@ The image prompt is EXACTLY THREE paragraphs, in this order. Do
 not add extra paragraphs. Do not add a reference-handling
 preamble. Output the paragraphs separated by a single blank line.
 
-PARAGRAPH 1 — placement + concrete product description + hero
-focus. THIS IS THE MOST IMPORTANT PARAGRAPH and is where the
-previous prompt was weakest — it must contain an actual
-description of THIS product, not a generic "reproduce every
-visible feature" instruction.
+PARAGRAPH 1 — placement + point at the reference + hero focus.
+The image model (Nano Banana Pro) can SEE the attached reference
+image and will use it for all visual details. Do NOT describe
+the product's colors, materials, branding, or hardware in
+detail — a long text description fights the reference and the
+model will rebuild from your text instead of matching the actual
+product. Keep this paragraph SHORT.
 
-Structure: ONE opening sentence using the slot template, then
-2-4 sentences of CONCRETE product description, then ONE closing
-sentence for hero focus + restrictions:
+Structure: opening template sentence → identify product type +
+point at reference → optional tricky-placement / packaging-text
+sentences → closing hero-focus sentence.
 
     Editorial retail product shot of the [PRODUCT NAME] displayed
-    on a [DISPLAY METHOD] inside a modern [STORE TYPE]. <Then
-    write 2-4 sentences naming THIS specific product's actual
-    visible details: product type and silhouette, primary colors
-    and color blocking with shade names, distinctive branding
-    marks and their placement, visible hardware/components, and
-    materials/finish — see examples below.> The product is the
-    clear hero focus with open negative space surrounding it,
-    nothing else nearby. No store logos, no brand signage, no
-    price tags visible anywhere.
+    on a [DISPLAY METHOD] inside a modern [STORE TYPE]. The
+    attached reference image is of [short product noun phrase].
+    Use the exact product shown in the reference image for all
+    visual details — colors, materials, branding, hardware,
+    finish, and proportions. <Optional: ONE sentence about
+    tricky placement the model is likely to get wrong, e.g.
+    "Note the carry handle is on the top lid, not on the side."
+    Skip if not applicable.> <Optional: ONE sentence preserving
+    visible packaging/product text, e.g. "Preserve any visible
+    lettering on the product or packaging exactly as shown —
+    brand wordmarks, model numbers, package copy. Do not invent,
+    paraphrase, or misspell text." Skip if the product has no
+    visible text.> The product is the clear hero focus with open
+    negative space surrounding it, nothing else nearby. No store
+    logos, no brand signage, no price tags visible anywhere.
 
-DO NOT write generic placeholders like "reproduce every visible
-feature" or "study the reference carefully." Those are
-instructions to YOU; do not echo them into the output. Write the
-actual description in your own words.
+DO NOT list shade names, fabric textures, hardware components,
+or proportions. The reference image carries those; your job is
+to point at it, flag tricky placement, and preserve packaging
+text.
 
-If you cannot see the reference image (text-only mode), infer
-from the product name + category but stay specific ("a high-
-waisted wide-leg jogger in heather charcoal French terry with
-matte-black drawstring cords and side pockets" — NOT "a pair of
-joggers").
+Example (cooler with brand lettering, non-obvious handle):
 
-Example paragraph 1 for clothing:
+    "Editorial retail product shot of the X7 portable cooler
+    displayed on a tidy retail shelf inside a modern American
+    sporting goods retail store. The attached reference image
+    is of a 4L portable cooler. Use the exact product shown in
+    the reference image for all visual details — colors,
+    materials, branding, hardware, finish, and proportions.
+    Note the carry handle is mounted on the top lid, not on
+    the side. Preserve any visible lettering on the product or
+    packaging exactly as shown. The product is the clear hero
+    focus with open negative space surrounding it, nothing
+    else nearby. No store logos, no brand signage, no price
+    tags visible anywhere."
+
+Example (clothing, no visible text, no tricky placement):
+
     "Editorial retail product shot of the Halara wide-leg
     joggers displayed on a mannequin display in the apparel
-    section inside a modern American lifestyle retail store. A
-    high-waisted, wide-leg pair of joggers in heather charcoal
-    French terry, worn fully extended on the mannequin. Matte
-    black drawstring cords with metal aglets at the waistband,
-    side seam pockets, and a small woven Halara tag on the left
-    hip. Brushed French-terry texture with a slight nap, no
-    sheen. The product is the clear hero focus with open
-    negative space surrounding it, nothing else nearby. No store
-    logos, no brand signage, no price tags visible anywhere."
-
-Example paragraph 1 for a kitchen appliance:
-    "Editorial retail product shot of the Russell Hobbs electric
-    kettle displayed on a clean white shelf endcap inside a
-    modern American big-box retail store. A 1.7L brushed
-    stainless-steel electric kettle with a matte-black plastic
-    handle and base, a cobalt-blue LED ring around the base, and
-    the 'Russell Hobbs' wordmark debossed near the spout. A
-    single rocker switch on the handle and a removable
-    limescale filter visible at the spout opening. Brushed-steel
-    body with high-gloss black plastic accents. The product is
-    the clear hero focus with open negative space surrounding
-    it, nothing else nearby. No store logos, no brand signage,
-    no price tags visible anywhere."
+    section inside a modern American lifestyle retail store.
+    The attached reference image is of a pair of wide-leg
+    joggers. Use the exact product shown in the reference
+    image for all visual details. The product is the clear
+    hero focus with open negative space surrounding it,
+    nothing else nearby. No store logos, no brand signage, no
+    price tags visible anywhere."
 
 PARAGRAPH 2 — lighting + atmosphere. EXACTLY this structure:
 

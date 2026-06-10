@@ -25,47 +25,64 @@ PARAGRAPH 1 — Reference-handling guardrail. ONE short sentence:
 
     Use the reference image to understand this product's design. Do not copy the reference's layout, background, text overlays, label callouts, promotional graphics, variant swatches, collage arrangement, catalog composition, or a flat-laid / folded garment pose.
 
-PARAGRAPH 2 — Concrete product description. This is the
-MOST IMPORTANT paragraph and is where the previous prompt was
-weakest. You MUST describe THIS specific product in 2-4
-sentences, naming actual visible details:
+PARAGRAPH 2 — Point at the reference; do NOT redescribe the
+product. The image model (Nano Banana Pro) can SEE the attached
+reference image and will use it for all visual details. A long
+text description of colors / materials / branding fights the
+reference — the model will rebuild from your text instead of
+matching the actual product. Keep this paragraph SHORT.
 
-    - Product type and silhouette (e.g. "a 1.7L chrome electric
-      kettle with a curved spout", not "a kettle").
-    - Primary colors and color blocking (e.g. "polished stainless
-      steel body with a matte black handle and base", not "metal
-      with black accents").
-    - Distinctive branding (e.g. "'Russell Hobbs' wordmark
-      debossed near the base", not "branded").
-    - Visible hardware / components (e.g. "single rocker switch
-      on the handle, blue LED ring around the base, removable
-      limescale filter at the spout").
-    - Materials / finish (e.g. "brushed steel with high-gloss
-      black plastic; subtle ribbed texture on the grip").
-    - End with the display method appropriate to the product
-      category (mannequin, shoe plinth, peg hook, shelf
-      placement, etc.) — see SPECIAL PRODUCT HANDLING below.
+Structure:
 
-DO NOT write generic placeholders like "reproduce every visible
-feature" or "show all branding faithfully." Those are
-instructions to YOU, not output. Write the actual description.
-If you cannot see the reference image (text-only mode), infer
-from the product name + category but stay specific ("a high-
-waisted wide-leg jogger in heather grey French terry with
-drawstring waist and side pockets" — not "a pair of joggers").
+  Sentence 1 (required): identify the product type with
+  "The attached reference image is of [short noun phrase]" —
+  e.g. "a 1.7L electric kettle", "a pair of wide-leg joggers",
+  "a 4L portable cooler". Do NOT add colors, materials, or
+  detailed feature lists here — just the product type.
 
-Example for a clothing item:
-    "A high-waisted, wide-leg pair of joggers in heather charcoal
-    French terry with matte black drawstring cords, a small
-    Halara tag at the waistband, and side seam pockets — worn on
-    a mannequin in the apparel section, full length visible."
+  Sentence 2 (required): "Use the exact product shown in the
+  reference image for all visual details — colors, materials,
+  branding, hardware, finish, and proportions."
 
-Example for a kitchen appliance:
-    "A 1.7L brushed-stainless electric kettle with a matte
-    black handle and base, a cobalt-blue LED ring around the
-    base when on, the 'Russell Hobbs' wordmark debossed near
-    the spout, and a removable filter visible at the spout
-    opening — placed on a clean retail shelf at eye level."
+  Sentence 3 (only when needed): ONE sentence highlighting
+  tricky placement the model is likely to get wrong without
+  guidance — e.g. "Note the carry handle is on the top lid,
+  not on the side." or "The lid opens from the front, not
+  from above." Skip this sentence if the product has no
+  unusual placement.
+
+  Sentence 4 (only when there's visible text on the product
+  or packaging): "Preserve any visible lettering on the
+  product or packaging exactly as shown — brand wordmarks,
+  model numbers, package copy. Do not invent, paraphrase, or
+  misspell text." Skip if the product has no visible text
+  (most clothing, most fragrance, most plain accessories).
+
+End with the display method appropriate to the product
+category (mannequin, shoe plinth, peg hook, shelf placement,
+etc.) — see SPECIAL PRODUCT HANDLING below.
+
+DO NOT write a long product description. DO NOT list shade
+names, materials, hardware components, or proportions. The
+reference image carries those — your job is to point at it,
+flag tricky placement, and preserve packaging text.
+
+Example (cooler with brand lettering and a non-obvious handle):
+
+    "The attached reference image is of a 4L portable cooler.
+    Use the exact product shown in the reference image for
+    all visual details — colors, materials, branding,
+    hardware, finish, and proportions. Note the carry handle
+    is mounted on the top lid, not on the side. Preserve any
+    visible lettering on the product or packaging exactly as
+    shown. Placed on a tidy retail shelf at eye level."
+
+Example (clothing, no visible text, no tricky placement):
+
+    "The attached reference image is of a pair of wide-leg
+    joggers. Use the exact product shown in the reference
+    image for all visual details. Worn on a mannequin in the
+    apparel section, full length visible."
 
 PARAGRAPH 3 — APEX-style retailer placement sentence. EXACTLY one
 sentence, in this shape:

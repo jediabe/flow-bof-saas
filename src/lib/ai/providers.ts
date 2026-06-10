@@ -365,30 +365,34 @@ const VISION_PROMPT_ADDENDUM = `
 ============================================================
 VISION ANALYSIS — REFERENCE IMAGE ATTACHED
 ============================================================
-You can see the product's reference image attached to this
-message. Look at it carefully and incorporate what you actually
-see into the image_prompt's product-detail descriptions.
+You can see the product's reference image. The image model
+(Nano Banana Pro) also sees this reference and uses it as the
+authoritative source for the product's visual details. Your
+job is NOT to translate the reference into a text description
+— that fights the reference and the image model will rebuild
+from your text instead of matching the actual product.
 
-In particular, when writing the image_prompt:
-  - Reference the exact colors and color blocking you see (not
-    just "blue" — specify the shade if distinctive, e.g.
-    "heather charcoal", "matte navy").
-  - Reference visible materials and textures (brushed jersey,
-    knit, polished metal, matte plastic, glossy ceramic).
-  - Reference branding marks you see and their precise placement
-    (logo on chest left, embossed mark on cap, screen-printed
-    text on side).
-  - Reference distinctive hardware (drawstring with metal-tipped
-    cords, magnetic clasp, ribbed grip).
-  - Reference visible packaging copy or graphics, if any.
+Use vision to do exactly three things:
 
-The goal: instructions specific enough that Flow's image model
-can reproduce the EXACT product in front of you, not a generic
-example of the product category.
+  1. Identify the product TYPE correctly (e.g. "a 4L portable
+     cooler" not "a cooler"; "a pair of wide-leg joggers" not
+     "joggers"). This anchors the right silhouette.
 
-You still produce the SAME JSON output schema; vision just makes
-the image_prompt's detail descriptions concrete instead of
-generic.`;
+  2. Spot anything TRICKY the image model would likely get
+     wrong without explicit guidance — unusual handle/hinge
+     placement, asymmetric lid, non-obvious orientation, a
+     part the reference shows that the image-gen prior would
+     omit. Call this out in ONE sentence in the image_prompt.
+
+  3. Spot any VISIBLE LETTERING on the product or packaging
+     (brand wordmarks, model numbers, package copy). When
+     present, include the "Preserve any visible lettering..."
+     sentence. Lettering is the detail Nano Banana Pro is
+     most likely to invent or misspell, so this matters.
+
+DO NOT write a long description of colors, shades, materials,
+textures, hardware, or proportions. The reference image
+carries those.`;
 
 export async function openaiGenerateVision(
   input: ProductPromptInput,
