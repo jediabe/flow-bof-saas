@@ -39,21 +39,30 @@ import { extractJson, normaliseAiOutput } from "./prompt-generator";
 /**
  * Pick the system prompt + user-prompt formatter for the market on
  * the input. Defaults to UK when unset for back-compat.
+ *
+ * Honours per-workspace overrides on AiProviderSettings — if the
+ * operator has typed a custom prompt into Settings → AI Image
+ * Prompts, that wins over the bundled constant. Whitespace-only
+ * overrides are treated as "not set" so an accidentally-blanked
+ * textarea doesn't silently feed an empty system prompt to the AI.
  */
 function templateForMarket(
   market: AiMarket | undefined,
+  settings?: AiProviderSettings,
 ): {
   systemPrompt: string;
   formatUserPrompt: (p: ProductPromptInput) => string;
 } {
+  const ukOverride = (settings?.ukSystemPromptOverride ?? "").trim();
+  const usOverride = (settings?.usSystemPromptOverride ?? "").trim();
   if (market === "us") {
     return {
-      systemPrompt: US_SYSTEM_PROMPT,
+      systemPrompt: usOverride || US_SYSTEM_PROMPT,
       formatUserPrompt: formatUsUserPrompt,
     };
   }
   return {
-    systemPrompt: UK_SYSTEM_PROMPT,
+    systemPrompt: ukOverride || UK_SYSTEM_PROMPT,
     formatUserPrompt: formatUkUserPrompt,
   };
 }
@@ -135,7 +144,7 @@ export async function openaiGenerate(
   const model = (settings.openaiModel || "").trim() || DEFAULT_MODELS.openai;
   const client = new OpenAI({ apiKey });
 
-  const { systemPrompt, formatUserPrompt } = templateForMarket(input.market);
+  const { systemPrompt, formatUserPrompt } = templateForMarket(input.market, settings);
   const resp = await client.chat.completions.create({
     model,
     response_format: { type: "json_object" },
@@ -164,7 +173,7 @@ export async function anthropicGenerate(
     (settings.anthropicModel || "").trim() || DEFAULT_MODELS.anthropic;
   const client = new Anthropic({ apiKey });
 
-  const { systemPrompt, formatUserPrompt } = templateForMarket(input.market);
+  const { systemPrompt, formatUserPrompt } = templateForMarket(input.market, settings);
   const message = await client.messages.create({
     model,
     max_tokens: 2048,
@@ -206,7 +215,7 @@ export async function openrouterGenerate(
     defaultHeaders: Object.keys(defaultHeaders).length ? defaultHeaders : undefined,
   });
 
-  const { systemPrompt, formatUserPrompt } = templateForMarket(input.market);
+  const { systemPrompt, formatUserPrompt } = templateForMarket(input.market, settings);
   const resp = await client.chat.completions.create({
     model,
     temperature: 0.4,
@@ -405,7 +414,7 @@ export async function openaiGenerateVision(
   }
   const model = (settings.openaiModel || "").trim() || DEFAULT_MODELS.openai;
   const client = new OpenAI({ apiKey });
-  const { systemPrompt, formatUserPrompt } = templateForMarket(input.market);
+  const { systemPrompt, formatUserPrompt } = templateForMarket(input.market, settings);
   const resp = await client.chat.completions.create({
     model,
     response_format: { type: "json_object" },
@@ -440,7 +449,7 @@ export async function anthropicGenerateVision(
   const model =
     (settings.anthropicModel || "").trim() || DEFAULT_MODELS.anthropic;
   const client = new Anthropic({ apiKey });
-  const { systemPrompt, formatUserPrompt } = templateForMarket(input.market);
+  const { systemPrompt, formatUserPrompt } = templateForMarket(input.market, settings);
 
   // Anthropic doesn't accept raw URLs — fetch + base64-encode the
   // image first. Same helper shape Phase 9 vision uses.
@@ -495,7 +504,7 @@ export async function openrouterGenerateVision(
       ? defaultHeaders
       : undefined,
   });
-  const { systemPrompt, formatUserPrompt } = templateForMarket(input.market);
+  const { systemPrompt, formatUserPrompt } = templateForMarket(input.market, settings);
   const resp = await client.chat.completions.create({
     model,
     temperature: 0.4,

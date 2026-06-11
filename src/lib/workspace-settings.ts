@@ -69,14 +69,16 @@ export function toServerSettings(
     : "manual";
   return {
     provider,
-    openaiApiKey:      row.openaiApiKey,
-    openaiModel:       row.openaiModel,
-    anthropicApiKey:   row.anthropicApiKey,
-    anthropicModel:    row.anthropicModel,
-    openrouterApiKey:  row.openrouterApiKey,
-    openrouterModel:   row.openrouterModel,
-    openrouterSiteUrl: row.openrouterSiteUrl,
-    openrouterAppName: row.openrouterAppName,
+    openaiApiKey:           row.openaiApiKey,
+    openaiModel:            row.openaiModel,
+    anthropicApiKey:        row.anthropicApiKey,
+    anthropicModel:         row.anthropicModel,
+    openrouterApiKey:       row.openrouterApiKey,
+    openrouterModel:        row.openrouterModel,
+    openrouterSiteUrl:      row.openrouterSiteUrl,
+    openrouterAppName:      row.openrouterAppName,
+    ukSystemPromptOverride: row.ukSystemPromptOverride,
+    usSystemPromptOverride: row.usSystemPromptOverride,
   };
 }
 

@@ -106,6 +106,13 @@ model WorkspaceSettings {
   // stop gating Ready / image gen.
   ipRiskChecksEnabled Boolean @default(false)
 
+  // Per-workspace overrides for the AI image-prompt system
+  // prompts. When NULL, the bundled constant is used; when set,
+  // the override text is fed to the AI provider verbatim. Lets
+  // the user iterate on prompt wording without redeploying.
+  ukSystemPromptOverride String?
+  usSystemPromptOverride String?
+
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 }

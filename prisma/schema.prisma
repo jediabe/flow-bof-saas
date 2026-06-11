@@ -100,6 +100,14 @@ model WorkspaceSettings {
   // for reference; they just stop blocking the workflow.
   ipRiskChecksEnabled Boolean @default(false)
 
+  // Per-workspace overrides for the AI image-prompt system
+  // prompts. When NULL, the bundled constant in
+  // src/lib/ai/{uk,us}-retail-prompts.ts is used. When set, the
+  // override text is fed to the AI provider verbatim. Lets the
+  // user iterate on prompt wording without redeploying.
+  ukSystemPromptOverride String?
+  usSystemPromptOverride String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }

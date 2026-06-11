@@ -35,6 +35,15 @@ export interface AiProviderSettings {
   openrouterModel?:   string | null;
   openrouterSiteUrl?: string | null;
   openrouterAppName?: string | null;
+  /**
+   * Per-workspace overrides for the AI image-prompt system
+   * prompts. When null/empty, the bundled constants in
+   * src/lib/ai/{uk,us}-retail-prompts.ts are used. Settings page
+   * exposes a textarea so the operator can iterate without a
+   * redeploy.
+   */
+  ukSystemPromptOverride?: string | null;
+  usSystemPromptOverride?: string | null;
 }
 
 /**

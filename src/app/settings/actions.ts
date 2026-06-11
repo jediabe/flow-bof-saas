@@ -111,6 +111,39 @@ export async function setIpRiskChecksEnabled(formData: FormData): Promise<void> 
 }
 
 /**
+ * Persist a workspace-level override for the UK and/or US AI image
+ * system prompt. Empty / whitespace-only fields clear the override
+ * (the bundled default kicks back in). Kept separate from
+ * saveAiSettings so the AI-providers form doesn't round-trip the
+ * (potentially very large) prompt text every time someone saves keys.
+ */
+export async function saveAiPrompts(formData: FormData): Promise<void> {
+  const { workspace } = await getCurrentWorkspace();
+  await loadOrCreateSettings(workspace.id);
+
+  // Empty input = "use bundled default" → store null. Trim
+  // whitespace so a textarea full of newlines doesn't silently
+  // override the prompt with blank.
+  const normalise = (v: FormDataEntryValue | null): string | null => {
+    const t = String(v ?? "").trim();
+    return t.length > 0 ? t : null;
+  };
+
+  const uk = normalise(formData.get("ukSystemPromptOverride"));
+  const us = normalise(formData.get("usSystemPromptOverride"));
+
+  await db.workspaceSettings.update({
+    where: { workspaceId: workspace.id },
+    data: {
+      ukSystemPromptOverride: uk,
+      usSystemPromptOverride: us,
+    },
+  });
+  revalidatePath("/settings");
+  revalidatePath("/batches", "layout");
+}
+
+/**
  * Verify the configured provider responds. Uses the *currently saved*
  * settings — call saveAiSettings first if you want to test newly-typed
  * values.

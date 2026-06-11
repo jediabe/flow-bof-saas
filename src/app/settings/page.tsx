@@ -3,8 +3,11 @@ import { getCurrentWorkspace } from "@/lib/workspace";
 import Panel from "@/components/ui/Panel";
 import EmptyState from "@/components/ui/EmptyState";
 import AiProviderSettingsForm from "./AiProviderSettings";
+import AiPromptOverrides from "./AiPromptOverrides";
 import { getMaskedAiSettings, setIpRiskChecksEnabled } from "./actions";
 import { loadOrCreateSettings } from "@/lib/workspace-settings";
+import { UK_SYSTEM_PROMPT } from "@/lib/ai/uk-retail-prompts";
+import { US_SYSTEM_PROMPT } from "@/lib/ai/us-retail-prompts";
 import {
   getRunnerMode,
   runnerModeBlurb,
@@ -63,6 +66,23 @@ export default async function SettingsPage() {
           for details.
         </p>
         <AiProviderSettingsForm initial={aiSettings} />
+      </Panel>
+
+      <Panel title="AI image prompts">
+        <p className="text-xs text-muted mb-4">
+          Per-workspace overrides for the system prompts the AI uses
+          when generating per-product image prompts. Edit, save, and
+          regenerate a product to see the result — no redeploy
+          needed. Leave a field blank to fall back to the bundled
+          default. Use &quot;Load default into editor&quot; to start
+          from the current bundled prompt and edit from there.
+        </p>
+        <AiPromptOverrides
+          initialUkOverride={settingsRow.ukSystemPromptOverride}
+          initialUsOverride={settingsRow.usSystemPromptOverride}
+          ukDefault={UK_SYSTEM_PROMPT}
+          usDefault={US_SYSTEM_PROMPT}
+        />
       </Panel>
 
       <Panel title="IP / trademark risk screening">
