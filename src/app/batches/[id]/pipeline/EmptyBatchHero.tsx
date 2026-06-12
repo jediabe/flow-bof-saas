@@ -1,53 +1,46 @@
+"use client";
+
 /**
- * Phase 10 — empty-batch hero state.
+ * Phase 10/11 — empty-batch hero state.
  *
- * Shown by BatchPipeline when the batch has zero non-deleted
+ * Shown by BatchPageClient when the batch has zero non-deleted
  * products. The full-bleed call-to-action ("Import products")
  * deliberately hides all the lane chrome — a fresh batch
  * shouldn't show empty lanes with placeholder text. The user
- * gets one clear path: import or add manually.
+ * gets one clear path: open the add-products sheet.
  *
  * As soon as the first product exists, this component is no
  * longer rendered and the regular lane view takes over.
  */
 
-// Plain <a> on purpose — these are in-page hash anchors. Using
-// next/link for a "#kalodata-importer" target made Next.js try to
-// prefetch the RSC at /batches/[id]/kalodata-importer (relative
-// path resolution against the current URL), 403ing in prod and
-// throwing "unexpected response" in the client router.
-
 export default function EmptyBatchHero({
   batchName,
-  importTargetId = "kalodata-importer",
-  addTargetId = "add-product",
+  onAddProducts,
 }: {
   batchName: string;
-  importTargetId?: string;
-  addTargetId?: string;
+  /** Open the "Add products" action sheet (Kalodata import +
+   *  manual-add form). Wired by BatchPageClient. */
+  onAddProducts?: () => void;
 }) {
   return (
     <div className="empty-hero">
       <div className="empty-hero-icon" aria-hidden="true">
         ⤵
       </div>
-      <h1 className="empty-hero-title">
-        {batchName} is empty
-      </h1>
+      <h1 className="empty-hero-title">{batchName} is empty</h1>
       <p className="empty-hero-body">
         Start by importing products from a Kalodata XLSX export.
         Each row becomes a card you can review, generate, and post.
       </p>
       <div className="empty-hero-actions">
-        <a
-          href={`#${importTargetId}`}
+        <button
+          type="button"
           className="btn btn-primary"
+          onClick={onAddProducts}
+          disabled={!onAddProducts}
         >
-          Import Kalodata .xlsx
-        </a>
-        <a href={`#${addTargetId}`} className="btn">
-          Add a product manually
-        </a>
+          + Add products
+        </button>
       </div>
     </div>
   );

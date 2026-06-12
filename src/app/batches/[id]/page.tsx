@@ -31,7 +31,6 @@ import {
 import BatchPageClient from "./BatchPageClient";
 import type {
   PipelineProduct,
-  LaneActionConfig,
 } from "./pipeline/BatchPipeline";
 import type {
   ExpandedCardProduct,
@@ -319,16 +318,17 @@ export default async function BatchDetail({
     };
   }
 
-  // Stage-specific lane actions. Stage helper handles auto-
-  // advance via state; these are the user-driven actions on a
-  // lane header (e.g. "Generate all").
+  // External-link buttons for lanes that have a "share via QR"
+  // surface. Built here because they need batch tokens from the
+  // server. BatchPageClient mixes these into the lane action row
+  // alongside its sheet-opener buttons.
   //
   // Plain <a> on purpose — these open in a new tab and the URL is
   // an absolute baseUrl, so next/link's prefetcher adds no value
   // and triggered 404s in prod when the token was missing
   // (postingToken / reviewToken null → href ended with "/").
-  const laneActions: LaneActionConfig = {
-    needs_review: batch.reviewToken ? (
+  const externalLinks = {
+    reviewOnPhone: batch.reviewToken ? (
       <a
         href={`${baseUrl.replace(/\/+$/, "")}/mobile-review/${batch.reviewToken}`}
         target="_blank"
@@ -337,11 +337,8 @@ export default async function BatchDetail({
       >
         Review on phone ↗
       </a>
-    ) : null,
-    ready: null,
-    generating: null,
-    generated: null,
-    posted: batch.postingToken ? (
+    ) : undefined,
+    postingQR: batch.postingToken ? (
       <a
         href={`${baseUrl.replace(/\/+$/, "")}/mobile-posting/${batch.postingToken}`}
         target="_blank"
@@ -350,7 +347,7 @@ export default async function BatchDetail({
       >
         Posting QR ↗
       </a>
-    ) : null,
+    ) : undefined,
   };
 
   // Drawer content: Mobile / Flow / Activity / Settings.
@@ -390,6 +387,141 @@ export default async function BatchDetail({
       lastScanAt={null}
     />
   );
+
+  // Action-sheet content. Each block is the exact panel that used
+  // to sit stacked below the pipeline; now it gets rendered inside
+  // a BatchActionSheet modal launched from a lane header button.
+  // Building them here (not in BatchPageClient) so server-loaded
+  // data (agents, products, AI provider status) stays in the
+  // server tree.
+  const addProductsPanel = (
+    <div className="space-y-5">
+      <KalodataImportPanel batchId={batch.id} />
+      <details className="panel p-5" id="add-product" open>
+        <summary className="cursor-pointer text-sm font-medium text-muted hover:text-text">
+          Add a product manually
+        </summary>
+        <form
+          action={addProduct}
+          className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-4"
+        >
+          <input type="hidden" name="batchId" value={batch.id} />
+          <div>
+            <label className="label">Product name</label>
+            <input className="field mt-1" name="productName" required />
+          </div>
+          <div>
+            <label className="label">Category</label>
+            <input className="field mt-1" name="category" />
+          </div>
+          <div>
+            <label className="label">TikTok URL</label>
+            <input className="field mt-1" name="tiktokUrl" />
+          </div>
+          <div>
+            <label className="label">Retailer / store</label>
+            <input
+              className="field mt-1"
+              name="retailerName"
+              placeholder="e.g. boots, sephora_uk (or blank)"
+            />
+          </div>
+          <div className="md:col-span-2">
+            <label className="label">Image prompt</label>
+            <textarea className="field mt-1" name="imagePrompt" rows={3} />
+          </div>
+          <div className="md:col-span-2">
+            <button className="btn btn-primary" type="submit">
+              Add product
+            </button>
+          </div>
+        </form>
+      </details>
+    </div>
+  );
+
+  const aiPromptsActionPanel = (
+    <AiPromptsPanel
+      batchId={batch.id}
+      provider={aiProvider}
+      providerLabel={aiProviderLabel}
+      providerHasKey={aiProviderHasKey}
+      products={batch.products.map((p) => ({
+        id: p.id,
+        productName: p.productName,
+        hasPrompt: !!p.imagePrompt,
+      }))}
+    />
+  );
+
+  const imageGenActionPanel =
+    agents.length === 0 ? (
+      <div className="text-sm text-muted">
+        No runner registered.{" "}
+        <Link href="/agents" className="text-accent hover:underline">
+          Set one up
+        </Link>{" "}
+        before generating images.
+      </div>
+    ) : (
+      <GenerateImagesPanel
+        batchId={batch.id}
+        agents={agents.map((a) => ({
+          id: a.id, name: a.name, status: a.status,
+        }))}
+        products={batch.products.map((p) => ({
+          id:                      p.id,
+          productName:             p.productName,
+          referenceImageUrl:       p.referenceImageUrl,
+          referenceImagePathLocal: p.referenceImagePathLocal,
+          imagePrompt:             p.imagePrompt,
+          reviewStatus:            p.reviewStatus,
+          images: p.images
+            .filter(
+              (i): i is typeof i & { role: "primary" | "ref2" | "ref3" } =>
+                i.role === "primary" || i.role === "ref2" || i.role === "ref3",
+            )
+            .map((i) => ({
+              role: i.role,
+              url: i.url,
+              pathLocal: i.pathLocal,
+            })),
+          ipRiskStatus: projectIpStatus(p.ipRiskStatus),
+          ipRiskOverride: p.ipRiskOverride,
+        }))}
+        agentAssetBaseUrl={agentAssetBaseUrl}
+        lastJob={null}
+      />
+    );
+
+  const workbenchActionPanel =
+    agents.length === 0 ? (
+      <div className="text-sm text-muted">
+        No runner registered.{" "}
+        <Link href="/agents" className="text-accent hover:underline">
+          Set one up
+        </Link>{" "}
+        before scanning Flow or generating videos.
+      </div>
+    ) : (
+      <BatchWorkbench
+        batchId={batch.id}
+        agents={agents}
+        scanSummary={{
+          favoritedImages: null,
+          tilesScanned: null,
+          lastScanJobId: null,
+          lastScanAt: null,
+        }}
+        videoSummary={{
+          submitted: null,
+          skipped: null,
+          failed: null,
+          lastVideoJobId: null,
+          lastVideoAt: null,
+        }}
+      />
+    );
 
   return (
     <div className="space-y-6">
@@ -453,13 +585,19 @@ export default async function BatchDetail({
 
       {latestJob && <LatestTaskResult job={latestJob} />}
 
-      {/* Pipeline + drawer (client-rendered) */}
+      {/* Pipeline + drawer + action sheets (client-rendered) */}
       <BatchPageClient
         batchId={batch.id}
         batchName={batch.name}
         productsCompact={productsCompact}
         productsExpandedById={productsExpandedById}
-        laneActions={laneActions}
+        externalLinks={externalLinks}
+        actionPanels={{
+          addProducts: addProductsPanel,
+          aiPrompts:   aiPromptsActionPanel,
+          imageGen:    imageGenActionPanel,
+          workbench:   workbenchActionPanel,
+        }}
         ipRiskChecksEnabled={ipRiskChecksEnabled}
         drawer={{
           mobilePanel,
@@ -496,134 +634,6 @@ export default async function BatchDetail({
         }}
       />
 
-      {/* AI Prompt Generation — moved below the pipeline so the
-          batch page reads as: review pipeline first, then run AI
-          prompt gen for the approved set, then dispatch image gen.
-          Workflow flows top-to-bottom. */}
-      <AiPromptsPanel
-        batchId={batch.id}
-        provider={aiProvider}
-        providerLabel={aiProviderLabel}
-        providerHasKey={aiProviderHasKey}
-        products={batch.products.map((p) => ({
-          id: p.id,
-          productName: p.productName,
-          hasPrompt: !!p.imagePrompt,
-        }))}
-      />
-
-      {/* Generate Images workbench — full-batch dispatch surface.
-          Stays as a separate panel because Generate Images is the
-          one-time-per-batch action that needs all its controls
-          visible (mode, limit, agent picker, etc.). The pipeline's
-          drag-to-Generating path is the per-product surface. */}
-      {agents.length === 0 ? (
-        <div className="panel p-5">
-          <div className="text-sm text-muted">
-            No runner registered.{" "}
-            <Link href="/agents" className="text-accent hover:underline">
-              Set one up
-            </Link>{" "}
-            before generating images.
-          </div>
-        </div>
-      ) : (
-        <GenerateImagesPanel
-          batchId={batch.id}
-          agents={agents.map((a) => ({
-            id: a.id, name: a.name, status: a.status,
-          }))}
-          products={batch.products.map((p) => ({
-            id:                      p.id,
-            productName:             p.productName,
-            referenceImageUrl:       p.referenceImageUrl,
-            referenceImagePathLocal: p.referenceImagePathLocal,
-            imagePrompt:             p.imagePrompt,
-            reviewStatus:            p.reviewStatus,
-            images: p.images
-              .filter(
-                (i): i is typeof i & { role: "primary" | "ref2" | "ref3" } =>
-                  i.role === "primary" || i.role === "ref2" || i.role === "ref3",
-              )
-              .map((i) => ({
-                role: i.role,
-                url: i.url,
-                pathLocal: i.pathLocal,
-              })),
-            ipRiskStatus: projectIpStatus(p.ipRiskStatus),
-            ipRiskOverride: p.ipRiskOverride,
-          }))}
-          agentAssetBaseUrl={agentAssetBaseUrl}
-          lastJob={null}
-        />
-      )}
-
-      {agents.length > 0 && (
-        <BatchWorkbench
-          batchId={batch.id}
-          agents={agents}
-          scanSummary={{
-            favoritedImages: null,
-            tilesScanned: null,
-            lastScanJobId: null,
-            lastScanAt: null,
-          }}
-          videoSummary={{
-            submitted: null,
-            skipped: null,
-            failed: null,
-            lastVideoJobId: null,
-            lastVideoAt: null,
-          }}
-        />
-      )}
-
-      {/* Kalodata import — anchored for the empty-state CTA. */}
-      <div id="kalodata-importer">
-        <KalodataImportPanel batchId={batch.id} />
-      </div>
-
-      {/* Add product manually — collapsible since it's rarely used. */}
-      <details className="panel p-5" id="add-product">
-        <summary className="cursor-pointer text-sm font-medium text-muted hover:text-text">
-          Add a product manually
-        </summary>
-        <form
-          action={addProduct}
-          className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-4"
-        >
-          <input type="hidden" name="batchId" value={batch.id} />
-          <div>
-            <label className="label">Product name</label>
-            <input className="field mt-1" name="productName" required />
-          </div>
-          <div>
-            <label className="label">Category</label>
-            <input className="field mt-1" name="category" />
-          </div>
-          <div>
-            <label className="label">TikTok URL</label>
-            <input className="field mt-1" name="tiktokUrl" />
-          </div>
-          <div>
-            <label className="label">Retailer / store</label>
-            <input
-              className="field mt-1"
-              name="retailerName"
-              placeholder="e.g. boots, sephora_uk (or blank)"
-            />
-          </div>
-          <div className="md:col-span-2">
-            <label className="label">Image prompt</label>
-            <textarea className="field mt-1" name="imagePrompt" rows={3} />
-          </div>
-          <div className="md:col-span-2">
-            <button className="btn btn-primary" type="submit">
-              Add product
-            </button>
-          </div>
-        </form>
-      </details>
     </div>
   );
 }
