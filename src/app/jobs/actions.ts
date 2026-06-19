@@ -15,26 +15,38 @@ import { getRunnerMode } from "@/lib/runner-mode";
 import { loadOrCreateSettings } from "@/lib/workspace-settings";
 
 /**
- * v0.6.15-alpha — pre-dispatch gates for image-gen jobs.
+ * v0.6.15-alpha — pre-dispatch gates for Flow-driving jobs.
  *
  * Two checks, in order:
  *   1. Cooldown — if the runner reported PUBLIC_ERROR_UNUSUAL_ACTIVITY*
  *      within the last `cooldownHours`, refuse to dispatch. Submitting
  *      while the session score is in the gutter only compounds it.
  *   2. Daily cap — if the workspace has already submitted
- *      `dailyImageSubmitCap` images in the last 24h (rolling window),
- *      refuse. Targets the PUBLIC_ERROR_UNUSUAL_ACTIVITY_TOO_MUCH_TRAFFIC
- *      volume signal.
+ *      `dailyImageSubmitCap` Flow submits (images + videos combined)
+ *      in the last 24h (rolling window), refuse. Targets the
+ *      PUBLIC_ERROR_UNUSUAL_ACTIVITY_TOO_MUCH_TRAFFIC volume signal.
+ *
+ * Video jobs go through the same guard because:
+ *   - reCAPTCHA Enterprise scores the SESSION, not the action type.
+ *     A video submit hits the same Flow API surface and contributes
+ *     to the same risk score.
+ *   - End-user observed "1 video succeeded, next 2 hit unusual
+ *     activity" on a Family Plan account — clear evidence the
+ *     volume signal trips for videos too.
+ *   - One shared cap is simpler to reason about than per-type caps.
  *
  * Returns { ok: true } when dispatch is allowed; otherwise a
  * user-facing message explaining which gate fired and roughly when
  * it'll clear.
  */
-async function checkImageGenGuards(input: {
+async function checkFlowDispatchGuards(input: {
   workspaceId: string;
+  jobType: string;
   requestedItems: number;
 }): Promise<{ ok: true } | { ok: false; message: string }> {
   const settings = await loadOrCreateSettings(input.workspaceId);
+  const isVideo = input.jobType === "generate_flow_videos_from_favorites";
+  const actionLabel = isVideo ? "video gen" : "image gen";
 
   // 1. Cooldown check.
   if (settings.lastUnusualActivityAt) {
@@ -51,45 +63,61 @@ async function checkImageGenGuards(input: {
         ok: false,
         message:
           `Google Flow flagged this session with ${reason}. ` +
-          `Holding off image-gen for ${remainingLabel} so the session score ` +
+          `Holding off ${actionLabel} for ${remainingLabel} so the session score ` +
           `recovers — submitting now would compound the score. ` +
           `Use Flow manually in the meantime (browse, generate 1-2 by hand) to help warm the account back up.`,
       };
     }
   }
 
-  // 2. Daily cap check. Count image-gen items submitted in the last
-  //    24h across all jobs in the workspace. We sum item counts from
-  //    job.payload.items, not raw job rows, because one job submits
-  //    many items.
+  // 2. Daily cap check. Sum item counts across BOTH image and video
+  //    jobs in the workspace over the last 24h — one shared budget,
+  //    since reCAPTCHA scores the session not the action type.
+  //    Video jobs don't carry an `items` array in their payload
+  //    (they're driven by favorited-tile scan results, not a
+  //    pre-built list), so we approximate one tile = one submit
+  //    and read `submitted` from the job result when present, else
+  //    fall back to 1.
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
   const recent = await db.job.findMany({
     where: {
       workspaceId: input.workspaceId,
-      jobType: "generate_flow_images",
+      jobType: { in: ["generate_flow_images", "generate_flow_videos_from_favorites"] },
       createdAt: { gte: since },
       status: { in: ["queued", "running", "succeeded"] },
     },
-    select: { payload: true },
+    select: { jobType: true, payload: true, result: true },
   });
   let submittedLast24h = 0;
   for (const j of recent) {
     try {
-      const p = j.payload ? JSON.parse(j.payload) : null;
-      const items = Array.isArray(p?.items) ? p.items : [];
-      submittedLast24h += items.length;
+      if (j.jobType === "generate_flow_images") {
+        const p = j.payload ? JSON.parse(j.payload) : null;
+        const items = Array.isArray(p?.items) ? p.items : [];
+        submittedLast24h += items.length;
+      } else {
+        // Video job — use the final submitted count when available.
+        // For in-flight jobs the result is null; assume worst-case
+        // 1 to keep the gate conservative.
+        const r = j.result ? JSON.parse(j.result) : null;
+        const n = typeof r?.submitted === "number" ? r.submitted : 1;
+        submittedLast24h += n;
+      }
     } catch {
-      // Malformed payload — ignore; better to undercount than refuse.
+      // Malformed payload — count one submit as a conservative default.
+      submittedLast24h += 1;
     }
   }
   if (submittedLast24h + input.requestedItems > settings.dailyImageSubmitCap) {
     return {
       ok: false,
       message:
-        `Daily image-gen cap reached (${submittedLast24h}/${settings.dailyImageSubmitCap} submitted in the last 24h, ` +
-        `${input.requestedItems} more requested). The cap defends against the ` +
-        `PUBLIC_ERROR_UNUSUAL_ACTIVITY_TOO_MUCH_TRAFFIC volume signal. ` +
-        `Raise the cap in Settings if you need more headroom, or wait until earlier submits roll off.`,
+        `Daily Flow submit cap reached (${submittedLast24h}/${settings.dailyImageSubmitCap} submitted in the last 24h, ` +
+        `${input.requestedItems} more requested for ${actionLabel}). The cap ` +
+        `defends against the PUBLIC_ERROR_UNUSUAL_ACTIVITY_TOO_MUCH_TRAFFIC volume ` +
+        `signal and counts both images and videos against the same budget ` +
+        `(reCAPTCHA scores the session, not the action type). Raise the cap ` +
+        `in Settings if you need more headroom, or wait until earlier submits roll off.`,
     };
   }
 
@@ -152,19 +180,33 @@ export async function createSampleJob(input: {
   // check_flow_connection, scan_favorited_images, and the
   // favorites-driven video job all take empty / sparse payloads
   // on purpose.
-  // v0.6.15-alpha anti-block: refuse to dispatch image-gen jobs
-  // while the workspace is in cooldown (within N hours of a
-  // PUBLIC_ERROR_UNUSUAL_ACTIVITY) OR when the daily image-submit
-  // cap is exhausted. The check is BEFORE the Job row is created
-  // so a refused dispatch doesn't pollute the timeline.
-  if (input.jobType === "generate_flow_images") {
-    const guard = await checkImageGenGuards({
+  // v0.6.15-alpha anti-block: refuse to dispatch Flow-driving jobs
+  // (image + video) while the workspace is in cooldown (within N
+  // hours of a PUBLIC_ERROR_UNUSUAL_ACTIVITY*) OR when the shared
+  // daily Flow-submit cap is exhausted. The check is BEFORE the
+  // Job row is created so a refused dispatch doesn't pollute the
+  // timeline. Both job types share one budget because reCAPTCHA
+  // scores the SESSION, not the action type — an image submit and
+  // a video submit contribute equally to the risk score.
+  const FLOW_DRIVING_JOBS = new Set<string>([
+    "generate_flow_images",
+    "generate_flow_videos_from_favorites",
+  ]);
+  if (FLOW_DRIVING_JOBS.has(input.jobType)) {
+    // Video jobs don't ship an items[] in payload (they discover
+    // favorited tiles inside the runner). Best estimate from the
+    // SaaS side: 1 submit minimum. The runner's own per-tile
+    // unusual-activity abort handles the upper bound at runtime.
+    const requestedItems =
+      input.jobType === "generate_flow_images"
+        ? Array.isArray((input.payload as { items?: unknown })?.items)
+          ? ((input.payload as { items?: unknown[] }).items?.length ?? 0)
+          : 0
+        : 1;
+    const guard = await checkFlowDispatchGuards({
       workspaceId: workspace.id,
-      requestedItems: Array.isArray(
-        (input.payload as { items?: unknown })?.items,
-      )
-        ? ((input.payload as { items?: unknown[] }).items?.length ?? 0)
-        : 0,
+      jobType: input.jobType,
+      requestedItems,
     });
     if (!guard.ok) {
       return { ok: false, jobId: "", message: guard.message };
