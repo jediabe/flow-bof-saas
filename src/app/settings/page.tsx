@@ -4,7 +4,12 @@ import Panel from "@/components/ui/Panel";
 import EmptyState from "@/components/ui/EmptyState";
 import AiProviderSettingsForm from "./AiProviderSettings";
 import AiPromptOverrides from "./AiPromptOverrides";
-import { getMaskedAiSettings, setIpRiskChecksEnabled } from "./actions";
+import {
+  getMaskedAiSettings,
+  setIpRiskChecksEnabled,
+  saveAntiBlockSettings,
+  clearUnusualActivityCooldown,
+} from "./actions";
 import { loadOrCreateSettings } from "@/lib/workspace-settings";
 import { UK_SYSTEM_PROMPT } from "@/lib/ai/uk-retail-prompts";
 import { US_SYSTEM_PROMPT } from "@/lib/ai/us-retail-prompts";
@@ -28,6 +33,19 @@ export default async function SettingsPage() {
   const aiSettings = await getMaskedAiSettings();
   const settingsRow = await loadOrCreateSettings(workspace.id);
   const ipRiskChecksEnabled = settingsRow.ipRiskChecksEnabled;
+
+  // Cooldown derivation: how much longer until the gate releases?
+  const cooldownMs = settingsRow.cooldownHours * 60 * 60 * 1000;
+  const inCooldown =
+    settingsRow.lastUnusualActivityAt !== null &&
+    Date.now() - settingsRow.lastUnusualActivityAt.getTime() < cooldownMs;
+  const cooldownRemainingMin = inCooldown
+    ? Math.ceil(
+        (cooldownMs -
+          (Date.now() - settingsRow.lastUnusualActivityAt!.getTime())) /
+          60_000,
+      )
+    : 0;
 
   return (
     <div className="space-y-8">
@@ -83,6 +101,94 @@ export default async function SettingsPage() {
           ukDefault={UK_SYSTEM_PROMPT}
           usDefault={US_SYSTEM_PROMPT}
         />
+      </Panel>
+
+      <Panel title="Anti-block — image-gen safety net">
+        <p className="text-xs text-muted mb-4">
+          Defends against Google Flow&apos;s reCAPTCHA Enterprise risk
+          engine. Two gates:
+          {" "}<strong>daily cap</strong> blocks the
+          {" "}<code>PUBLIC_ERROR_UNUSUAL_ACTIVITY_TOO_MUCH_TRAFFIC</code>{" "}
+          volume signal;{" "}<strong>cooldown</strong> holds off new
+          submits after a flag fires so the session score recovers.
+          Lower the cap or raise the cooldown if you&apos;re hitting
+          flags frequently.
+        </p>
+
+        {inCooldown && (
+          <div className="rounded-2xl border border-bad/40 bg-bad/[0.08] text-sm text-bad px-4 py-3 mb-4 space-y-2">
+            <div className="font-semibold">
+              ⚠ Image-gen is in cooldown
+            </div>
+            <p className="text-xs leading-relaxed">
+              Flow returned{" "}
+              <code className="id-mono text-[11px]">
+                {settingsRow.lastUnusualActivityReason ?? "PUBLIC_ERROR_UNUSUAL_ACTIVITY"}
+              </code>{" "}
+              recently. Holding off new image-gen dispatches for{" "}
+              <strong>
+                {cooldownRemainingMin >= 60
+                  ? `${Math.floor(cooldownRemainingMin / 60)}h ${cooldownRemainingMin % 60}m`
+                  : `${cooldownRemainingMin}m`}
+              </strong>{" "}
+              — submitting now would compound the session score.
+              Use Flow manually in the meantime (browse, generate
+              1-2 by hand) to help warm the account back up.
+            </p>
+            <form action={clearUnusualActivityCooldown}>
+              <button
+                type="submit"
+                className="btn btn-sm"
+                title="Clear the cooldown manually. Only do this after you've used Flow by hand and confirmed it works."
+              >
+                I&apos;ve warmed the account — clear cooldown
+              </button>
+            </form>
+          </div>
+        )}
+
+        <form
+          action={saveAntiBlockSettings}
+          className="grid grid-cols-1 md:grid-cols-2 gap-3"
+        >
+          <div>
+            <label className="label">Daily image-gen cap (24h rolling)</label>
+            <input
+              type="number"
+              name="dailyImageSubmitCap"
+              defaultValue={settingsRow.dailyImageSubmitCap}
+              min={10}
+              max={500}
+              step={1}
+              className="field mt-1"
+            />
+            <p className="text-[11px] text-muted mt-1">
+              10-500. Default 50 (flow2api community report). Lower if
+              you&apos;ve been getting flagged.
+            </p>
+          </div>
+          <div>
+            <label className="label">Cooldown after a flag (hours)</label>
+            <input
+              type="number"
+              name="cooldownHours"
+              defaultValue={settingsRow.cooldownHours}
+              min={1}
+              max={48}
+              step={1}
+              className="field mt-1"
+            />
+            <p className="text-[11px] text-muted mt-1">
+              1-48. Default 4. Longer = safer; the session score
+              decays roughly linearly with time.
+            </p>
+          </div>
+          <div className="md:col-span-2">
+            <button type="submit" className="btn btn-primary text-sm">
+              Save
+            </button>
+          </div>
+        </form>
       </Panel>
 
       <Panel title="IP / trademark risk screening">

@@ -12,6 +12,89 @@ import {
 } from "@/lib/agent-client";
 import { encodeJson } from "@/lib/json-column";
 import { getRunnerMode } from "@/lib/runner-mode";
+import { loadOrCreateSettings } from "@/lib/workspace-settings";
+
+/**
+ * v0.6.15-alpha — pre-dispatch gates for image-gen jobs.
+ *
+ * Two checks, in order:
+ *   1. Cooldown — if the runner reported PUBLIC_ERROR_UNUSUAL_ACTIVITY*
+ *      within the last `cooldownHours`, refuse to dispatch. Submitting
+ *      while the session score is in the gutter only compounds it.
+ *   2. Daily cap — if the workspace has already submitted
+ *      `dailyImageSubmitCap` images in the last 24h (rolling window),
+ *      refuse. Targets the PUBLIC_ERROR_UNUSUAL_ACTIVITY_TOO_MUCH_TRAFFIC
+ *      volume signal.
+ *
+ * Returns { ok: true } when dispatch is allowed; otherwise a
+ * user-facing message explaining which gate fired and roughly when
+ * it'll clear.
+ */
+async function checkImageGenGuards(input: {
+  workspaceId: string;
+  requestedItems: number;
+}): Promise<{ ok: true } | { ok: false; message: string }> {
+  const settings = await loadOrCreateSettings(input.workspaceId);
+
+  // 1. Cooldown check.
+  if (settings.lastUnusualActivityAt) {
+    const cooldownMs = settings.cooldownHours * 60 * 60 * 1000;
+    const elapsed = Date.now() - settings.lastUnusualActivityAt.getTime();
+    if (elapsed < cooldownMs) {
+      const remainingMin = Math.ceil((cooldownMs - elapsed) / 60_000);
+      const remainingLabel =
+        remainingMin >= 60
+          ? `${Math.ceil(remainingMin / 60)}h ${remainingMin % 60}m`
+          : `${remainingMin}m`;
+      const reason = settings.lastUnusualActivityReason ?? "PUBLIC_ERROR_UNUSUAL_ACTIVITY";
+      return {
+        ok: false,
+        message:
+          `Google Flow flagged this session with ${reason}. ` +
+          `Holding off image-gen for ${remainingLabel} so the session score ` +
+          `recovers — submitting now would compound the score. ` +
+          `Use Flow manually in the meantime (browse, generate 1-2 by hand) to help warm the account back up.`,
+      };
+    }
+  }
+
+  // 2. Daily cap check. Count image-gen items submitted in the last
+  //    24h across all jobs in the workspace. We sum item counts from
+  //    job.payload.items, not raw job rows, because one job submits
+  //    many items.
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const recent = await db.job.findMany({
+    where: {
+      workspaceId: input.workspaceId,
+      jobType: "generate_flow_images",
+      createdAt: { gte: since },
+      status: { in: ["queued", "running", "succeeded"] },
+    },
+    select: { payload: true },
+  });
+  let submittedLast24h = 0;
+  for (const j of recent) {
+    try {
+      const p = j.payload ? JSON.parse(j.payload) : null;
+      const items = Array.isArray(p?.items) ? p.items : [];
+      submittedLast24h += items.length;
+    } catch {
+      // Malformed payload — ignore; better to undercount than refuse.
+    }
+  }
+  if (submittedLast24h + input.requestedItems > settings.dailyImageSubmitCap) {
+    return {
+      ok: false,
+      message:
+        `Daily image-gen cap reached (${submittedLast24h}/${settings.dailyImageSubmitCap} submitted in the last 24h, ` +
+        `${input.requestedItems} more requested). The cap defends against the ` +
+        `PUBLIC_ERROR_UNUSUAL_ACTIVITY_TOO_MUCH_TRAFFIC volume signal. ` +
+        `Raise the cap in Settings if you need more headroom, or wait until earlier submits roll off.`,
+    };
+  }
+
+  return { ok: true };
+}
 
 /**
  * SQLite-friendly job status strings. Mirrors the values the Postgres
@@ -69,6 +152,25 @@ export async function createSampleJob(input: {
   // check_flow_connection, scan_favorited_images, and the
   // favorites-driven video job all take empty / sparse payloads
   // on purpose.
+  // v0.6.15-alpha anti-block: refuse to dispatch image-gen jobs
+  // while the workspace is in cooldown (within N hours of a
+  // PUBLIC_ERROR_UNUSUAL_ACTIVITY) OR when the daily image-submit
+  // cap is exhausted. The check is BEFORE the Job row is created
+  // so a refused dispatch doesn't pollute the timeline.
+  if (input.jobType === "generate_flow_images") {
+    const guard = await checkImageGenGuards({
+      workspaceId: workspace.id,
+      requestedItems: Array.isArray(
+        (input.payload as { items?: unknown })?.items,
+      )
+        ? ((input.payload as { items?: unknown[] }).items?.length ?? 0)
+        : 0,
+    });
+    if (!guard.ok) {
+      return { ok: false, jobId: "", message: guard.message };
+    }
+  }
+
   const ITEM_DRIVEN_JOBS = new Set<string>(["generate_flow_images"]);
   if (ITEM_DRIVEN_JOBS.has(input.jobType)) {
     const items = (input.payload as { items?: unknown })?.items;
@@ -182,6 +284,33 @@ export async function createSampleJob(input: {
       error: envelopeBack.error ? encodeJson(envelopeBack.error) : null,
     },
   });
+
+  // v0.6.15-alpha — if the runner reported a Flow risk-engine hit
+  // (PUBLIC_ERROR_UNUSUAL_ACTIVITY*), stamp lastUnusualActivityAt
+  // on WorkspaceSettings so subsequent dispatches enter cooldown.
+  // The runner returns _failure(..., details={risk_phrase}) which
+  // lands at envelopeBack.error.details.risk_phrase. Accepts new
+  // HTTP-level codes (unusual_activity, unusual_activity_too_much_traffic)
+  // and older DOM-scrape strings (too_many_requests / rate_limit /
+  // try_again_later / soft_block).
+  try {
+    const details =
+      ((envelopeBack.error as { details?: unknown })?.details ?? null) as
+        | { risk_phrase?: string }
+        | null;
+    const riskPhrase = details?.risk_phrase ?? null;
+    if (riskPhrase && typeof riskPhrase === "string") {
+      await db.workspaceSettings.update({
+        where: { workspaceId: workspace.id },
+        data: {
+          lastUnusualActivityAt: new Date(),
+          lastUnusualActivityReason: riskPhrase,
+        },
+      });
+    }
+  } catch {
+    // Cooldown bookkeeping must not break the job-result write.
+  }
 
   // Persist a final `result` JobEvent for the timeline. For streaming
   // jobs this caps a series of `progress` events; for non-streaming

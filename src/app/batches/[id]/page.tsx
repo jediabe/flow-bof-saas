@@ -29,6 +29,7 @@ import {
   countFlowItemsByState,
 } from "@/lib/flow-items";
 import BatchPageClient from "./BatchPageClient";
+import CooldownBanner from "./CooldownBanner";
 import type {
   PipelineProduct,
 } from "./pipeline/BatchPipeline";
@@ -213,6 +214,21 @@ export default async function BatchDetail({
   // raw ipRiskStatus on Product rows is preserved for the day the
   // user flips it back on.
   const ipRiskChecksEnabled = settingsRow.ipRiskChecksEnabled;
+
+  // Cooldown derivation for the banner. Mirrors the server-side
+  // check in checkImageGenGuards — same arithmetic so the user
+  // sees the same window the gate uses.
+  const cooldownMs = settingsRow.cooldownHours * 60 * 60 * 1000;
+  const inCooldown =
+    settingsRow.lastUnusualActivityAt !== null &&
+    Date.now() - settingsRow.lastUnusualActivityAt.getTime() < cooldownMs;
+  const cooldownRemainingMin = inCooldown
+    ? Math.ceil(
+        (cooldownMs -
+          (Date.now() - settingsRow.lastUnusualActivityAt!.getTime())) /
+          60_000,
+      )
+    : 0;
   const projectIpStatus = (
     raw: string,
   ): "unchecked" | "low" | "medium" | "high" | "needs_manual_review" => {
@@ -584,6 +600,12 @@ export default async function BatchDetail({
       </header>
 
       {latestJob && <LatestTaskResult job={latestJob} />}
+
+      <CooldownBanner
+        inCooldown={inCooldown}
+        reason={settingsRow.lastUnusualActivityReason}
+        remainingMinutes={cooldownRemainingMin}
+      />
 
       {/* Pipeline + drawer + action sheets (client-rendered) */}
       <BatchPageClient

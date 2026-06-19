@@ -113,6 +113,13 @@ model WorkspaceSettings {
   ukSystemPromptOverride String?
   usSystemPromptOverride String?
 
+  // v0.6.15-alpha anti-block hardening (see SQLite schema for the
+  // full rationale).
+  dailyImageSubmitCap Int @default(50)
+  lastUnusualActivityAt   DateTime?
+  lastUnusualActivityReason String?
+  cooldownHours Int @default(4)
+
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 }

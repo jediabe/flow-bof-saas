@@ -108,6 +108,29 @@ model WorkspaceSettings {
   ukSystemPromptOverride String?
   usSystemPromptOverride String?
 
+  // v0.6.15-alpha anti-block hardening.
+  // -----------------------------------------------------------
+  // Daily cap on Flow image-gen submissions per workspace (24h
+  // rolling window). reCAPTCHA Enterprise's
+  // PUBLIC_ERROR_UNUSUAL_ACTIVITY_TOO_MUCH_TRAFFIC variant is a
+  // volume signal — staying under this cap is the cheapest fix.
+  // Default 50 picked from flow2api community reports of safe
+  // volumes; user can raise or lower from Settings.
+  dailyImageSubmitCap Int @default(50)
+
+  // Timestamp of the most recent PUBLIC_ERROR_UNUSUAL_ACTIVITY*
+  // hit reported by the runner. While this is within the
+  // cooldown window the SaaS refuses to dispatch new image-gen
+  // jobs and the batch page shows a cooldown banner.
+  lastUnusualActivityAt   DateTime?
+  lastUnusualActivityReason String?
+
+  // How long after lastUnusualActivityAt before new jobs can
+  // dispatch. 4 hours is a reasonable middle ground — long
+  // enough for the session score to decay, short enough that
+  // legitimate workloads aren't stuck overnight.
+  cooldownHours Int @default(4)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }

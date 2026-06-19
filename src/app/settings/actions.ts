@@ -144,6 +144,53 @@ export async function saveAiPrompts(formData: FormData): Promise<void> {
 }
 
 /**
+ * Persist anti-block settings: daily image-gen submit cap and the
+ * cooldown duration in hours. Validates ranges so a typo in the
+ * form can't disable the safeguard entirely (cap=0 would mean no
+ * jobs ever dispatch; we silently raise it to 10 instead).
+ */
+export async function saveAntiBlockSettings(formData: FormData): Promise<void> {
+  const { workspace } = await getCurrentWorkspace();
+  await loadOrCreateSettings(workspace.id);
+
+  const capRaw = Number(formData.get("dailyImageSubmitCap") ?? 50);
+  const cooldownRaw = Number(formData.get("cooldownHours") ?? 4);
+
+  const cap = Number.isFinite(capRaw) ? Math.round(capRaw) : 50;
+  const cooldown = Number.isFinite(cooldownRaw) ? Math.round(cooldownRaw) : 4;
+
+  await db.workspaceSettings.update({
+    where: { workspaceId: workspace.id },
+    data: {
+      dailyImageSubmitCap: Math.max(10, Math.min(500, cap)),
+      cooldownHours: Math.max(1, Math.min(48, cooldown)),
+    },
+  });
+  revalidatePath("/settings");
+  revalidatePath("/batches", "layout");
+}
+
+/**
+ * Manually clear the unusual-activity cooldown. The user uses this
+ * after they've warmed the account back up (used Flow by hand,
+ * generated 1-2 manually, browsed for a while) and want to resume
+ * automated batches without waiting the full cooldown window.
+ */
+export async function clearUnusualActivityCooldown(): Promise<void> {
+  const { workspace } = await getCurrentWorkspace();
+  await loadOrCreateSettings(workspace.id);
+  await db.workspaceSettings.update({
+    where: { workspaceId: workspace.id },
+    data: {
+      lastUnusualActivityAt: null,
+      lastUnusualActivityReason: null,
+    },
+  });
+  revalidatePath("/settings");
+  revalidatePath("/batches", "layout");
+}
+
+/**
  * Verify the configured provider responds. Uses the *currently saved*
  * settings — call saveAiSettings first if you want to test newly-typed
  * values.
