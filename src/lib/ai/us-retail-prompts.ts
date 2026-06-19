@@ -27,12 +27,15 @@ product fidelity — your job is only to pick the RIGHT template.
 ============================================================
 IMAGE PROMPT — PICK ONE TEMPLATE AND EMIT VERBATIM
 ============================================================
-The image_prompt is EXACTLY one of the templates below, emitted
-verbatim. Rules:
+The image_prompt is EXACTLY one of the templates below,
+emitted verbatim EXCEPT for the [PRODUCT NOUN] slot which you
+substitute throughout the template. Rules:
 
-  - DO NOT add or remove any words from the chosen template.
-  - DO NOT insert a product description, colors, materials, or
-    proportions. The image model has the reference image.
+  - DO NOT add or remove any words from the chosen template
+    other than substituting [PRODUCT NOUN].
+  - DO NOT insert a long product description, colors, materials,
+    or proportions. Just the [PRODUCT NOUN] substitution. The
+    image model has the reference image for the visual details.
   - DO NOT combine templates or mix-and-match clauses.
   - DO NOT introduce other named US retailers (Target, CVS,
     Sephora, Ulta, Apple Store, Lowe's, Petco, Whole Foods,
@@ -42,13 +45,30 @@ verbatim. Rules:
     model not to render the store's signage / wording, so this
     is safe.
 
+[PRODUCT NOUN] — what to substitute:
+  A brief 1-3 word noun (or short noun phrase) naming what the
+  product physically IS. The image model gets this anchor so it
+  doesn't generate the wrong silhouette. Use the simplest noun
+  a shopper would say out loud:
+    - "coat", "kettle", "phone case", "lipstick", "office chair"
+    - "wide-leg joggers", "portable cooler", "running shoes"
+    - "wireless earbuds", "throw pillow", "dog leash"
+  Avoid brand names, model numbers, full marketing titles, or
+  multi-clause descriptions. Stay generic; the reference image
+  carries the specific product. Plurals are fine.
+  Match the case of the placeholder when substituting: lowercase
+  in normal sentences, UPPERCASE in the all-caps directive
+  clauses. E.g. for a "coat":
+    "for the [PRODUCT NOUN] here"   → "for the coat here"
+    "THE [PRODUCT NOUN] IS THE FOCUS" → "THE COAT IS THE FOCUS"
+
 ----------------------------------------------------------------
 TEMPLATE: Walmart
 USE FOR: general consumer goods, kitchen, drinkware, cookware,
 small appliances, household basics, mass-market toys, drugstore-
 tier beauty, anything that doesn't fit a more specific store.
 TEMPLATE TEXT (emit verbatim):
-    put a display setup for the product here inside of a walmart. however, ensure there is no actual walmart wording visible. ENSURE THE PRODUCT IS THE FOCUS OF THE SHOT WITH THE BACKGROUND SLIGHTLY BLURRED AND THERE ARE NO PRICE TAGS. Casual shopper photo look. Slight imperfections. Not cinematic. Not studio. Not glossy. Not CGI. make true to size
+    put a display setup for the [PRODUCT NOUN] here inside of a walmart. however, ensure there is no actual walmart wording visible. ENSURE THE [PRODUCT NOUN] IS THE FOCUS OF THE SHOT WITH THE BACKGROUND SLIGHTLY BLURRED AND THERE ARE NO PRICE TAGS. Casual shopper photo look. Slight imperfections. Not cinematic. Not studio. Not glossy. Not CGI. make true to size
 
 ----------------------------------------------------------------
 TEMPLATE: Walmart Shelf
@@ -57,7 +77,7 @@ goods, canned items, packaged dry goods, OTC health, vitamins,
 hygiene items, packaged beauty, supplements. Pick this over
 plain Walmart when the product is shelf-stable packaging.
 TEMPLATE TEXT (emit verbatim):
-    put a display setup for the product here on a shelf inside of a walmart. however, ensure there is no actual walmart wording visible. ENSURE THE PRODUCT IS THE FOCUS OF THE SHOT (no other product physically directly next to it) WITH THE BACKGROUND AROUND THE PRODUCT SLIGHTLY BLURRED LIKE ITS OUT OF FOCUS OF THE SHOT AND THERE ARE NO PRICE TAGS. Casual shopper photo look. Slight imperfections. Not cinematic. Not studio. Not glossy. Not CGI. make true to size
+    put a display setup for the [PRODUCT NOUN] here on a shelf inside of a walmart. however, ensure there is no actual walmart wording visible. ENSURE THE [PRODUCT NOUN] IS THE FOCUS OF THE SHOT (no other product physically directly next to it) WITH THE BACKGROUND AROUND THE [PRODUCT NOUN] SLIGHTLY BLURRED LIKE ITS OUT OF FOCUS OF THE SHOT AND THERE ARE NO PRICE TAGS. Casual shopper photo look. Slight imperfections. Not cinematic. Not studio. Not glossy. Not CGI. make true to size
 
 ----------------------------------------------------------------
 TEMPLATE: Costco
@@ -65,7 +85,7 @@ USE FOR: bulk packs, multi-packs, club-size / warehouse-pack
 items, large-format household, anything sold in unusual
 quantities.
 TEMPLATE TEXT (emit verbatim):
-    put a display setup for the product here inside of a costco. however, ensure there is no actual costco wording visible. ENSURE THE PRODUCT IS THE FOCUS OF THE SHOT (no other product physically directly next to it) WITH THE BACKGROUND AROUND THE PRODUCT SLIGHTLY BLURRED LIKE ITS OUT OF FOCUS OF THE SHOT AND THERE ARE NO PRICE TAGS. Casual shopper photo look. Slight imperfections. Not cinematic. Not studio. Not glossy. Not CGI. make true to size
+    put a display setup for the [PRODUCT NOUN] here inside of a costco. however, ensure there is no actual costco wording visible. ENSURE THE [PRODUCT NOUN] IS THE FOCUS OF THE SHOT (no other product physically directly next to it) WITH THE BACKGROUND AROUND THE [PRODUCT NOUN] SLIGHTLY BLURRED LIKE ITS OUT OF FOCUS OF THE SHOT AND THERE ARE NO PRICE TAGS. Casual shopper photo look. Slight imperfections. Not cinematic. Not studio. Not glossy. Not CGI. make true to size
 
 ----------------------------------------------------------------
 TEMPLATE: Home Depot
@@ -73,7 +93,7 @@ USE FOR: tools, hardware, DIY, garden, plumbing, electrical,
 paint, fixtures, outdoor / patio, lawn care, automotive
 accessories, anything you'd expect at a home-improvement store.
 TEMPLATE TEXT (emit verbatim):
-    put a display setup for the product here inside of a home depot. however, ensure there is no actual home depot wording visible. ENSURE THE PRODUCT IS THE FOCUS OF THE SHOT (no other product physically directly next to it) WITH THE BACKGROUND AROUND THE PRODUCT SLIGHTLY BLURRED LIKE ITS OUT OF FOCUS OF THE SHOT AND THERE ARE NO PRICE TAGS. Casual shopper photo look. Slight imperfections. Not cinematic. Not studio. Not glossy. Not CGI. make true to size
+    put a display setup for the [PRODUCT NOUN] here inside of a home depot. however, ensure there is no actual home depot wording visible. ENSURE THE [PRODUCT NOUN] IS THE FOCUS OF THE SHOT (no other product physically directly next to it) WITH THE BACKGROUND AROUND THE [PRODUCT NOUN] SLIGHTLY BLURRED LIKE ITS OUT OF FOCUS OF THE SHOT AND THERE ARE NO PRICE TAGS. Casual shopper photo look. Slight imperfections. Not cinematic. Not studio. Not glossy. Not CGI. make true to size
 
 ----------------------------------------------------------------
 TEMPLATE: Best Buy
@@ -82,7 +102,7 @@ headphones, earphones, audio equipment, gaming consoles,
 console accessories, gaming accessories, cameras, smart home
 devices, computer accessories, laptop stands / peripherals.
 TEMPLATE TEXT (emit verbatim):
-    put a display setup for the product here inside of a best buy. however, ensure there is no actual best buy wording visible. ENSURE THE PRODUCT IS THE FOCUS OF THE SHOT (no other product physically directly next to it) WITH THE BACKGROUND AROUND THE PRODUCT SLIGHTLY BLURRED LIKE ITS OUT OF FOCUS OF THE SHOT AND THERE ARE NO PRICE TAGS. Casual shopper photo look. Slight imperfections. Not cinematic. Not studio. Not glossy. Not CGI. make true to size
+    put a display setup for the [PRODUCT NOUN] here inside of a best buy. however, ensure there is no actual best buy wording visible. ENSURE THE [PRODUCT NOUN] IS THE FOCUS OF THE SHOT (no other product physically directly next to it) WITH THE BACKGROUND AROUND THE [PRODUCT NOUN] SLIGHTLY BLURRED LIKE ITS OUT OF FOCUS OF THE SHOT AND THERE ARE NO PRICE TAGS. Casual shopper photo look. Slight imperfections. Not cinematic. Not studio. Not glossy. Not CGI. make true to size
 
 ----------------------------------------------------------------
 TEMPLATE: Furniture
@@ -90,7 +110,7 @@ USE FOR: furniture and large home pieces — sofas, chairs,
 tables, beds, mattresses, dressers, bookshelves, ottomans,
 benches, headboards, large home decor.
 TEMPLATE TEXT (emit verbatim):
-    put a display setup for this exact product inside of a furniture store it would belong in. ENSURE THE PRODUCT IS THE FOCUS OF THE SHOT (no other product physically directly next to it) WITH THE BACKGROUND AROUND THE PRODUCT SLIGHTLY BLURRED LIKE ITS OUT OF FOCUS OF THE SHOT AND THERE ARE NO PRICE TAGS. Casual shopper photo look. Slight imperfections. Not cinematic. Not studio. Not glossy. Not CGI. make true to size
+    put a display setup for this exact [PRODUCT NOUN] inside of a furniture store it would belong in. ENSURE THE [PRODUCT NOUN] IS THE FOCUS OF THE SHOT (no other product physically directly next to it) WITH THE BACKGROUND AROUND THE [PRODUCT NOUN] SLIGHTLY BLURRED LIKE ITS OUT OF FOCUS OF THE SHOT AND THERE ARE NO PRICE TAGS. Casual shopper photo look. Slight imperfections. Not cinematic. Not studio. Not glossy. Not CGI. make true to size
 
 ----------------------------------------------------------------
 TEMPLATE: Mannequin
@@ -100,7 +120,7 @@ leggings, joggers, shorts, activewear, sportswear, outerwear,
 coats, jackets, swimwear. The mannequin display avoids the
 flat-laid / folded pose that hurts believability.
 TEMPLATE TEXT (emit verbatim):
-    put a display setup for the product here inside of a clothing store it would belong in. make it a mannequin. ENSURE THE PRODUCT IS THE FOCUS OF THE SHOT (no other product physically directly next to it) WITH THE BACKGROUND AROUND THE PRODUCT SLIGHTLY BLURRED LIKE ITS OUT OF FOCUS OF THE SHOT AND THERE ARE NO PRICE TAGS. Casual shopper photo look. Slight imperfections. Not cinematic. Not studio. Not glossy. Not CGI. make true to size
+    put a display setup for the [PRODUCT NOUN] here inside of a clothing store it would belong in. make it a mannequin. ENSURE THE [PRODUCT NOUN] IS THE FOCUS OF THE SHOT (no other product physically directly next to it) WITH THE BACKGROUND AROUND THE [PRODUCT NOUN] SLIGHTLY BLURRED LIKE ITS OUT OF FOCUS OF THE SHOT AND THERE ARE NO PRICE TAGS. Casual shopper photo look. Slight imperfections. Not cinematic. Not studio. Not glossy. Not CGI. make true to size
 
 ----------------------------------------------------------------
 TEMPLATE: Clothing Store
@@ -108,14 +128,14 @@ USE FOR: clothing accessories that DON'T mount on a mannequin —
 socks, underwear, tights, hats, gloves, scarves, belts, bags,
 handbags, wallets, ties, hair accessories.
 TEMPLATE TEXT (emit verbatim):
-    put a display setup for the product here inside of a clothing store it would belong in. ENSURE THE PRODUCT IS THE FOCUS OF THE SHOT (no other product physically directly next to it) WITH THE BACKGROUND AROUND THE PRODUCT SLIGHTLY BLURRED LIKE ITS OUT OF FOCUS OF THE SHOT AND THERE ARE NO PRICE TAGS. Casual shopper photo look. Slight imperfections. Not cinematic. Not studio. Not glossy. Not CGI. make true to size
+    put a display setup for the [PRODUCT NOUN] here inside of a clothing store it would belong in. ENSURE THE [PRODUCT NOUN] IS THE FOCUS OF THE SHOT (no other product physically directly next to it) WITH THE BACKGROUND AROUND THE [PRODUCT NOUN] SLIGHTLY BLURRED LIKE ITS OUT OF FOCUS OF THE SHOT AND THERE ARE NO PRICE TAGS. Casual shopper photo look. Slight imperfections. Not cinematic. Not studio. Not glossy. Not CGI. make true to size
 
 ----------------------------------------------------------------
 TEMPLATE: Shoe Store
 USE FOR: shoes, footwear, trainers, sneakers, boots, heels,
 sandals, slippers, kids' shoes.
 TEMPLATE TEXT (emit verbatim):
-    put this product on top of a box in the display of a shoe store it would belong in. ENSURE THE PRODUCT IS THE FOCUS OF THE SHOT (no other product physically directly next to it) WITH THE BACKGROUND AROUND THE PRODUCT SLIGHTLY BLURRED LIKE ITS OUT OF FOCUS OF THE SHOT AND THERE ARE NO PRICE TAGS. Casual shopper photo look. Slight imperfections. Not cinematic. Not studio. Not glossy. Not CGI. make true to size
+    put this [PRODUCT NOUN] on top of a box in the display of a shoe store it would belong in. ENSURE THE [PRODUCT NOUN] IS THE FOCUS OF THE SHOT (no other product physically directly next to it) WITH THE BACKGROUND AROUND THE [PRODUCT NOUN] SLIGHTLY BLURRED LIKE ITS OUT OF FOCUS OF THE SHOT AND THERE ARE NO PRICE TAGS. Casual shopper photo look. Slight imperfections. Not cinematic. Not studio. Not glossy. Not CGI. make true to size
 
 ----------------------------------------------------------------
 TEMPLATE: Generic
@@ -124,7 +144,7 @@ art supplies, books, hobbies, anything ambiguous. Don't reach
 for Generic when one of the specific templates is a reasonable
 fit; only when none are.
 TEMPLATE TEXT (emit verbatim):
-    put a display setup for the product here inside of a store it would belong in. ENSURE THE PRODUCT IS THE FOCUS OF THE SHOT (no other product physically directly next to it) WITH THE BACKGROUND AROUND THE PRODUCT SLIGHTLY BLURRED LIKE ITS OUT OF FOCUS OF THE SHOT AND THERE ARE NO PRICE TAGS. Casual shopper photo look. Slight imperfections. Not cinematic. Not studio. Not glossy. Not CGI. make true to size
+    put a display setup for the [PRODUCT NOUN] here inside of a store it would belong in. ENSURE THE [PRODUCT NOUN] IS THE FOCUS OF THE SHOT (no other product physically directly next to it) WITH THE BACKGROUND AROUND THE [PRODUCT NOUN] SLIGHTLY BLURRED LIKE ITS OUT OF FOCUS OF THE SHOT AND THERE ARE NO PRICE TAGS. Casual shopper photo look. Slight imperfections. Not cinematic. Not studio. Not glossy. Not CGI. make true to size
 ----------------------------------------------------------------
 
 If the user supplied a "Store hint" in the request, USE THAT
@@ -141,7 +161,7 @@ VIDEO PROMPT
 Always emit the universal blanket video prompt verbatim — DO NOT
 write a per-product video prompt under any circumstances:
 
-    Bring the camera closer to the product and have a female's hand enter the frame and poke the product as if the person recording touched it
+    Bring the camera closer to the [PRODUCT NOUN] and have a female's hand enter the frame and poke the [PRODUCT NOUN] as if the person recording touched it
 
 ============================================================
 HOOKS — US STYLE (Apex Initiative 7 Levers)
@@ -253,8 +273,8 @@ nothing outside the JSON object. Use exactly these keys:
   "retail_environment": "<the template name you picked: 'Walmart', 'Walmart Shelf', 'Costco', 'Home Depot', 'Best Buy', 'Furniture', 'Mannequin', 'Clothing Store', 'Shoe Store', or 'Generic'>",
   "store_environment": "<same as retail_environment — kept for back-compat>",
   "placement_type": "'in-store display'",
-  "image_prompt": "<the chosen template, emitted verbatim>",
-  "video_prompt": "<the universal blanket video prompt verbatim>",
+  "image_prompt": "<the chosen template with [PRODUCT NOUN] substituted throughout (preserve case)>",
+  "video_prompt": "<the universal blanket video prompt with [PRODUCT NOUN] substituted>",
   "hook": "<first variant — same as hook_variants[0].text (Lever 1 hook)>",
   "hook_variants": [
     {"label": "lever-1", "lever_name": "Reflected Social Proof",     "text": "<Lever 1 hook>"},
@@ -293,6 +313,6 @@ export function formatUserPrompt(p: ProductPromptInput): string {
     `Placement hint (optional): (none)`,
     "",
     "Generate the JSON now. No prose, no markdown, JSON only.",
-    "Remember: image_prompt MUST be one of the 10 templates emitted verbatim — no edits, no inserts.",
+    "Remember: image_prompt MUST be one of the 10 templates with [PRODUCT NOUN] substituted throughout (and lower / UPPER case preserved); no other edits or inserts.",
   ].join("\n");
 }

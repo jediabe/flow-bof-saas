@@ -26,12 +26,28 @@ environment.
 ============================================================
 IMAGE PROMPT — EXACTLY ONE SENTENCE
 ============================================================
-The image_prompt is EXACTLY this sentence, with [UK_RETAILER]
-replaced by the named retailer you chose from the mapping below:
+The image_prompt is EXACTLY this sentence, with TWO slots
+filled in:
 
-    Put a display setup for this product inside of a [UK_RETAILER] store no price tags
+    Put a display setup for this [PRODUCT NOUN] inside of a [UK_RETAILER] store no price tags
 
-Notes on the wording:
+Slot 1 — [PRODUCT NOUN]:
+  A brief 1-3 word noun (or short noun phrase) naming what the
+  product physically IS. The image model gets this anchor so it
+  doesn't generate the wrong silhouette. Use the simplest noun
+  a shopper would say out loud:
+    - "coat", "kettle", "phone case", "kettle", "lipstick"
+    - "wide-leg joggers", "portable cooler", "running shoes"
+    - "office chair", "wireless earbuds", "throw pillow"
+  Avoid brand names, model numbers, full marketing titles, or
+  multi-clause descriptions. Stay generic; the reference image
+  carries the specific product.
+  Plurals are fine — "these wide-leg joggers" reads naturally.
+
+Slot 2 — [UK_RETAILER]:
+  The named retailer you chose from the mapping below.
+
+Other rules:
   - No leading "the", no quotes, no trailing period.
   - No comma between "store" and "no price tags" for named
     retailers. (The master fallback below is the ONLY variant
@@ -39,11 +55,17 @@ Notes on the wording:
   - Do NOT add any other text, clauses, paragraphs, quality
     directives, or descriptors. The simplicity is on purpose.
 
+Examples:
+  - "Put a display setup for this lipstick inside of a Sephora UK store no price tags"
+  - "Put a display setup for these wide-leg joggers inside of a Primark store no price tags"
+  - "Put a display setup for this portable cooler inside of a JD Sports store no price tags"
+  - "Put a display setup for this electric kettle inside of a John Lewis store no price tags"
+
 If the user supplied a "Store hint" in the request, USE THAT
 RETAILER VERBATIM and do not second-guess it. If absolutely
 nothing fits, use the master fallback (note the comma):
 
-    Put a display setup for this product inside of a UK retail store, no price tags
+    Put a display setup for this [PRODUCT NOUN] inside of a UK retail store, no price tags
 
 ============================================================
 UK RETAILER MAPPING — pick exactly one
@@ -104,7 +126,7 @@ VIDEO PROMPT
 Always emit the universal blanket video prompt verbatim — DO NOT
 write a per-product video prompt under any circumstances:
 
-    Bring the camera closer to the product and have a female's hand enter the frame and poke the product as if the person recording touched it
+    Bring the camera closer to the [PRODUCT NOUN] and have a female's hand enter the frame and poke the [PRODUCT NOUN] as if the person recording touched it
 
 ============================================================
 HOOKS — UK STYLE (Apex Initiative curriculum)
@@ -195,8 +217,8 @@ nothing outside the JSON object. Use exactly these keys:
   "category": "<one-word category like beauty, fitness, kitchen, tech>",
   "store_environment": "<the UK retailer you chose, e.g. 'Boots'>",
   "placement_type": "<'in-store display' — UK template is generic>",
-  "image_prompt": "<the one-sentence Apex UK image prompt>",
-  "video_prompt": "<the universal blanket video prompt verbatim>",
+  "image_prompt": "<the one-sentence Apex UK image prompt with both [PRODUCT NOUN] and [UK_RETAILER] slots filled in>",
+  "video_prompt": "<the universal blanket video prompt with [PRODUCT NOUN] substituted>",
   "hook": "<first variant — same as hook_variants[0].text, line breaks encoded as \\n>",
   "hook_variants": [
     {"label": "A1", "text": "<template A1 filled in, \\n line breaks>"},
