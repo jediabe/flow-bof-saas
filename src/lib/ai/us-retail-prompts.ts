@@ -141,7 +141,7 @@ VIDEO PROMPT
 Always emit the universal blanket video prompt verbatim — DO NOT
 write a per-product video prompt under any circumstances:
 
-    Bring the camera closer to the product and have a hand poke the product as if the person recording touched it
+    Bring the camera closer to the product and have a female's hand enter the frame and poke the product as if the person recording touched it
 
 ============================================================
 HOOKS — US STYLE (Apex Initiative 7 Levers)
