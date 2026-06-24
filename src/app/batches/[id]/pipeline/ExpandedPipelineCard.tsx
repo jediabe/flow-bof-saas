@@ -458,6 +458,40 @@ export default function ExpandedPipelineCard({
             >
               ✗ Reject
             </button>
+            {/* Direct-generate escape hatch for Needs review.
+                Lets the operator dispatch image gen without
+                going through the Approve step — useful when
+                you've reviewed visually and just want to fire
+                gen on a card that's not formally approved yet.
+                Same eligibility (prompt + ref) and same
+                cooldown/cap gates apply. */}
+            {product.imagePrompt && product.images.length > 0 && (
+              inCooldown ? (
+                <button
+                  type="button"
+                  className="btn btn-danger text-xs"
+                  onClick={() => generateImage({ force: true })}
+                  disabled={pending}
+                  title={
+                    "Workspace is in cooldown. Clicking this " +
+                    "dispatches anyway — daily cap still applies. " +
+                    "Only do this if you've verified the account is healthy."
+                  }
+                >
+                  ⚠ Generate anyway
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="btn text-xs"
+                  onClick={() => generateImage()}
+                  disabled={pending}
+                  title="Dispatch image generation for THIS product directly — skips the Approve step."
+                >
+                  ⚡ Generate image
+                </button>
+              )
+            )}
           </>
         )}
         {stage === "ready" && (
