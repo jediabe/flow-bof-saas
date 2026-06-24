@@ -2358,31 +2358,65 @@ export async function generateImagesForOneProduct(input: {
     };
   }
 
-  // Pick the agent. Single connected agent → use it; multiple → ask
-  // the user to use the bulk panel where they can pick explicitly.
-  const agents = await db.agent.findMany({
-    where: { workspaceId: workspace.id, status: "connected" },
-    select: { id: true, name: true },
+  // Pick the agent.
+  //
+  // Canonical agent status values in this codebase: "online" |
+  // "offline" | "unknown" (Phase 9 added "unknown" for never-pinged
+  // agents). The dashboard + agents page both filter on
+  // status === "online". An earlier version of this action filtered
+  // on status === "connected" — that string is NEVER actually set
+  // anywhere, so the query returned an empty set even when the
+  // runner was clearly online and the user got a false-negative
+  // "No connected runner" refusal.
+  //
+  // New policy: prefer agents with status "online", but fall back
+  // to any registered agent when only one exists in the workspace.
+  // Reason: status flips between "online" and "offline" based on
+  // the last /events ping; a runner that's been quiet for a few
+  // minutes can read as "offline" even when its process is still
+  // up. The actual dispatch network call surfaces real failures
+  // clearly enough — we don't need to pre-refuse based on a stale
+  // status field.
+  const allAgents = await db.agent.findMany({
+    where: { workspaceId: workspace.id },
+    select: { id: true, name: true, status: true },
   });
-  if (agents.length === 0) {
+  const onlineAgents = allAgents.filter((a) => a.status === "online");
+
+  let agentId: string;
+  if (onlineAgents.length === 1) {
+    agentId = onlineAgents[0].id;
+  } else if (onlineAgents.length > 1) {
     return {
       ok: false,
       jobId: "",
       message:
-        "No connected runner. Start your runner and try again, or open " +
-        "the bulk Generate images panel to register one.",
-    };
-  }
-  if (agents.length > 1) {
-    return {
-      ok: false,
-      jobId: "",
-      message:
-        "Multiple connected runners — use the bulk Generate images panel " +
+        "Multiple runners online — use the bulk Generate images panel " +
         "to pick which one handles this product.",
     };
+  } else if (allAgents.length === 1) {
+    // No "online" runners, but exactly one registered. Try it
+    // anyway — its status field may just be stale.
+    agentId = allAgents[0].id;
+  } else if (allAgents.length === 0) {
+    return {
+      ok: false,
+      jobId: "",
+      message:
+        "No runner registered for this workspace. Set one up via the " +
+        "Runner page, then try again.",
+    };
+  } else {
+    // Multiple agents but none marked online. Refuse — too
+    // ambiguous to pick automatically.
+    return {
+      ok: false,
+      jobId: "",
+      message:
+        `${allAgents.length} runners registered but none currently marked online. ` +
+        "Use the bulk Generate images panel to pick which one to dispatch to.",
+    };
   }
-  const agentId = agents[0].id;
 
   // Build the item payload — mirrors GenerateImagesPanel.submit's
   // per-item shape exactly so the runner sees an identical envelope
