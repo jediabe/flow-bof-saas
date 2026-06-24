@@ -2269,3 +2269,166 @@ export async function setFlowItemBindState(
   revalidatePath(`/batches/${batchId}`);
   return { ok: true, message: `State set to ${stateRaw}.` };
 }
+
+// ---------------------------------------------------------------------
+// Per-product image generation
+// ---------------------------------------------------------------------
+//
+// Fires a single-item `generate_flow_images` job for one product so the
+// user can re-run / kick off gen from inside an expanded product card
+// without opening the bulk Generate Images sheet. Reuses createSampleJob
+// so the workspace's cooldown + daily-cap gates apply identically to
+// bulk dispatches — there's no "back door" past the anti-block
+// protections.
+//
+// Picks the agent automatically:
+//   - prefer the single connected agent if there's exactly one
+//   - otherwise return an error pointing the user at the bulk panel
+//     (where they can pick an agent explicitly)
+//
+// Returns the same shape as createSampleJob so the caller can use it
+// directly in a useTransition + router.refresh pattern.
+
+import { createSampleJob } from "@/app/jobs/actions";
+
+export async function generateImagesForOneProduct(input: {
+  batchId: string;
+  productId: string;
+}): Promise<{ ok: boolean; jobId: string; message: string }> {
+  const { workspace } = await getCurrentWorkspace();
+
+  const batch = await db.batch.findFirst({
+    where: { id: input.batchId, workspaceId: workspace.id },
+    select: { id: true },
+  });
+  if (!batch) {
+    return { ok: false, jobId: "", message: "Batch not found." };
+  }
+
+  const product = await db.product.findFirst({
+    where: {
+      id: input.productId,
+      batchId: batch.id,
+      deletedAt: null,
+    },
+    select: {
+      id: true,
+      productName: true,
+      imagePrompt: true,
+      referenceImageUrl: true,
+      referenceImagePathLocal: true,
+      images: {
+        where: { role: { in: ["primary", "ref2", "ref3"] } },
+        orderBy: { role: "asc" },
+        select: { role: true, url: true, pathLocal: true },
+      },
+    },
+  });
+  if (!product) {
+    return { ok: false, jobId: "", message: "Product not found." };
+  }
+
+  // Eligibility — mirror the bulk panel's checks so the failure
+  // mode is identical regardless of entry point.
+  if (!product.imagePrompt || !product.imagePrompt.trim()) {
+    return {
+      ok: false,
+      jobId: "",
+      message:
+        "Product has no image prompt yet — run AI Prompt Generation first " +
+        "(Needs Review lane → Generate AI prompts).",
+    };
+  }
+  const hasRef =
+    !!product.referenceImageUrl ||
+    !!product.referenceImagePathLocal ||
+    product.images.some((img) => img.url || img.pathLocal);
+  if (!hasRef) {
+    return {
+      ok: false,
+      jobId: "",
+      message:
+        "Product has no reference image. Add one to the card and try again.",
+    };
+  }
+
+  // Pick the agent. Single connected agent → use it; multiple → ask
+  // the user to use the bulk panel where they can pick explicitly.
+  const agents = await db.agent.findMany({
+    where: { workspaceId: workspace.id, status: "connected" },
+    select: { id: true, name: true },
+  });
+  if (agents.length === 0) {
+    return {
+      ok: false,
+      jobId: "",
+      message:
+        "No connected runner. Start your runner and try again, or open " +
+        "the bulk Generate images panel to register one.",
+    };
+  }
+  if (agents.length > 1) {
+    return {
+      ok: false,
+      jobId: "",
+      message:
+        "Multiple connected runners — use the bulk Generate images panel " +
+        "to pick which one handles this product.",
+    };
+  }
+  const agentId = agents[0].id;
+
+  // Build the item payload — mirrors GenerateImagesPanel.submit's
+  // per-item shape exactly so the runner sees an identical envelope
+  // for bulk and single dispatches.
+  const refs = product.images
+    .filter((img) => img.url || img.pathLocal)
+    .slice(0, 3);
+  const refCount = refs.length;
+
+  // Multi-reference preamble (PART 9 of v0.7 roadmap) only applied
+  // when there's more than one reference. Kept byte-identical with
+  // the bulk panel's wording so the AI behaviour is consistent.
+  let finalPrompt = product.imagePrompt;
+  if (refCount > 1) {
+    finalPrompt =
+      "Use all provided reference images together to understand " +
+      "the same product. Treat them as different views or details " +
+      "of one product, not separate products. Combine the " +
+      "consistent product design, packaging, color, shape, and " +
+      "visible branding into one realistic product display. Do " +
+      "not create a collage. Do not show multiple variants unless " +
+      "the product is naturally sold as a set.\n\n" + finalPrompt;
+  }
+
+  const item: Record<string, unknown> = {
+    item_id:      product.id,
+    product_name: product.productName,
+    image_prompt: finalPrompt,
+  };
+  if (product.referenceImageUrl) {
+    item.reference_image_url = toAgentAssetUrl(product.referenceImageUrl);
+  }
+  if (product.referenceImagePathLocal) {
+    item.reference_image_path = product.referenceImagePathLocal;
+  }
+  if (refCount > 0) {
+    item.reference_images = refs.map((img) => ({
+      role: img.role,
+      url:  img.url ? toAgentAssetUrl(img.url) : null,
+      path: img.pathLocal,
+    }));
+  }
+
+  return await createSampleJob({
+    jobType: "generate_flow_images",
+    agentId,
+    batchId: input.batchId,
+    payload: {
+      items:           [item],
+      limit:           1,
+      wait_mode:       "submit_only",
+      automation_mode: "family_plan",
+    },
+  });
+}

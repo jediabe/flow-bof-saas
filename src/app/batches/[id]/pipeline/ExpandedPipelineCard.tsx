@@ -15,6 +15,7 @@ import {
   setProductReviewStatus,
   generateAiPromptForProduct,
   attachProductImageFromBlob,
+  generateImagesForOneProduct,
 } from "../../actions";
 import type { Stage } from "@/lib/batch-stages";
 
@@ -177,6 +178,22 @@ export default function ExpandedPipelineCard({
         productId: product.id,
         force: true,
         useVision: aiVision,
+      });
+      if (!r.ok) setError(r.message);
+      router.refresh();
+    });
+  }
+
+  function generateImage() {
+    // Single-product image-gen dispatch. Goes through the same
+    // createSampleJob path as the bulk panel, so the workspace's
+    // cooldown + daily-cap gates apply identically — no back door
+    // around the anti-block protections.
+    setError(null);
+    startTransition(async () => {
+      const r = await generateImagesForOneProduct({
+        batchId,
+        productId: product.id,
       });
       if (!r.ok) setError(r.message);
       router.refresh();
@@ -433,14 +450,36 @@ export default function ExpandedPipelineCard({
           </>
         )}
         {stage === "ready" && (
+          <>
+            <button
+              type="button"
+              className="btn btn-primary text-xs"
+              onClick={generateImage}
+              disabled={pending}
+              title="Dispatch image generation for THIS product only. Same cooldown / daily-cap rules apply as the bulk panel."
+            >
+              ⚡ Generate image
+            </button>
+            <button
+              type="button"
+              className="btn text-xs"
+              onClick={() => setReview("needs_review")}
+              disabled={pending}
+              title="Send this product back to Needs review"
+            >
+              ← Back to review
+            </button>
+          </>
+        )}
+        {stage === "generated" && (
           <button
             type="button"
             className="btn text-xs"
-            onClick={() => setReview("needs_review")}
+            onClick={generateImage}
             disabled={pending}
-            title="Send this product back to Needs review"
+            title="Re-run image generation for this product. Useful when the previous result wasn't what you wanted."
           >
-            ← Back to review
+            ⟲ Re-generate image
           </button>
         )}
         <button
