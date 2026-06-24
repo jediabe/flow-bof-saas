@@ -43,13 +43,20 @@ async function checkFlowDispatchGuards(input: {
   workspaceId: string;
   jobType: string;
   requestedItems: number;
+  /** When true, skip the cooldown check. The daily cap still
+   *  applies (volume signal is a hard limit; cooldown is more
+   *  about "session score is recovering"). Used by the per-
+   *  product "Generate anyway" button so an operator who knows
+   *  the account is healthy can push one through without
+   *  waiting the full cooldown window. */
+  bypassCooldown?: boolean;
 }): Promise<{ ok: true } | { ok: false; message: string }> {
   const settings = await loadOrCreateSettings(input.workspaceId);
   const isVideo = input.jobType === "generate_flow_videos_from_favorites";
   const actionLabel = isVideo ? "video gen" : "image gen";
 
-  // 1. Cooldown check.
-  if (settings.lastUnusualActivityAt) {
+  // 1. Cooldown check (skipped when bypassCooldown is set).
+  if (!input.bypassCooldown && settings.lastUnusualActivityAt) {
     const cooldownMs = settings.cooldownHours * 60 * 60 * 1000;
     const elapsed = Date.now() - settings.lastUnusualActivityAt.getTime();
     if (elapsed < cooldownMs) {
@@ -160,6 +167,12 @@ export async function createSampleJob(input: {
   agentId: string;
   batchId?: string | null;
   payload?: Record<string, unknown>;
+  /** When true, the cooldown gate is skipped at dispatch time.
+   *  Daily cap still applies. Designed for the per-product
+   *  "Generate anyway" button — an operator who knows the account
+   *  is healthy can push a single product through without waiting
+   *  the full cooldown. */
+  bypassCooldown?: boolean;
 }): Promise<{ ok: boolean; jobId: string; message: string }> {
   const { workspace } = await getCurrentWorkspace();
 
@@ -207,6 +220,7 @@ export async function createSampleJob(input: {
       workspaceId: workspace.id,
       jobType: input.jobType,
       requestedItems,
+      bypassCooldown: input.bypassCooldown === true,
     });
     if (!guard.ok) {
       return { ok: false, jobId: "", message: guard.message };

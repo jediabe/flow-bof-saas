@@ -614,6 +614,7 @@ export default async function BatchDetail({
         productsCompact={productsCompact}
         productsExpandedById={productsExpandedById}
         externalLinks={externalLinks}
+        inCooldown={inCooldown}
         actionPanels={{
           addProducts: addProductsPanel,
           aiPrompts:   aiPromptsActionPanel,

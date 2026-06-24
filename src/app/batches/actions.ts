@@ -2294,6 +2294,12 @@ import { createSampleJob } from "@/app/jobs/actions";
 export async function generateImagesForOneProduct(input: {
   batchId: string;
   productId: string;
+  /** When true, skip the workspace cooldown check at dispatch.
+   *  Daily cap still applies. Used by the "Generate anyway"
+   *  button so an operator who knows the account is healthy can
+   *  push a single product through without waiting out the full
+   *  cooldown window. */
+  bypassCooldown?: boolean;
 }): Promise<{ ok: boolean; jobId: string; message: string }> {
   const { workspace } = await getCurrentWorkspace();
 
@@ -2430,5 +2436,6 @@ export async function generateImagesForOneProduct(input: {
       wait_mode:       "submit_only",
       automation_mode: "family_plan",
     },
+    bypassCooldown: input.bypassCooldown === true,
   });
 }

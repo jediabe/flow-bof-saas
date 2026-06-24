@@ -86,6 +86,11 @@ export interface BatchPageClientProps {
   /** Workspace-level IP risk toggle. Forwarded to ExpandedPipelineCard
    *  so the IP risk surface stays hidden when the user has opted out. */
   ipRiskChecksEnabled?: boolean;
+  /** Whether the workspace is currently in unusual-activity cooldown.
+   *  Forwarded to ExpandedPipelineCard so the per-product "Generate
+   *  image" button can morph into "Generate anyway" with a force flag
+   *  that bypasses the cooldown gate (but not the daily cap). */
+  inCooldown?: boolean;
 }
 
 export default function BatchPageClient({
@@ -97,6 +102,7 @@ export default function BatchPageClient({
   actionPanels,
   externalLinks,
   ipRiskChecksEnabled = false,
+  inCooldown = false,
 }: BatchPageClientProps) {
   const router = useRouter();
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -323,6 +329,7 @@ export default function BatchPageClient({
               stage={p.stage}
               onClose={onClose}
               ipRiskChecksEnabled={ipRiskChecksEnabled}
+              inCooldown={inCooldown}
             />
           );
         }}

@@ -81,6 +81,7 @@ export default function ExpandedPipelineCard({
   stage,
   onClose,
   ipRiskChecksEnabled = true,
+  inCooldown = false,
 }: {
   product: ExpandedCardProduct;
   batchId: string;
@@ -90,6 +91,12 @@ export default function ExpandedPipelineCard({
    *  is hidden entirely so the user isn't reminded of a feature
    *  they've opted out of. Defaults to true for back-compat. */
   ipRiskChecksEnabled?: boolean;
+  /** When true, the per-product Generate-image button morphs into
+   *  "Generate anyway" and passes bypassCooldown=true to the
+   *  dispatch action. Lets the operator push one through manually
+   *  when they know the account is healthy. Daily cap still
+   *  applies. */
+  inCooldown?: boolean;
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
@@ -184,16 +191,20 @@ export default function ExpandedPipelineCard({
     });
   }
 
-  function generateImage() {
+  function generateImage(opts?: { force?: boolean }) {
     // Single-product image-gen dispatch. Goes through the same
-    // createSampleJob path as the bulk panel, so the workspace's
-    // cooldown + daily-cap gates apply identically — no back door
-    // around the anti-block protections.
+    // createSampleJob path as the bulk panel, so the daily-cap +
+    // (optionally) cooldown gates apply identically.
+    //
+    // opts.force=true bypasses the cooldown gate — used by the
+    // "Generate anyway" button in cooldown. Daily cap still
+    // applies (different threshold; volume signal is a hard limit).
     setError(null);
     startTransition(async () => {
       const r = await generateImagesForOneProduct({
         batchId,
         productId: product.id,
+        bypassCooldown: opts?.force === true,
       });
       if (!r.ok) setError(r.message);
       router.refresh();
@@ -451,15 +462,31 @@ export default function ExpandedPipelineCard({
         )}
         {stage === "ready" && (
           <>
-            <button
-              type="button"
-              className="btn btn-primary text-xs"
-              onClick={generateImage}
-              disabled={pending}
-              title="Dispatch image generation for THIS product only. Same cooldown / daily-cap rules apply as the bulk panel."
-            >
-              ⚡ Generate image
-            </button>
+            {inCooldown ? (
+              <button
+                type="button"
+                className="btn btn-danger text-xs"
+                onClick={() => generateImage({ force: true })}
+                disabled={pending}
+                title={
+                  "Workspace is in unusual-activity cooldown. " +
+                  "Clicking this will dispatch anyway — daily cap still applies. " +
+                  "Only do this if you've verified the account is healthy (e.g. just used Flow manually with no errors)."
+                }
+              >
+                ⚠ Generate anyway (bypass cooldown)
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="btn btn-primary text-xs"
+                onClick={() => generateImage()}
+                disabled={pending}
+                title="Dispatch image generation for THIS product only. Same cooldown / daily-cap rules apply as the bulk panel."
+              >
+                ⚡ Generate image
+              </button>
+            )}
             <button
               type="button"
               className="btn text-xs"
@@ -472,15 +499,31 @@ export default function ExpandedPipelineCard({
           </>
         )}
         {stage === "generated" && (
-          <button
-            type="button"
-            className="btn text-xs"
-            onClick={generateImage}
-            disabled={pending}
-            title="Re-run image generation for this product. Useful when the previous result wasn't what you wanted."
-          >
-            ⟲ Re-generate image
-          </button>
+          inCooldown ? (
+            <button
+              type="button"
+              className="btn btn-danger text-xs"
+              onClick={() => generateImage({ force: true })}
+              disabled={pending}
+              title={
+                "Workspace is in unusual-activity cooldown. " +
+                "Clicking this will re-run anyway — daily cap still applies. " +
+                "Only do this if you've verified the account is healthy."
+              }
+            >
+              ⚠ Re-generate anyway (bypass cooldown)
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="btn text-xs"
+              onClick={() => generateImage()}
+              disabled={pending}
+              title="Re-run image generation for this product. Useful when the previous result wasn't what you wanted."
+            >
+              ⟲ Re-generate image
+            </button>
+          )
         )}
         <button
           type="button"
