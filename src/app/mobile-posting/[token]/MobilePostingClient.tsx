@@ -1,36 +1,21 @@
 "use client";
 
 /**
- * Phone-first posting-assist UI (v2 — full-screen single-product
- * design with whole-card tap-to-copy, hook-variant cycling, and
- * swipe navigation).
+ * Phone-first posting-assist UI.
  *
- * Workflow this is tuned for:
- *   1. User opens this page on their phone alongside TikTok.
- *   2. For each product:
- *      a. TAP the hook card → clipboard now has the hook.
- *      b. Switch to TikTok video editor, paste as text overlay.
- *      c. Switch back, optionally cycle to a different hook variant.
- *      d. TAP the caption card → paste into TikTok's caption box.
- *      e. TAP the hashtags card → append to caption.
- *      f. TAP "Mark posted ✓" → auto-advances to next product.
- *   3. Repeat until done.
+ * Per-product card with copy buttons for hook / caption / hashtags
+ * / productDescription, an "Open in TikTok Shop" chip, and three
+ * status pills (needs_posting / posted / skipped). The user works
+ * down the list, copy-pasting each piece into the TikTok app as
+ * they upload manually-downloaded Flow videos.
  *
- * Key design decisions:
- *   - The whole COPY card is the tap target (not a tiny button in the
- *     corner). Thumb-friendly while glancing between apps.
- *   - Only ONE hook variant is shown at a time, with cycle arrows.
- *     The user picks one per post; showing 5-7 stacked makes the
- *     primary action ambiguous and forces scrolling.
- *   - "Mark posted ✓ → next" is a giant primary CTA at the bottom.
- *     Skip / Reset are secondary chips.
- *   - Horizontal swipe (touch) jumps between products. Matches phone
- *     conventions; reduces hand reach to top-of-screen nav buttons.
- *   - productDescription is hidden behind a "More" disclosure —
- *     used rarely; doesn't deserve hero space.
+ * No video upload happens here — the SaaS deliberately doesn't
+ * store final videos; the user downloads them from Google Flow
+ * and uploads via the TikTok app themselves. This page exists to
+ * make the COPY workflow phone-friendly.
  */
 
-import { useEffect, useMemo, useRef, useState, useTransition } from "react";
+import { useMemo, useState, useTransition } from "react";
 import { setProductPostingStatusViaToken } from "@/app/batches/actions";
 
 export type PostingStatus = "needs_posting" | "posted" | "skipped";
@@ -42,6 +27,10 @@ export interface MobilePostingProduct {
   referenceImageUrl: string | null;
   imageUrl: string | null;
   hook: string | null;
+  /** All hook variants the AI generated for this product. UK = 5
+   *  or 6 templates (A1..B3); US = 7 levers. Empty for products
+   *  generated before the multi-hook prompts shipped — in that
+   *  case the UI falls back to the single `hook` field. */
   hookVariants: Array<{
     label: string;
     text: string;
@@ -50,14 +39,33 @@ export interface MobilePostingProduct {
   caption: string | null;
   hashtags: string[];
   productDescription: string | null;
+  /** Short (<=30 char) text that displays as the link-sticker
+   *  label on the posted TikTok. The AI prompt is asked to
+   *  condense the product into this; falls back to null for
+   *  products generated before the field was added. */
+  productLinkDescription: string | null;
   postingStatus: PostingStatus;
   postingNotes: string | null;
 }
 
-const STATUS_PILL: Record<PostingStatus, { bg: string; text: string; label: string }> = {
-  needs_posting: { bg: "bg-orange-500/15", text: "text-orange-400", label: "Needs posting" },
-  posted:        { bg: "bg-green-500/15",  text: "text-green-400",  label: "Posted" },
-  skipped:       { bg: "bg-zinc-500/15",   text: "text-zinc-300",   label: "Skipped" },
+/** Hard limit for productLinkDescription. TikTok truncates the
+ *  visible link-sticker label; 30 chars keeps it readable on a
+ *  phone-width feed view without ellipsis. */
+const PRODUCT_LINK_DESC_MAX = 30;
+
+const STATUS_LABEL: Record<PostingStatus, string> = {
+  needs_posting: "Needs posting",
+  posted:        "Posted",
+  skipped:       "Skipped",
+};
+
+const STATUS_PILL: Record<
+  PostingStatus,
+  { bg: string; text: string }
+> = {
+  needs_posting: { bg: "bg-orange-500/15", text: "text-orange-400" },
+  posted:        { bg: "bg-green-500/15",  text: "text-green-400" },
+  skipped:       { bg: "bg-zinc-500/15",   text: "text-zinc-300" },
 };
 
 export default function MobilePostingClient({
@@ -73,29 +81,29 @@ export default function MobilePostingClient({
 }) {
   const [products, setProducts] = useState<MobilePostingProduct[]>(initial);
   const [index, setIndex] = useState<number>(() =>
-    Math.max(0, initial.findIndex((p) => p.postingStatus === "needs_posting")),
+    Math.max(
+      0,
+      initial.findIndex((p) => p.postingStatus === "needs_posting"),
+    ),
   );
   const [pending, startTransition] = useTransition();
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  // Which hook variant is currently shown. Resets to 0 whenever the
-  // user navigates to a different product — picking a hook is a
-  // per-post decision.
-  const [hookIndex, setHookIndex] = useState(0);
-  useEffect(() => setHookIndex(0), [index]);
-
   const counts = useMemo(() => {
-    const c: Record<PostingStatus, number> = { needs_posting: 0, posted: 0, skipped: 0 };
+    const c: Record<PostingStatus, number> = {
+      needs_posting: 0,
+      posted:        0,
+      skipped:       0,
+    };
     for (const p of products) c[p.postingStatus]++;
     return c;
   }, [products]);
 
-  const total = products.length;
   const remaining = counts.needs_posting;
-  const done = remaining === 0 && total > 0;
+  const done = remaining === 0 && products.length > 0;
   const current = products[index] ?? null;
 
-  function advanceToNextPending(fromIndex: number): void {
+  function advanceToNext(fromIndex: number): void {
     for (let i = fromIndex + 1; i < products.length; i++) {
       if (products[i].postingStatus === "needs_posting") {
         setIndex(i);
@@ -108,15 +116,6 @@ export default function MobilePostingClient({
         return;
       }
     }
-    // If nothing else needs posting, fall through — the parent
-    // will switch to the DoneScreen on next render.
-  }
-
-  function goPrev() {
-    setIndex((i) => Math.max(0, i - 1));
-  }
-  function goNext() {
-    setIndex((i) => Math.min(total - 1, i + 1));
   }
 
   function applyStatus(status: PostingStatus): void {
@@ -135,10 +134,15 @@ export default function MobilePostingClient({
         return;
       }
       setProducts((prev) =>
-        prev.map((p) => (p.id === productId ? { ...p, postingStatus: status } : p)),
+        prev.map((p) =>
+          p.id === productId ? { ...p, postingStatus: status } : p,
+        ),
       );
+      // Only auto-advance when marking posted / skipped — if the
+      // user reset to needs_posting they probably want to stay on
+      // the current product.
       if (status !== "needs_posting") {
-        advanceToNextPending(i);
+        advanceToNext(i);
       }
     });
   }
@@ -149,11 +153,12 @@ export default function MobilePostingClient({
         batchName={batchName}
         batchMarket={batchMarket}
         counts={counts}
-        total={total}
+        total={products.length}
         onReviewAgain={() => setIndex(0)}
       />
     );
   }
+
   if (!current) {
     return (
       <Shell>
@@ -162,148 +167,191 @@ export default function MobilePostingClient({
     );
   }
 
-  // The active hook to show. Prefer the hookVariants array, fall
-  // back to the single legacy hook string when variants are empty.
-  const activeHook: { label: string; text: string; leverName?: string } | null =
-    current.hookVariants.length > 0
-      ? current.hookVariants[hookIndex % current.hookVariants.length]
-      : current.hook
-        ? { label: "Hook", text: current.hook }
-        : null;
-
-  const variantCount = current.hookVariants.length;
-  const hashtagsLine =
-    current.hashtags.length > 0 ? current.hashtags.join(" ") : null;
+  const total = products.length;
+  const progress = ((index + 1) / total) * 100;
 
   return (
-    <SwipeShell onSwipeLeft={goNext} onSwipeRight={goPrev}>
-      <ProgressHeader
-        batchName={batchName}
-        batchMarket={batchMarket}
-        index={index}
-        total={total}
-        remaining={remaining}
-        products={products}
-        onJumpTo={setIndex}
-      />
+    <Shell>
+      {/* Top bar */}
+      <header className="px-4 pt-4 pb-2">
+        <div className="text-[11px] text-zinc-400 uppercase tracking-wide">
+          {batchName} · {batchMarket.toUpperCase()} · Posting assist
+        </div>
+        <div className="mt-1 text-sm text-zinc-200">
+          Product <span className="font-medium">{index + 1}</span> of {total}
+          {remaining > 0 && (
+            <span className="text-zinc-400">
+              {" "}· {remaining} need posting
+            </span>
+          )}
+        </div>
+        <div className="mt-2 h-1 w-full bg-zinc-800 rounded-full overflow-hidden">
+          <div
+            className="h-full bg-blue-500 transition-all"
+            style={{ width: `${progress}%` }}
+          />
+        </div>
+      </header>
 
-      <ProductHeader product={current} />
+      {/* Image + name */}
+      <div className="px-4 pt-2 flex gap-3 items-start">
+        <div className="w-20 h-20 shrink-0 rounded-xl bg-zinc-900 overflow-hidden">
+          {current.referenceImageUrl ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={current.referenceImageUrl}
+              alt={current.productName}
+              className="w-full h-full object-cover"
+            />
+          ) : current.imageUrl ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={current.imageUrl}
+              alt={current.productName}
+              className="w-full h-full object-cover"
+            />
+          ) : (
+            <div className="w-full h-full flex items-center justify-center text-zinc-500 text-[10px]">
+              no img
+            </div>
+          )}
+        </div>
+        <div className="min-w-0 flex-1">
+          <CopyableTitle value={current.productName} />
+          <div className="mt-1.5 flex items-center gap-2 flex-wrap">
+            <span
+              className={`inline-flex items-center text-xs px-2.5 py-1 rounded-full ${STATUS_PILL[current.postingStatus].bg} ${STATUS_PILL[current.postingStatus].text}`}
+            >
+              {STATUS_LABEL[current.postingStatus]}
+            </span>
+            {current.tiktokUrl ? (
+              <a
+                href={current.tiktokUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center text-xs px-3 py-1 rounded-full bg-blue-500/15 text-blue-300 active:bg-blue-500/30"
+              >
+                Open in TikTok Shop ↗
+              </a>
+            ) : null}
+          </div>
+        </div>
+      </div>
 
-      {/* Hook — full-card tap-to-copy with variant cycle */}
-      <section className="px-4 pt-4">
-        <SectionTitle
-          left="Hook → text overlay in TikTok editor"
-          right={
-            variantCount > 1
-              ? `Variant ${hookIndex + 1} of ${variantCount}`
+      {/* Copy blocks */}
+      <section className="px-4 pt-5 space-y-3">
+        {/* Hook variants — one CopyBlock per variant so the user
+            can pick the framing they want for THIS post. Each
+            block shows the variant label (A1 / lever-1 / ...) so
+            the user can rotate variants across posts without
+            having to remember which one they used. Falls back to
+            the single hook field for older products that don't
+            have variants stored. */}
+        {current.hookVariants.length > 0 ? (
+          <div className="space-y-2.5">
+            <div className="text-[11px] text-zinc-400 uppercase tracking-wide">
+              Hook variants ({current.hookVariants.length}) — pick one per post
+            </div>
+            {current.hookVariants.map((v, i) => (
+              <CopyBlock
+                key={`${v.label}-${i}`}
+                label={
+                  v.leverName
+                    ? `Hook · ${v.label} — ${v.leverName}`
+                    : `Hook · ${v.label}`
+                }
+                value={v.text}
+                placeholder=""
+                multiline
+              />
+            ))}
+          </div>
+        ) : (
+          <CopyBlock
+            label="Hook"
+            value={current.hook}
+            placeholder="No hook generated yet. Run AI prompts on the desktop."
+            multiline
+          />
+        )}
+        <CopyBlock
+          label="Caption"
+          value={current.caption}
+          placeholder="No caption yet."
+        />
+        <CopyBlock
+          label="Hashtags"
+          value={current.hashtags.length > 0 ? current.hashtags.join(" ") : null}
+          placeholder="No hashtags yet."
+        />
+        <CopyBlock
+          label="Product description"
+          value={current.productDescription}
+          placeholder="No description yet."
+          multiline
+        />
+        {/* Link-sticker overlay text. TikTok truncates the visible
+            label, so the AI prompt is asked to condense the
+            product into <=30 chars. We surface the live count + a
+            warning if the stored value exceeds the limit (older
+            data or a manual edit that drifted). */}
+        <CopyBlock
+          label={`Product link description (${
+            current.productLinkDescription?.length ?? 0
+          }/${PRODUCT_LINK_DESC_MAX})`}
+          value={current.productLinkDescription}
+          placeholder={`Up to ${PRODUCT_LINK_DESC_MAX} chars — TikTok link-sticker overlay. Re-run AI prompts to fill.`}
+          warning={
+            current.productLinkDescription &&
+            current.productLinkDescription.length > PRODUCT_LINK_DESC_MAX
+              ? `Over ${PRODUCT_LINK_DESC_MAX} chars — TikTok will truncate.`
               : null
           }
         />
-        <CopyCard
-          value={activeHook?.text ?? null}
-          empty="No hook generated yet. Run AI prompts on desktop."
-          subLabel={activeHook?.leverName ?? activeHook?.label}
-          accent="hook"
-        />
-        {variantCount > 1 && (
-          <VariantCycler
-            count={variantCount}
-            index={hookIndex}
-            onChange={setHookIndex}
-          />
-        )}
       </section>
 
-      {/* Caption */}
-      <section className="px-4 pt-5">
-        <SectionTitle left="Caption → paste into TikTok post screen" />
-        <CopyCard
-          value={current.caption}
-          empty="No caption yet."
-          accent="caption"
-        />
-      </section>
-
-      {/* Hashtags */}
-      <section className="px-4 pt-4">
-        <SectionTitle left="Hashtags → append to caption" />
-        <CopyCard
-          value={hashtagsLine}
-          empty="No hashtags yet."
-          accent="hashtags"
-        />
-      </section>
-
-      {/* More — productDescription tucked away */}
-      {current.productDescription && (
-        <section className="px-4 pt-4">
-          <details className="rounded-2xl bg-zinc-900/60 px-3 py-2">
-            <summary className="text-xs text-zinc-400 cursor-pointer select-none">
-              More: product description
-            </summary>
-            <div className="mt-2 text-sm text-zinc-200 leading-relaxed">
-              {current.productDescription}
-            </div>
-          </details>
-        </section>
-      )}
-
-      {/* Hero "Mark posted & next" CTA */}
-      <section className="px-4 pt-6 pb-2 space-y-2">
-        <button
-          type="button"
-          onClick={() => applyStatus("posted")}
+      {/* Status pill row */}
+      <section className="px-4 pt-6 grid grid-cols-3 gap-2">
+        <StatusBtn
+          label="Posted"
+          color="bg-green-600 active:bg-green-700"
+          active={current.postingStatus === "posted"}
           disabled={pending}
-          className="w-full py-4 rounded-2xl bg-green-600 active:bg-green-700 disabled:opacity-50 text-base font-semibold text-white shadow-lg shadow-green-900/30"
-        >
-          {current.postingStatus === "posted"
-            ? "✓ Marked posted — tap to advance"
-            : "✓ Mark posted & next"}
-        </button>
-        <div className="grid grid-cols-2 gap-2">
-          <button
-            type="button"
-            onClick={() => applyStatus("skipped")}
-            disabled={pending}
-            className={`py-3 rounded-2xl text-sm font-medium text-zinc-200 transition-colors disabled:opacity-50 ${
-              current.postingStatus === "skipped"
-                ? "bg-zinc-600 ring-2 ring-blue-400/60"
-                : "bg-zinc-800 active:bg-zinc-700"
-            }`}
-          >
-            Skip
-          </button>
-          <button
-            type="button"
-            onClick={() => applyStatus("needs_posting")}
-            disabled={pending || current.postingStatus === "needs_posting"}
-            className="py-3 rounded-2xl text-sm font-medium text-zinc-300 bg-zinc-900 border border-zinc-800 active:bg-zinc-800 disabled:opacity-50"
-          >
-            Reset
-          </button>
-        </div>
+          onTap={() => applyStatus("posted")}
+        />
+        <StatusBtn
+          label="Skip"
+          color="bg-zinc-700 active:bg-zinc-600"
+          active={current.postingStatus === "skipped"}
+          disabled={pending}
+          onTap={() => applyStatus("skipped")}
+        />
+        <StatusBtn
+          label="Reset"
+          color="bg-zinc-800 border border-zinc-700 active:bg-zinc-700"
+          active={current.postingStatus === "needs_posting"}
+          disabled={pending}
+          onTap={() => applyStatus("needs_posting")}
+        />
       </section>
 
-      {/* Prev / Next product nav — kept for accessibility (swipe is
-          the primary nav, but tap targets are needed for users who
-          can't or don't swipe). */}
-      <nav className="px-4 pt-4 pb-8 flex items-center justify-between">
+      {/* Prev/Next nav */}
+      <nav className="px-4 pt-5 pb-6 flex items-center justify-between">
         <button
           type="button"
-          onClick={goPrev}
+          onClick={() => setIndex((i) => Math.max(0, i - 1))}
           disabled={index === 0 || pending}
           className="px-4 py-2 text-sm text-zinc-300 disabled:text-zinc-600"
         >
-          ← Previous product
+          ← Previous
         </button>
-        <span className="text-xs text-zinc-500">swipe ↔</span>
         <button
           type="button"
-          onClick={goNext}
+          onClick={() => setIndex((i) => Math.min(total - 1, i + 1))}
           disabled={index >= total - 1 || pending}
           className="px-4 py-2 text-sm text-zinc-300 disabled:text-zinc-600"
         >
-          Next product →
+          Next →
         </button>
       </nav>
 
@@ -312,11 +360,9 @@ export default function MobilePostingClient({
           {errorMsg}
         </div>
       )}
-    </SwipeShell>
+    </Shell>
   );
 }
-
-/* ---------- pieces ---------- */
 
 function Shell({ children }: { children: React.ReactNode }) {
   return (
@@ -326,180 +372,20 @@ function Shell({ children }: { children: React.ReactNode }) {
   );
 }
 
-function SwipeShell({
-  children,
-  onSwipeLeft,
-  onSwipeRight,
-}: {
-  children: React.ReactNode;
-  onSwipeLeft: () => void;
-  onSwipeRight: () => void;
-}) {
-  // Plain touch tracking — no library. Threshold of 60px and a
-  // vertical-drift guard so a downward scroll doesn't accidentally
-  // fire a swipe. iOS Safari fires touchend after pointer leaves
-  // the element, so we attach to the outer container to capture.
-  const start = useRef<{ x: number; y: number; t: number } | null>(null);
-
-  function onTouchStart(e: React.TouchEvent<HTMLDivElement>) {
-    const t = e.touches[0];
-    start.current = { x: t.clientX, y: t.clientY, t: Date.now() };
-  }
-  function onTouchEnd(e: React.TouchEvent<HTMLDivElement>) {
-    if (!start.current) return;
-    const t = e.changedTouches[0];
-    const dx = t.clientX - start.current.x;
-    const dy = t.clientY - start.current.y;
-    const dt = Date.now() - start.current.t;
-    start.current = null;
-    // Reject as a swipe if mostly vertical, too slow, or below the
-    // horizontal threshold.
-    if (Math.abs(dy) > 60) return;
-    if (dt > 800) return;
-    if (dx < -60) {
-      onSwipeLeft();
-    } else if (dx > 60) {
-      onSwipeRight();
-    }
-  }
-
-  return (
-    <div
-      className="min-h-screen bg-zinc-950 text-zinc-100 max-w-md mx-auto select-none"
-      onTouchStart={onTouchStart}
-      onTouchEnd={onTouchEnd}
-    >
-      {children}
-    </div>
-  );
-}
-
-function ProgressHeader({
-  batchName,
-  batchMarket,
-  index,
-  total,
-  remaining,
-  products,
-  onJumpTo,
-}: {
-  batchName: string;
-  batchMarket: string;
-  index: number;
-  total: number;
-  remaining: number;
-  products: MobilePostingProduct[];
-  onJumpTo: (i: number) => void;
-}) {
-  return (
-    <header className="px-4 pt-4 pb-2">
-      <div className="text-[11px] text-zinc-400 uppercase tracking-wide">
-        {batchName} · {batchMarket.toUpperCase()} · Posting assist
-      </div>
-      <div className="mt-1 text-sm text-zinc-200">
-        Product <span className="font-medium">{index + 1}</span> of {total}
-        {remaining > 0 && (
-          <span className="text-zinc-400"> · {remaining} need posting</span>
-        )}
-      </div>
-      {/* Dot row — one dot per product, colored by posting status.
-          Taps jump straight to that product. Helps with "let me go
-          back to the second one I skipped." */}
-      <div className="mt-2 flex flex-wrap gap-1">
-        {products.map((p, i) => {
-          const isCurrent = i === index;
-          const cls =
-            p.postingStatus === "posted"
-              ? "bg-green-500"
-              : p.postingStatus === "skipped"
-                ? "bg-zinc-600"
-                : "bg-orange-500";
-          return (
-            <button
-              key={p.id}
-              type="button"
-              onClick={() => onJumpTo(i)}
-              className={`h-2 ${
-                isCurrent ? "w-6 ring-2 ring-blue-400/60" : "w-2"
-              } rounded-full ${cls} transition-all`}
-              aria-label={`Jump to product ${i + 1}`}
-            />
-          );
-        })}
-      </div>
-    </header>
-  );
-}
-
-function ProductHeader({ product }: { product: MobilePostingProduct }) {
-  return (
-    <div className="px-4 pt-3 flex gap-3 items-start">
-      <div className="w-20 h-20 shrink-0 rounded-xl bg-zinc-900 overflow-hidden">
-        {product.referenceImageUrl ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            src={product.referenceImageUrl}
-            alt={product.productName}
-            className="w-full h-full object-cover"
-          />
-        ) : product.imageUrl ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            src={product.imageUrl}
-            alt={product.productName}
-            className="w-full h-full object-cover"
-          />
-        ) : (
-          <div className="w-full h-full flex items-center justify-center text-zinc-500 text-[10px]">
-            no img
-          </div>
-        )}
-      </div>
-      <div className="min-w-0 flex-1">
-        <h1 className="text-base font-medium text-zinc-100 leading-tight line-clamp-3">
-          {product.productName}
-        </h1>
-        <div className="mt-1.5 flex items-center gap-2 flex-wrap">
-          <span
-            className={`inline-flex items-center text-xs px-2.5 py-1 rounded-full ${STATUS_PILL[product.postingStatus].bg} ${STATUS_PILL[product.postingStatus].text}`}
-          >
-            {STATUS_PILL[product.postingStatus].label}
-          </span>
-          {product.tiktokUrl ? (
-            <a
-              href={product.tiktokUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center text-xs px-3 py-1 rounded-full bg-blue-500/15 text-blue-300 active:bg-blue-500/30"
-            >
-              Open in TikTok Shop ↗
-            </a>
-          ) : null}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function SectionTitle({ left, right }: { left: string; right?: string | null }) {
-  return (
-    <div className="mb-1.5 flex items-baseline justify-between gap-3">
-      <span className="text-[11px] uppercase tracking-wide text-zinc-400">{left}</span>
-      {right ? <span className="text-[11px] text-zinc-500">{right}</span> : null}
-    </div>
-  );
-}
-
-function CopyCard({
+function CopyBlock({
+  label,
   value,
-  empty,
-  subLabel,
-  accent,
+  placeholder,
+  multiline,
+  warning,
 }: {
+  label: string;
   value: string | null;
-  empty: string;
-  subLabel?: string;
-  accent: "hook" | "caption" | "hashtags";
+  placeholder: string;
+  multiline?: boolean;
+  /** Optional small warning shown below the value (e.g. for the
+   *  product-link-description over-30-chars case). */
+  warning?: string | null;
 }) {
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState(false);
@@ -529,74 +415,128 @@ function CopyCard({
     }
   }
 
-  const ringColor =
-    accent === "hook"
-      ? "ring-blue-500/50"
-      : accent === "caption"
-        ? "ring-purple-500/50"
-        : "ring-pink-500/50";
-  const bgColor =
-    copied
-      ? "bg-green-600/30 ring-2 ring-green-500/60"
-      : `bg-zinc-900 active:bg-zinc-800 ring-1 ${ringColor}`;
+  let btnLabel = "Copy";
+  if (copied) btnLabel = "Copied ✓";
+  if (error) btnLabel = "Failed";
 
   return (
-    <button
-      type="button"
-      onClick={copy}
-      disabled={!hasValue}
-      className={`w-full text-left rounded-2xl p-4 transition-colors ${bgColor} disabled:opacity-50 disabled:active:bg-zinc-900`}
-    >
-      {subLabel && (
-        <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-1">
-          {subLabel}
-        </div>
-      )}
+    <div className="rounded-2xl bg-zinc-900 p-3">
+      <div className="flex items-center justify-between mb-1.5">
+        <span className="text-[11px] uppercase tracking-wide text-zinc-400">
+          {label}
+        </span>
+        <button
+          type="button"
+          onClick={copy}
+          disabled={!hasValue}
+          className={`text-xs px-2.5 py-1 rounded-full transition-colors ${
+            hasValue
+              ? "bg-blue-500/15 text-blue-300 active:bg-blue-500/30"
+              : "bg-zinc-800 text-zinc-500"
+          }`}
+        >
+          {btnLabel}
+        </button>
+      </div>
       <div
-        className={`text-base leading-relaxed break-words whitespace-pre-wrap ${
-          hasValue ? "text-zinc-100" : "text-zinc-500 italic"
-        }`}
+        className={`text-sm text-zinc-100 break-words ${
+          multiline ? "leading-relaxed" : "leading-snug"
+        } ${!hasValue ? "text-zinc-500 italic" : ""}`}
       >
-        {hasValue ? value : empty}
+        {hasValue ? value : placeholder}
       </div>
-      <div className="mt-3 flex items-center justify-between">
-        <span className="text-[11px] uppercase tracking-wide text-zinc-500">
-          {error ? "Copy failed" : copied ? "Copied ✓" : "Tap card to copy"}
-        </span>
-        <span className="text-xl">
-          {copied ? "✓" : error ? "✗" : "📋"}
-        </span>
-      </div>
-    </button>
+      {warning ? (
+        <div className="mt-1.5 text-[11px] text-orange-400">
+          {warning}
+        </div>
+      ) : null}
+    </div>
   );
 }
 
-function VariantCycler({
-  count,
-  index,
-  onChange,
-}: {
-  count: number;
-  index: number;
-  onChange: (next: number) => void;
-}) {
+/**
+ * Title row at the top of each product card — shares CopyBlock's
+ * copy-to-clipboard behaviour but renders inline so the image +
+ * status pills stay alongside. Pre-redesign the title was an h1
+ * with no copy button; the user explicitly asked for the title
+ * to be copy-able again.
+ */
+function CopyableTitle({ value }: { value: string }) {
+  const [copied, setCopied] = useState(false);
+  const [error, setError] = useState(false);
+
+  async function copy() {
+    if (!value) return;
+    setError(false);
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(value);
+      } else {
+        const ta = document.createElement("textarea");
+        ta.value = value;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+      }
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      setError(true);
+      setTimeout(() => setError(false), 2000);
+    }
+  }
+
+  let btnLabel = "Copy";
+  if (copied) btnLabel = "Copied ✓";
+  if (error) btnLabel = "Failed";
+
   return (
-    <div className="mt-2 grid grid-cols-2 gap-2">
+    <div className="flex items-start gap-2">
+      <h1 className="text-base font-medium text-zinc-100 leading-tight flex-1 min-w-0 break-words">
+        {value}
+      </h1>
       <button
         type="button"
-        onClick={() => onChange((index - 1 + count) % count)}
-        className="py-2 rounded-xl bg-zinc-900 active:bg-zinc-800 text-sm text-zinc-300 border border-zinc-800"
+        onClick={copy}
+        className="shrink-0 text-[11px] px-2 py-1 rounded-full bg-blue-500/15 text-blue-300 active:bg-blue-500/30"
       >
-        ← Prev variant
-      </button>
-      <button
-        type="button"
-        onClick={() => onChange((index + 1) % count)}
-        className="py-2 rounded-xl bg-zinc-900 active:bg-zinc-800 text-sm text-zinc-300 border border-zinc-800"
-      >
-        Next variant →
+        {btnLabel}
       </button>
     </div>
+  );
+}
+
+function StatusBtn({
+  label,
+  color,
+  active,
+  disabled,
+  onTap,
+}: {
+  label: string;
+  color: string;
+  active: boolean;
+  disabled: boolean;
+  onTap: () => void;
+}) {
+  // When active, show a ring around the button so the current
+  // status is visually obvious. When inactive, keep the colour
+  // but make the ring transparent.
+  const ringClass = active
+    ? "ring-2 ring-blue-400/60"
+    : "ring-0";
+  return (
+    <button
+      type="button"
+      onClick={onTap}
+      disabled={disabled}
+      className={`py-3 rounded-2xl text-sm font-medium text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${color} ${ringClass}`}
+    >
+      {label}
+    </button>
   );
 }
 

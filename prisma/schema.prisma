@@ -255,6 +255,13 @@ model Product {
   // shows next to hook/caption/hashtags. Optional; populated by the
   // AI prompt generator when available.
   productDescription      String?
+  // Short overlay text that appears as the link-sticker label on
+  // the posted TikTok video — TikTok truncates the visible link
+  // label, so the AI prompt is asked to condense the product to
+  // <=30 chars. The mobile-posting page surfaces it as its own
+  // copy block. Null until the AI prompt has been re-run for this
+  // product after the field was introduced.
+  productLinkDescription  String?
   // Mobile-review workflow status. Defaults to "needs_review" for
   // every newly imported row so the user explicitly approves before
   // burning generations on it. Transition values:

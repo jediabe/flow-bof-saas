@@ -235,6 +235,9 @@ model Product {
   aiPromptGeneratedAt DateTime?
   // Long-form product blurb shown on the posting-assist QR page.
   productDescription String?
+  // Short (<=30 char) overlay label for the TikTok link sticker.
+  // Null until the AI prompt is re-run with this field requested.
+  productLinkDescription String?
   // Mobile-review workflow status. Defaults to "needs_review" for
   // every newly imported row so the user explicitly approves before
   // burning generations on it. Values:

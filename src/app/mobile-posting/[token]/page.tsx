@@ -65,6 +65,7 @@ export default async function MobilePostingPage({
           caption: true,
           hashtags: true,
           productDescription: true,
+          productLinkDescription: true,
           postingStatus: true,
           postingNotes: true,
         },
@@ -97,7 +98,8 @@ export default async function MobilePostingPage({
       }> | null) ?? [],
     caption:           p.caption,
     hashtags:          (parseJson(p.hashtags) as string[] | null) ?? [],
-    productDescription: p.productDescription,
+    productDescription:     p.productDescription,
+    productLinkDescription: p.productLinkDescription,
     postingStatus:     p.postingStatus as MobilePostingProduct["postingStatus"],
     postingNotes:      p.postingNotes,
   }));
