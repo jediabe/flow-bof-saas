@@ -36,6 +36,11 @@ model User {
   // signup landed) still load; new rows always populate it via the
   // signup flow.
   passwordHash String?
+  // One of: "admin" | "client". Single-user app today, but the
+  // BOF Dashboard plumbing wants a role distinction baked in so a
+  // future multi-tenant migration doesn't have to backfill.
+  // Defaults to "admin" — existing rows stay full-access.
+  role         String   @default("admin")
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -59,6 +64,9 @@ model Workspace {
   // from a SaaS job. Scoped to the workspace so two tenants can't
   // collide on Flow's global media_id space.
   flowItems  FlowItem[]
+  // BOF Dashboard — TikTok Shop accounts the operator has
+  // connected. Scoped to workspace like everything else.
+  tikTokAccounts TikTokAccount[]
 }
 
 // ---------------------------------------------------------------------------
@@ -558,4 +566,141 @@ model JobEvent {
   createdAt DateTime @default(now())
 
   @@index([jobId])
+}
+
+// ---------------------------------------------------------------------------
+// BOF Dashboard — multi-account TikTok Shop analytics.
+//
+// Operator connects one or more TikTok Shop creator accounts by pasting
+// the session cookie string. We hit the unofficial TikHub API
+// (api.tikhub.io) on a schedule, capture health/revenue/products into
+// these tables, and the /analytics pages render from the DB (no
+// TikHub call during a page render — too slow / rate-limited).
+//
+// Tenancy: Account is scoped to Workspace, like every other user
+// resource. Reuses getCurrentWorkspace().
+//
+// Cookie storage: TikTokAccount.cookieRaw is AES-GCM encrypted at
+// rest via lib/tikhub-crypto.ts. The plaintext is the full
+// "key1=val1; key2=val2; ..." cookie header value TikHub expects.
+// The 6 keys we extract are documented in lib/tikhub-cookie-parser.ts.
+//
+// Money: Decimal in dev (SQLite stores as text without precision
+// loss for our magnitudes); the Postgres schema overlay carries the
+// @db.Decimal(12,2) annotation. Choosing Decimal over integer cents
+// keeps the queries readable.
+// ---------------------------------------------------------------------------
+
+model TikTokAccount {
+  id              String   @id @default(cuid())
+  workspaceId     String
+  workspace       Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  label           String
+  // "US" or "UK". String so SQLite stays portable; enforced in the
+  // server actions on save.
+  region          String   @default("US")
+  // AES-GCM ciphertext of the raw cookie header. See lib/tikhub-
+  // crypto.ts. Never logged. Never sent to the client; the
+  // server-side TikHub call decrypts in-process.
+  cookieRaw       String
+  // Operator-entered USD cost / month for any tools used to support
+  // this account (e.g., a portion of the BOF subscription, a
+  // research tool sub, a phone line). Used in P&L proration.
+  monthlyToolCost Decimal  @default(0)
+  // One of: "unchecked" | "active" | "expired" | "error".
+  // Default "unchecked" until the operator hits Test Cookie.
+  cookieStatus    String   @default("unchecked")
+  // Most recent TikHub error message when cookieStatus = "error".
+  // Truncated to ~500 chars by the server actions before write.
+  cookieError     String?
+  lastCheckedAt   DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  health   TikTokAccountHealth[]
+  revenue  TikTokAccountRevenue[]
+  products TikTokProduct[]
+  pnl      TikTokAccountPnl[]
+
+  @@index([workspaceId])
+}
+
+model TikTokAccountHealth {
+  id             String        @id @default(cuid())
+  accountId      String
+  account        TikTokAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  // One of: "healthy" | "flagged" | "restricted" | "unknown".
+  status         String
+  // 0-100, TikHub's normalized violation score (higher = worse).
+  violationScore Int
+  // JSON-encoded string[] — restriction labels TikHub returned.
+  // Parsed via parseJson<string[]> on read.
+  restrictions   String?
+  capturedAt     DateTime      @default(now())
+
+  @@index([accountId, capturedAt])
+}
+
+model TikTokAccountRevenue {
+  id                  String        @id @default(cuid())
+  accountId           String
+  account             TikTokAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  // Bucket date in UTC. One row per (accountId, date).
+  date                DateTime
+  // ----- Sales -------------------------------------------------
+  gmv                 Decimal
+  // ISO 4217 currency the TikTok Shop account reports in. UK
+  // accounts return GBP, US return USD, etc. Defaults to USD for
+  // backfilled rows that pre-date the column.
+  currencyCode        String        @default("USD")
+  estimatedCommission Decimal
+  videoRevenue        Decimal
+  liveRevenue         Decimal
+  itemsSold           Int
+  // ----- Content -----------------------------------------------
+  // Video views (`vv_cnt` in TikHub's get_video_analytics_summary),
+  // new followers gained (`new_follower_cnt`), and videos posted
+  // (`video_cnt`) during this bucket. These are the meaningful
+  // metrics for affiliate creator accounts that haven't started
+  // selling yet — pre-sale accounts still post videos and grow
+  // audience, so we surface those numbers on the dashboard.
+  videoViews          Int           @default(0)
+  newFollowerCount    Int           @default(0)
+  videoCount          Int           @default(0)
+  capturedAt          DateTime      @default(now())
+
+  @@unique([accountId, date])
+  @@index([accountId])
+}
+
+model TikTokProduct {
+  id         String        @id @default(cuid())
+  accountId  String
+  account    TikTokAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  // TikHub's product id. Unique per account so re-poll updates the
+  // row in place rather than duplicating.
+  externalId String
+  title      String
+  gmv        Decimal
+  itemsSold  Int
+  commission Decimal
+  capturedAt DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+
+  @@unique([accountId, externalId])
+  @@index([accountId])
+}
+
+model TikTokAccountPnl {
+  id              String        @id @default(cuid())
+  accountId       String
+  account         TikTokAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  date            DateTime
+  grossCommission Decimal
+  toolCost        Decimal
+  netProfit       Decimal
+  capturedAt      DateTime      @default(now())
+
+  @@unique([accountId, date])
+  @@index([accountId])
 }

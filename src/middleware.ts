@@ -49,7 +49,13 @@ function isAlwaysOpen(pathname: string): boolean {
     // request through.
     pathname.startsWith("/mobile-review/") ||
     // Phase 5 will need the same for /mobile-posting/.
-    pathname.startsWith("/mobile-posting/")
+    pathname.startsWith("/mobile-posting/") ||
+    // BOF Dashboard cron tasks — hit by Docker host crontab /
+    // Vercel Cron / etc. with `Authorization: Bearer <CRON_SECRET>`.
+    // The route handler at src/app/api/cron/[task]/route.ts does
+    // its own constant-time bearer check; middleware just lets the
+    // request through.
+    pathname.startsWith("/api/cron/")
   );
 }
 

@@ -16,6 +16,10 @@ import { logoutAction } from "@/app/(auth)/actions";
 const ITEMS: Array<{ href: string; label: string; icon: string }> = [
   { href: "/dashboard", label: "Dashboard",     icon: "▦" },
   { href: "/batches",   label: "My Batches",    icon: "▤" },
+  // BOF Dashboard — multi-account TikTok Shop analytics. Lives at
+  // /analytics so it doesn't collide with the Flow-automation
+  // /dashboard cockpit that's already here.
+  { href: "/analytics", label: "Shop Analytics", icon: "$" },
   { href: "/agents",    label: "Runner Setup",  icon: "◆" },
   { href: "/jobs",      label: "Jobs",          icon: "≡" },
   { href: "/settings",  label: "Settings",      icon: "⚙" },
