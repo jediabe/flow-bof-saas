@@ -233,6 +233,16 @@ export async function refreshAccountSnapshot(
     //    them updated with a lifetime/current-cycle snapshot for
     //    quick single-row queries.
     if (opts.includeProducts) {
+      // Timestamp captured BEFORE any product writes. Every upsert
+      // below stamps capturedAt = now; rows still bearing an older
+      // capturedAt after the refresh finishes are stale carryover
+      // from a previous cookie (e.g. when this account was
+      // accidentally sharing a cookie with a sibling) and get
+      // pruned. Without this, updating a cookie leaves ghost rows
+      // that show up on the aggregate view with data from the
+      // wrong TikTok account.
+      const productsRefreshStartedAt = new Date();
+
       const { products, monthTotals } = await tikhub.getProductAttributionDaily({
         cookie,
         maxVideos: 25,
@@ -373,6 +383,12 @@ export async function refreshAccountSnapshot(
       const nextMonthStart = new Date(
         Date.UTC(nowRefresh.getUTCFullYear(), nowRefresh.getUTCMonth() + 1, 1),
       );
+      // Track whether the broad-window analytics_list call
+      // succeeded. Only then can we safely prune stale rows —
+      // pair-chain alone covers only the current month, so
+      // pruning based on pair-chain-only writes would delete
+      // legitimate older products.
+      let analyticsListOk = false;
       try {
         const productAnalyticsRows = await tikhub.getProductAnalytics({
           cookie,
@@ -411,10 +427,35 @@ export async function refreshAccountSnapshot(
             },
           });
         }
+        analyticsListOk = true;
       } catch {
         // Non-fatal — pair-chain metadata already covers the row.
         // TikHub can occasionally 429 the analytics list endpoint
-        // on refresh-heavy cycles; keep going.
+        // on refresh-heavy cycles; keep going. Skip the prune so
+        // legitimate older rows aren't nuked.
+      }
+
+      // Prune stale product rows — anything for THIS account whose
+      // capturedAt is older than the moment this refresh started.
+      // Fresh writes above stamped capturedAt = new Date() (or the
+      // DB @default on create), all strictly after
+      // productsRefreshStartedAt, so they survive; rows written by
+      // a previous refresh — potentially against a different cookie
+      // still attached to this same account row — are pruned. This
+      // is what stops "cookie was accidentally shared, then fixed"
+      // from leaving ghost products that read as duplicated data
+      // across two accounts on the aggregate view.
+      //
+      // Only prune when analytics_list succeeded, because that's
+      // the broad-window (~1 year) pull. Pair-chain-only refreshes
+      // cover only the current month.
+      if (analyticsListOk) {
+        await db.tikTokProduct.deleteMany({
+          where: {
+            accountId: row.id,
+            capturedAt: { lt: productsRefreshStartedAt },
+          },
+        });
       }
     }
 
