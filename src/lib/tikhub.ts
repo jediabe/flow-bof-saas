@@ -35,6 +35,17 @@ import {
 
 const TIKHUB_BASE = "https://api.tikhub.io";
 
+/**
+ * How many recent days to sum inside pluckPairStats. TikHub
+ * returns the whole calendar month per pair-stats call; without
+ * this filter, "Top products" would show 28-day totals while the
+ * operator's TikTok Creator Center default view is 7D — leading
+ * to apparent doubling when a product had sales in both the last
+ * 7 days AND the preceding weeks. Match Creator Center's default
+ * so the numbers reconcile.
+ */
+const PAIR_STATS_WINDOW_DAYS = 7;
+
 /** Endpoints TikHub publishes for TikTok Shop creator analytics.
  *
  * Verified against api.tikhub.io openapi.json on 2026-06-29 under
@@ -60,6 +71,12 @@ const ENDPOINTS = {
   insights:     "/api/v1/tiktok/creator/get_account_insights_overview",
   videos:       "/api/v1/tiktok/creator/get_video_list_analytics",
   products:     "/api/v1/tiktok/creator/get_product_analytics_list",
+  // The get_product_analytics_list endpoint returns per-product
+  // ZERO sales attribution for shop-owner-type accounts. To get
+  // real per-product sales we walk a THREE-endpoint chain:
+  //   videos → their tagged products → per-pair stats
+  videoAssociatedProducts: "/api/v1/tiktok/creator/get_video_associated_product_list",
+  videoToProductStats:     "/api/v1/tiktok/creator/get_video_to_product_stats",
 } as const;
 
 /** TikHub's MM-DD-YYYY date string (overview, video endpoints). */
@@ -83,6 +100,25 @@ function daysAgoUtc(n: number, now: Date = new Date()): Date {
     Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) -
       n * 24 * 60 * 60 * 1000,
   );
+}
+
+/** First day of the current UTC month, formatted MM-01-YYYY.
+ *  get_video_list_analytics wants this exact anchor — TikHub
+ *  scopes the returned per-video totals to the calendar month
+ *  containing start_date. */
+function firstOfMonthUS(now: Date = new Date()): string {
+  const m = String(now.getUTCMonth() + 1).padStart(2, "0");
+  return `${m}-01-${now.getUTCFullYear()}`;
+}
+
+/** First day of the PREVIOUS UTC month, MM-01-YYYY. Used to
+ *  compute the last-30-days window that spans two months. */
+export function firstOfPrevMonthUS(now: Date = new Date()): string {
+  const y = now.getUTCFullYear();
+  const m = now.getUTCMonth();
+  const prev = new Date(Date.UTC(y, m - 1, 1));
+  const pm = String(prev.getUTCMonth() + 1).padStart(2, "0");
+  return `${pm}-01-${prev.getUTCFullYear()}`;
 }
 
 /* ---------------------------------------------------------------- */
@@ -193,6 +229,85 @@ export interface ProductAnalyticsRow {
   currencyCode: string;
   itemsSold: number;
   commission: number;
+}
+
+/**
+ * One row of per-product attribution built by walking the
+ * video-to-product stats chain. Same core numbers as
+ * ProductAnalyticsRow (gmv/itemsSold/currencyCode) plus the
+ * funnel metrics that only the pair-stats endpoint exposes:
+ * views, clicks, orders.
+ */
+export interface ProductAttributionRow {
+  externalId: string;
+  title: string;
+  gmv: number;
+  currencyCode: string;
+  itemsSold: number;
+  productViews: number;
+  productClicks: number;
+  orderCount: number;
+  /** get_video_to_product_stats doesn't return commission
+   *  directly. Left as 0 here; callers estimate via take-rate
+   *  from account-level insights if they need a number. */
+  commission: number;
+}
+
+/**
+ * One PER-PRODUCT-PER-DAY bucket, emitted by
+ * pluckPairStatsDaily. The buckets are dense within the
+ * ~28-day window TikHub returns — callers filter to whatever
+ * window the dashboard is showing at render time.
+ */
+export interface ProductAttributionDailyBucket {
+  /** UTC midnight of the bucket day. */
+  date: Date;
+  gmv: number;
+  itemsSold: number;
+  orderCount: number;
+  productViews: number;
+  productClicks: number;
+}
+
+/**
+ * Per-product result from getProductAttributionDaily. The
+ * product-level metadata (id, title, currency) sits alongside
+ * the array of daily buckets so callers can persist metadata to
+ * TikTokProduct AND per-day rows to TikTokProductDaily in one
+ * pass.
+ */
+export interface ProductAttributionDaily {
+  externalId: string;
+  title: string;
+  currencyCode: string;
+  buckets: ProductAttributionDailyBucket[];
+}
+
+/**
+ * Account-level month totals derived from summing every video
+ * we see across paginated get_video_list_analytics pages. This
+ * is the trustworthy ground truth for the account's current
+ * calendar month GMV / items sold — much fresher than
+ * get_account_insights_overview which can lag by a day.
+ */
+export interface AccountMonthTotals {
+  /** MM-01-YYYY anchor sent to TikHub (i.e., which calendar
+   *  month these totals cover). */
+  monthAnchor: string;
+  gmv: number;
+  directGmv: number;
+  itemsSold: number;
+  currencyCode: string;
+}
+
+/**
+ * Return type of getProductAttributionDaily. Wraps the previous
+ * per-product buckets plus the newly-computed account-level
+ * month totals so refresh can persist both in one shot.
+ */
+export interface ProductAttributionResult {
+  products: ProductAttributionDaily[];
+  monthTotals: AccountMonthTotals;
 }
 
 /* ---------------------------------------------------------------- */
@@ -406,10 +521,12 @@ export async function getProductAnalytics(input: {
 }): Promise<ProductAnalyticsRow[]> {
   const end = input.endDate ?? daysAgoUtc(0);
   const start = input.startDate ?? daysAgoUtc(30);
-  const maxPages = input.maxPages ?? 10;
+  const maxPages = input.maxPages ?? 20;
   const allRows: ProductAnalyticsRow[] = [];
-  let page = 1;
-  while (page <= maxPages) {
+  // TikHub's docs (screenshot confirmed) say page defaults to 0.
+  // Previously started at 1 — silently missing page 0's rows.
+  let page = 0;
+  while (page < maxPages) {
     const raw = await postTikHub(ENDPOINTS.products, {
       cookie: input.cookie,
       start_date: formatDateISO(start),
@@ -430,6 +547,390 @@ export async function getProductAnalytics(input: {
     if (!existing || p.gmv > existing.gmv) map.set(p.externalId, p);
   }
   return [...map.values()];
+}
+
+/**
+ * Build per-product sales attribution by walking the video ↔
+ * product chain. Three endpoints, sequential dependency:
+ *
+ *   1. get_video_list_analytics    — recent videos
+ *   2. get_video_associated_product_list (BATCHED, accepts an
+ *      array of item_ids)          — pairs
+ *   3. get_video_to_product_stats  — per-pair sales stats
+ *
+ * The third endpoint is the only creator-API surface that
+ * returns `product_sales_cnt` / `product_revenue.amount` /
+ * `product_view_cnt` / `product_click_cnt` for shop-owner-type
+ * accounts. It's called once per (video, product) pair, so cost
+ * grows linearly — we cap on both video count and pair count to
+ * keep a single refresh from blowing through a TikHub quota.
+ *
+ * Result is aggregated per product_id: if the same product is
+ * tagged in multiple videos, its stats are summed across all of
+ * them.
+ */
+export async function getProductAttributionViaVideos(input: {
+  cookie: string;
+  /** Max recent videos to walk. Videos are returned newest-first
+   *  by TikHub's default sort; the newest ones are usually the
+   *  ones actively driving sales. */
+  maxVideos?: number;
+  /** Hard cap on (video, product) pair-stat calls per refresh.
+   *  Each call is billable — this is the main lever for cost. */
+  maxPairs?: number;
+}): Promise<ProductAttributionRow[]> {
+  const maxVideos = Math.max(1, input.maxVideos ?? 25);
+  const maxPairs  = Math.max(1, input.maxPairs  ?? 60);
+  const today = new Date();
+  const startDate = formatDateUS(today);
+
+  // Step 1: recent videos.
+  const videoListRaw = await postTikHub(ENDPOINTS.videos, {
+    cookie: input.cookie,
+    start_date: startDate,
+    page: 1,
+  });
+  const videoIds = pluckVideoIds(videoListRaw).slice(0, maxVideos);
+  if (videoIds.length === 0) return [];
+
+  // Step 2: batch-fetch associated products for ALL those videos
+  // in one call (endpoint accepts an array of item_ids).
+  const assocRaw = await postTikHub(ENDPOINTS.videoAssociatedProducts, {
+    cookie: input.cookie,
+    start_date: startDate,
+    item_ids: videoIds,
+  });
+  const allPairs = pluckAssociatedPairs(assocRaw);
+  if (allPairs.length === 0) return [];
+
+  // Dedupe by product_id: TikHub's get_video_to_product_stats
+  // returns the PRODUCT's aggregate stats for each (video,
+  // product) pair, not the video's specific contribution. So a
+  // product tagged in N videos returns the same total N times.
+  // Summing across pairs double- (or triple-) counts. Instead,
+  // probe once per unique product. Bonus: fewer TikHub calls.
+  const seenProducts = new Set<string>();
+  const uniqueProductPairs: typeof allPairs = [];
+  for (const pair of allPairs) {
+    if (seenProducts.has(pair.productId)) continue;
+    seenProducts.add(pair.productId);
+    uniqueProductPairs.push(pair);
+  }
+
+  // Cap and probe each pair. Individual pair failures degrade
+  // silently — we'd rather have partial attribution than nothing.
+  const probePairs = uniqueProductPairs.slice(0, maxPairs);
+  const perPair: Array<{
+    productId: string;
+    productName: string;
+    stats: {
+      gmv: number;
+      currencyCode: string;
+      itemsSold: number;
+      productViews: number;
+      productClicks: number;
+      orderCount: number;
+    };
+  }> = [];
+  for (const pair of probePairs) {
+    let raw: unknown;
+    try {
+      raw = await postTikHub(ENDPOINTS.videoToProductStats, {
+        cookie: input.cookie,
+        start_date: startDate,
+        item_id: pair.itemId,
+        product_id: pair.productId,
+      });
+    } catch {
+      continue;
+    }
+    const stats = pluckPairStats(raw);
+    if (!stats) continue;
+    perPair.push({
+      productId: pair.productId,
+      productName: pair.productName,
+      stats,
+    });
+  }
+
+  // Build the result — one row per product. Probing is already
+  // deduped to one pair per product above, so we set directly
+  // without summing across pairs.
+  const byProduct = new Map<string, ProductAttributionRow>();
+  for (const p of perPair) {
+    byProduct.set(p.productId, {
+      externalId:     p.productId,
+      title:          p.productName,
+      gmv:            p.stats.gmv,
+      currencyCode:   p.stats.currencyCode,
+      itemsSold:      p.stats.itemsSold,
+      productViews:   p.stats.productViews,
+      productClicks:  p.stats.productClicks,
+      orderCount:     p.stats.orderCount,
+      commission:     0,
+    });
+  }
+  return [...byProduct.values()].sort((a, b) => b.itemsSold - a.itemsSold);
+}
+
+/**
+ * Per-day version of getProductAttributionViaVideos. Same
+ * three-endpoint chain, same product dedupe, but returns per-day
+ * buckets from the daily-granularity segment instead of a single
+ * summed row per product. Enables window-accurate top-products
+ * queries at render time.
+ *
+ * The caller (refresh) persists metadata to TikTokProduct and
+ * daily buckets to TikTokProductDaily.
+ */
+/**
+ * Sum per-video month totals for a specific calendar month by
+ * walking all pages of get_video_list_analytics. Same paginator
+ * as getProductAttributionDaily but stripped of the pair-chain —
+ * we only want the account-level aggregate for the given anchor
+ * month. Used by refresh to capture the PREVIOUS month's totals
+ * so the 30-day dashboard window has data.
+ */
+export async function getAccountMonthTotals(input: {
+  cookie: string;
+  monthAnchor: string; // MM-01-YYYY
+  maxPages?: number;
+}): Promise<AccountMonthTotals> {
+  const maxPages = Math.max(1, input.maxPages ?? 15);
+  let gmv = 0;
+  let directGmv = 0;
+  let items = 0;
+  let currency = "";
+  let page = 0;
+  while (page < maxPages) {
+    let raw: unknown;
+    try {
+      raw = await postTikHub(ENDPOINTS.videos, {
+        cookie: input.cookie,
+        start_date: input.monthAnchor,
+        page,
+        rules: "VIDEO_LIST_ITEM_SOLD_CNT",
+      });
+    } catch {
+      break;
+    }
+    const { hasMore, sawZeroInPage, pageTotals } =
+      pluckVideoListPageWithSales(raw);
+    gmv       += pageTotals.gmv;
+    directGmv += pageTotals.directGmv;
+    items     += pageTotals.itemsSold;
+    if (!currency && pageTotals.currencyCode) {
+      currency = pageTotals.currencyCode;
+    }
+    if (sawZeroInPage) break;
+    if (!hasMore) break;
+    page++;
+  }
+  return {
+    monthAnchor: input.monthAnchor,
+    gmv,
+    directGmv,
+    itemsSold: items,
+    currencyCode: currency || "USD",
+  };
+}
+
+export async function getProductAttributionDaily(input: {
+  cookie: string;
+  maxVideos?: number;
+  maxPairs?: number;
+  /** Hard cap on how many video-list pages we walk before
+   *  giving up. 0-indexed pagination; TikHub returns
+   *  `total_page` so this is only a safety valve. */
+  maxVideoListPages?: number;
+}): Promise<ProductAttributionResult> {
+  const maxVideos          = Math.max(1, input.maxVideos          ?? 60);
+  const maxPairs           = Math.max(1, input.maxPairs           ?? 150);
+  const maxVideoListPages  = Math.max(1, input.maxVideoListPages  ?? 15);
+  const now = new Date();
+  // TikHub's get_video_list_analytics wants MM-01-YYYY —
+  // first-of-current-month, not today. Documented at
+  // https://docs.tikhub.io/289437016e0.
+  const videoListStartDate = firstOfMonthUS(now);
+  // Pair-stats calls stay anchored to today so we get the recent
+  // daily buckets from the finest segment.
+  const pairStatsStartDate = formatDateUS(now);
+
+  // Step 1: walk pages of the top-selling video list. Pagination
+  // is 0-indexed; sorted desc by item_sold_cnt; stop once a page
+  // returns any zero-sales video (all subsequent are also zero)
+  // or once we hit maxVideos.
+  //
+  // As we walk, sum the per-video month totals into an
+  // account-level aggregate. That aggregate is our trustworthy
+  // "this month" GMV / items sold — much fresher than the
+  // insights endpoint which lags.
+  // Two concerns walked in parallel:
+  //   (a) SUM per-video month totals across every selling page —
+  //       even if we've maxed out the pair-chain video count, we
+  //       still want the account-level GMV correct.
+  //   (b) COLLECT top selling videoIds for the pair chain,
+  //       capped at maxVideos.
+  // Previously these were coupled via `videoIds.length < maxVideos`
+  // in the loop condition, which stopped summing at the pair-chain
+  // cap and undercounted the monthly GMV. Now the loop only stops
+  // on: zero-sold-seen (list is DESC sorted), no more pages, or
+  // maxVideoListPages safety cap.
+  const videoIds: string[] = [];
+  const seenIds = new Set<string>();
+  let page = 0;
+  let monthGmv       = 0;
+  let monthDirectGmv = 0;
+  let monthItems     = 0;
+  let monthCurrency  = "";
+  while (page < maxVideoListPages) {
+    let videoListRaw: unknown;
+    try {
+      videoListRaw = await postTikHub(ENDPOINTS.videos, {
+        cookie: input.cookie,
+        start_date: videoListStartDate,
+        page,
+        rules: "VIDEO_LIST_ITEM_SOLD_CNT",
+      });
+    } catch {
+      break;
+    }
+    const { sellingVideoIds, hasMore, sawZeroInPage, pageTotals } =
+      pluckVideoListPageWithSales(videoListRaw);
+    // Always sum this page's contribution.
+    monthGmv       += pageTotals.gmv;
+    monthDirectGmv += pageTotals.directGmv;
+    monthItems     += pageTotals.itemsSold;
+    if (!monthCurrency && pageTotals.currencyCode) {
+      monthCurrency = pageTotals.currencyCode;
+    }
+    // Only add to pair-chain videoIds up to the cap.
+    if (videoIds.length < maxVideos) {
+      for (const id of sellingVideoIds) {
+        if (seenIds.has(id)) continue;
+        seenIds.add(id);
+        videoIds.push(id);
+        if (videoIds.length >= maxVideos) break;
+      }
+    }
+    if (sawZeroInPage) break;
+    if (!hasMore) break;
+    page++;
+  }
+
+  const monthTotals: AccountMonthTotals = {
+    monthAnchor: videoListStartDate,
+    gmv:         monthGmv,
+    directGmv:   monthDirectGmv,
+    itemsSold:   monthItems,
+    currencyCode: monthCurrency || "USD",
+  };
+
+  if (videoIds.length === 0) return { products: [], monthTotals };
+
+  // Step 2: batched (video → tagged products).
+  const assocRaw = await postTikHub(ENDPOINTS.videoAssociatedProducts, {
+    cookie: input.cookie,
+    start_date: pairStatsStartDate,
+    item_ids: videoIds,
+  });
+  const allPairs = pluckAssociatedPairs(assocRaw);
+  if (allPairs.length === 0) return { products: [], monthTotals };
+
+  // NO dedupe by product_id here. Empirically, TikHub's
+  // get_video_to_product_stats returns per-VIDEO contribution to
+  // that product, not the product's aggregate total. A product
+  // tagged in three videos may show up as three pairs each with
+  // a different (or zero) contribution — the product's real
+  // total is the SUM across all pairs. Probing only one pair
+  // undercounts, which is the "products show 0 sold when they
+  // actually sold" bug the operator flagged.
+  //
+  // We still cap total pair calls via maxPairs. If the account
+  // has more unique pairs than the cap, later ones get dropped —
+  // that could still undercount for products at the tail. The
+  // caller can raise maxPairs at additional TikHub cost.
+  const probePairs = allPairs.slice(0, maxPairs);
+
+  // Aggregation state: for each product, keep title/currency plus
+  // a per-date bucket map. Contributions from different pairs to
+  // the same (product, date) get summed.
+  const perProduct = new Map<
+    string,
+    {
+      title: string;
+      currencyCode: string;
+      byDate: Map<string, ProductAttributionDailyBucket>;
+    }
+  >();
+
+  for (const pair of probePairs) {
+    let raw: unknown;
+    try {
+      raw = await postTikHub(ENDPOINTS.videoToProductStats, {
+        cookie: input.cookie,
+        start_date: pairStatsStartDate,
+        item_id: pair.itemId,
+        product_id: pair.productId,
+      });
+    } catch {
+      continue;
+    }
+    const { buckets, currencyCode } = pluckPairStatsDaily(raw);
+
+    let agg = perProduct.get(pair.productId);
+    if (!agg) {
+      agg = {
+        title: pair.productName,
+        currencyCode,
+        byDate: new Map(),
+      };
+      perProduct.set(pair.productId, agg);
+    } else {
+      // Prefer a non-empty title/currency if the first pair had
+      // gaps.
+      if (!agg.title && pair.productName) agg.title = pair.productName;
+      if (!agg.currencyCode || agg.currencyCode === "USD") {
+        if (currencyCode && currencyCode !== "USD") {
+          agg.currencyCode = currencyCode;
+        }
+      }
+    }
+
+    for (const b of buckets) {
+      const dateKey = b.date.toISOString();
+      const existing = agg.byDate.get(dateKey);
+      if (!existing) {
+        agg.byDate.set(dateKey, {
+          date:          b.date,
+          gmv:           b.gmv,
+          itemsSold:     b.itemsSold,
+          orderCount:    b.orderCount,
+          productViews:  b.productViews,
+          productClicks: b.productClicks,
+        });
+      } else {
+        existing.gmv           += b.gmv;
+        existing.itemsSold     += b.itemsSold;
+        existing.orderCount    += b.orderCount;
+        existing.productViews  += b.productViews;
+        existing.productClicks += b.productClicks;
+      }
+    }
+  }
+
+  const products: ProductAttributionDaily[] = [];
+  for (const [productId, agg] of perProduct) {
+    products.push({
+      externalId:   productId,
+      title:        agg.title,
+      currencyCode: agg.currencyCode,
+      buckets: [...agg.byDate.values()].sort(
+        (a, b) => a.date.getTime() - b.date.getTime(),
+      ),
+    });
+  }
+  return { products, monthTotals };
 }
 
 /**
@@ -962,6 +1463,448 @@ function pluckProductsPage(
   }
 
   return { rows, hasMore };
+}
+
+/**
+ * Extract just the recent video item_ids from a
+ * get_video_list_analytics response. We only need the IDs; the
+ * chain callers don't care about GMV/view counts at this step
+ * (that's what step 3 is for).
+ */
+function pluckVideoIds(raw: unknown): string[] {
+  const r = unwrapEnvelope(raw);
+  const segments = Array.isArray(r.segments) ? (r.segments as unknown[]) : [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const seg of segments) {
+    if (!seg || typeof seg !== "object") continue;
+    const s = seg as Record<string, unknown>;
+    const timedLists = Array.isArray(s.timed_lists)
+      ? (s.timed_lists as unknown[])
+      : [];
+    for (const tl of timedLists) {
+      if (!tl || typeof tl !== "object") continue;
+      const stats = Array.isArray((tl as Record<string, unknown>).stats)
+        ? ((tl as Record<string, unknown>).stats as unknown[])
+        : [];
+      for (const item of stats) {
+        if (!item || typeof item !== "object") continue;
+        const meta = ((item as Record<string, unknown>).video_meta ?? {}) as Record<
+          string,
+          unknown
+        >;
+        const id = String(meta.item_id ?? "");
+        if (id && !seen.has(id)) {
+          seen.add(id);
+          out.push(id);
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Same shape walker as pluckVideoIds but filters to videos with
+ * item_sold_cnt > 0, AND surfaces the pagination `has_more`
+ * flag so the caller can walk pages. Returns:
+ *   sellingVideoIds — deduped list of item_ids that sold
+ *   hasMore         — whether next_pagination.has_more is true
+ *   sawZeroInPage   — whether ANY zero-sold video appeared on
+ *                     this page; used to short-circuit paging
+ *                     (list is sorted desc by item_sold_cnt, so
+ *                     the first zero means all subsequent are
+ *                     also zero — no point paging further).
+ */
+function pluckVideoListPageWithSales(raw: unknown): {
+  sellingVideoIds: string[];
+  hasMore: boolean;
+  sawZeroInPage: boolean;
+  /** Sum of per-video month-totals seen on this page. Callers
+   *  accumulate across pages to get the account's full monthly
+   *  aggregate. */
+  pageTotals: {
+    gmv: number;
+    directGmv: number;
+    itemsSold: number;
+    currencyCode: string;
+  };
+} {
+  const r = unwrapEnvelope(raw);
+  const segments = Array.isArray(r.segments) ? (r.segments as unknown[]) : [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  let hasMore = false;
+  let sawZero = false;
+  let sumGmv = 0;
+  let sumDirectGmv = 0;
+  let sumItemsSold = 0;
+  let currencyCode = "";
+
+  for (const seg of segments) {
+    if (!seg || typeof seg !== "object") continue;
+    const s = seg as Record<string, unknown>;
+    // Pagination flag lives on the segment's list_control.
+    const listControl = (s.list_control ?? {}) as Record<string, unknown>;
+    const pagination = (listControl.next_pagination ?? {}) as Record<string, unknown>;
+    if (pagination.has_more === true) hasMore = true;
+
+    const timedLists = Array.isArray(s.timed_lists)
+      ? (s.timed_lists as unknown[])
+      : [];
+    for (const tl of timedLists) {
+      if (!tl || typeof tl !== "object") continue;
+      const stats = Array.isArray((tl as Record<string, unknown>).stats)
+        ? ((tl as Record<string, unknown>).stats as unknown[])
+        : [];
+      for (const item of stats) {
+        if (!item || typeof item !== "object") continue;
+        const x = item as Record<string, unknown>;
+        const meta = (x.video_meta ?? {}) as Record<string, unknown>;
+        const id = String(meta.item_id ?? "");
+        const itemSoldCnt = Math.trunc(num(x.item_sold_cnt));
+        if (itemSoldCnt <= 0) {
+          sawZero = true;
+          continue;
+        }
+        // Sum per-video month totals (this endpoint scopes each
+        // video's stats to start_date's calendar month).
+        const gmvBlock       = (x.gmv        ?? {}) as Record<string, unknown>;
+        const directGmvBlock = (x.direct_gmv ?? {}) as Record<string, unknown>;
+        sumGmv       += num(gmvBlock.amount);
+        sumDirectGmv += num(directGmvBlock.amount);
+        sumItemsSold += itemSoldCnt;
+        if (!currencyCode) {
+          currencyCode = String(gmvBlock.currency_code ?? directGmvBlock.currency_code ?? "");
+        }
+        if (id && !seen.has(id)) {
+          seen.add(id);
+          out.push(id);
+        }
+      }
+    }
+  }
+  return {
+    sellingVideoIds: out,
+    hasMore,
+    sawZeroInPage: sawZero,
+    pageTotals: {
+      gmv: sumGmv,
+      directGmv: sumDirectGmv,
+      itemsSold: sumItemsSold,
+      currencyCode: currencyCode || "USD",
+    },
+  };
+}
+
+/**
+ * Pluck (video_id, product_id, product_name) triples from a
+ * get_video_associated_product_list response. Mirrors the
+ * diagnostic-side extractor's tolerance for TikHub's three
+ * observed shapes: object, array, keyed hashmap.
+ */
+function pluckAssociatedPairs(
+  raw: unknown,
+): Array<{ itemId: string; productId: string; productName: string }> {
+  const r = unwrapEnvelope(raw);
+  const out: Array<{ itemId: string; productId: string; productName: string }> = [];
+  const seen = new Set<string>();
+
+  const emit = (itemId: string, productId: string, productName: string): void => {
+    if (!itemId || !productId) return;
+    const key = `${itemId}::${productId}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({ itemId, productId, productName });
+  };
+
+  const walkProducts = (itemId: string, products: unknown): void => {
+    if (!Array.isArray(products)) return;
+    for (const p of products) {
+      if (!p || typeof p !== "object") continue;
+      const pp = p as Record<string, unknown>;
+      const productId = String(pp.id ?? pp.product_id ?? "");
+      const productName = String(pp.name ?? pp.title ?? pp.product_name ?? "");
+      emit(itemId, productId, productName);
+    }
+  };
+
+  const walkMaps = (maps: unknown): void => {
+    if (!maps || typeof maps !== "object") return;
+    if (Array.isArray(maps)) {
+      for (const entry of maps) {
+        if (!entry || typeof entry !== "object") continue;
+        const e = entry as Record<string, unknown>;
+        const itemId = String(e.item_id ?? e.itemId ?? e.video_id ?? "");
+        walkProducts(itemId, e.products ?? e.product_list);
+      }
+      return;
+    }
+    const obj = maps as Record<string, unknown>;
+    if ("item_id" in obj || "itemId" in obj || "video_id" in obj) {
+      const itemId = String(obj.item_id ?? obj.itemId ?? obj.video_id ?? "");
+      walkProducts(itemId, obj.products ?? obj.product_list);
+      return;
+    }
+    for (const [key, value] of Object.entries(obj)) {
+      if (!value || typeof value !== "object") continue;
+      if (/^\d{15,}$/.test(key)) {
+        const v = value as Record<string, unknown>;
+        walkProducts(key, v.products ?? v.product_list ?? v);
+      }
+    }
+  };
+
+  const segments = Array.isArray(r.segments) ? (r.segments as unknown[]) : [];
+  for (const seg of segments) {
+    if (!seg || typeof seg !== "object") continue;
+    const s = seg as Record<string, unknown>;
+    const timedLists = Array.isArray(s.timed_lists)
+      ? (s.timed_lists as unknown[])
+      : [];
+    for (const tl of timedLists) {
+      if (!tl || typeof tl !== "object") continue;
+      const t = tl as Record<string, unknown>;
+      const map =
+        t.videoToProductsMap ??
+        t.video_to_products_map ??
+        t.videoToProducts ??
+        t.item_products ??
+        t;
+      walkMaps(map);
+    }
+  }
+  if (out.length === 0) {
+    walkMaps(
+      r.videoToProductsMap ??
+        r.video_to_products_map ??
+        r.videoToProducts ??
+        r,
+    );
+  }
+  return out;
+}
+
+/**
+ * Pluck the summed stats block from a
+ * get_video_to_product_stats response. Walks all segments +
+ * timed_stats and sums each metric across time buckets so
+ * callers get a single (period-aggregate) row per pair.
+ *
+ * Real response shape (verified 2026-07-10):
+ *   data.segments[].timed_stats[].stats: {
+ *     item_id, product_id,
+ *     product_revenue.amount / currency_code,
+ *     direct_revenue.amount,
+ *     product_sales_cnt, product_view_cnt, product_click_cnt,
+ *     order_cnt
+ *   }
+ */
+function pluckPairStats(raw: unknown): {
+  gmv: number;
+  currencyCode: string;
+  itemsSold: number;
+  productViews: number;
+  productClicks: number;
+  orderCount: number;
+} | null {
+  const r = unwrapEnvelope(raw);
+  const segments = Array.isArray(r.segments) ? (r.segments as unknown[]) : [];
+  if (segments.length === 0) return null;
+
+  // TikHub returns two segments for pair stats:
+  //   - Segment 1: monthly-granularity aggregate over a 2-month
+  //     window (entry 1 = older month, entry 2 = recent month)
+  //   - Segment 2: daily-granularity breakdown of ONLY the recent
+  //     month
+  //
+  // Segment 2's daily total == segment 1's entry-2 total. Both
+  // represent the SAME data. Summing both, or summing segment 1's
+  // TWO entries, adds old + recent — that's how a product with 2
+  // sales in June + 2 in July ends up doubled to 4.
+  //
+  // Fix: pick the finest-granularity segment (smallest bucket
+  // delta = daily). That's the "recent period only" one; summing
+  // its buckets gives the correct recent-window total.
+  let best: Record<string, unknown> | null = null;
+  let bestDelta = Number.POSITIVE_INFINITY;
+  for (const seg of segments) {
+    if (!seg || typeof seg !== "object") continue;
+    const s = seg as Record<string, unknown>;
+    const timedStats = Array.isArray(s.timed_stats)
+      ? (s.timed_stats as unknown[])
+      : [];
+    if (timedStats.length === 0) continue;
+    const first = timedStats[0] as Record<string, unknown> | undefined;
+    if (!first) continue;
+    const startTs = Number(first.start_timestamp ?? 0);
+    const endTs = Number(first.end_timestamp ?? 0);
+    const delta = endTs - startTs;
+    if (delta > 0 && delta < bestDelta) {
+      bestDelta = delta;
+      best = s;
+    }
+  }
+  if (!best) best = segments[0] as Record<string, unknown>;
+
+  const timedStats = Array.isArray(best.timed_stats)
+    ? (best.timed_stats as unknown[])
+    : [];
+
+  // Window filter: sum only buckets whose start is within the last
+  // PAIR_STATS_WINDOW_DAYS (default 7). TikHub returns the whole
+  // calendar month; without filtering we'd count sales from ~28
+  // days back, but the operator compares this panel to their
+  // TikTok Creator Center "7D" view. Matching that window here
+  // stops the appearance of doubling on accounts where earlier
+  // days also had sales.
+  const nowSec = Math.floor(Date.now() / 1000);
+  const cutoffSec = nowSec - PAIR_STATS_WINDOW_DAYS * 86400;
+
+  let gmv = 0;
+  let itemsSold = 0;
+  let productViews = 0;
+  let productClicks = 0;
+  let orderCount = 0;
+  let currencyCode = "";
+  let seenAny = false;
+
+  for (const t of timedStats) {
+    if (!t || typeof t !== "object") continue;
+    const row = t as Record<string, unknown>;
+    const stats = (row.stats ?? {}) as Record<string, unknown>;
+    if (Object.keys(stats).length === 0) continue;
+    // Skip buckets that started before the window cutoff.
+    const bucketStart = Number(row.start_timestamp ?? 0);
+    if (bucketStart > 0 && bucketStart < cutoffSec) continue;
+    seenAny = true;
+    const revBlock = (stats.product_revenue ?? {}) as Record<string, unknown>;
+    gmv           += num(revBlock.amount);
+    itemsSold     += Math.trunc(num(stats.product_sales_cnt));
+    productViews  += Math.trunc(num(stats.product_view_cnt));
+    productClicks += Math.trunc(num(stats.product_click_cnt));
+    orderCount    += Math.trunc(num(stats.order_cnt));
+    if (!currencyCode) {
+      currencyCode = String(revBlock.currency_code ?? "USD");
+    }
+  }
+  if (!seenAny) return null;
+  return {
+    gmv,
+    currencyCode: currencyCode || "USD",
+    itemsSold,
+    productViews,
+    productClicks,
+    orderCount,
+  };
+}
+
+/**
+ * Per-day variant of pluckPairStats. Picks the finest-granularity
+ * segment (same logic) and returns one bucket per non-empty day
+ * with actual data, instead of a single summed aggregate.
+ *
+ * Non-empty means EITHER the stats block has values other than
+ * zero OR at minimum has product_view_cnt > 0 (we keep view-only
+ * days so trending charts show what got surfaced even without
+ * sales). Full zero-value buckets are skipped to keep the DB
+ * table sparse.
+ *
+ * Also returns the currency code observed on any bucket for
+ * caller-side persistence.
+ */
+function pluckPairStatsDaily(raw: unknown): {
+  buckets: ProductAttributionDailyBucket[];
+  currencyCode: string;
+} {
+  const empty = { buckets: [] as ProductAttributionDailyBucket[], currencyCode: "USD" };
+  const r = unwrapEnvelope(raw);
+  const segments = Array.isArray(r.segments) ? (r.segments as unknown[]) : [];
+  if (segments.length === 0) return empty;
+
+  // Same finest-granularity picker as pluckPairStats. We want the
+  // daily segment (bucket delta = 1 day) so each bucket represents
+  // one day.
+  let best: Record<string, unknown> | null = null;
+  let bestDelta = Number.POSITIVE_INFINITY;
+  for (const seg of segments) {
+    if (!seg || typeof seg !== "object") continue;
+    const s = seg as Record<string, unknown>;
+    const timedStats = Array.isArray(s.timed_stats)
+      ? (s.timed_stats as unknown[])
+      : [];
+    if (timedStats.length === 0) continue;
+    const first = timedStats[0] as Record<string, unknown> | undefined;
+    if (!first) continue;
+    const startTs = Number(first.start_timestamp ?? 0);
+    const endTs = Number(first.end_timestamp ?? 0);
+    const delta = endTs - startTs;
+    if (delta > 0 && delta < bestDelta) {
+      bestDelta = delta;
+      best = s;
+    }
+  }
+  if (!best) best = segments[0] as Record<string, unknown>;
+
+  const timedStats = Array.isArray(best.timed_stats)
+    ? (best.timed_stats as unknown[])
+    : [];
+
+  const out: ProductAttributionDailyBucket[] = [];
+  let currencyCode = "";
+
+  for (const t of timedStats) {
+    if (!t || typeof t !== "object") continue;
+    const row = t as Record<string, unknown>;
+    const stats = (row.stats ?? {}) as Record<string, unknown>;
+    if (Object.keys(stats).length === 0) continue;
+
+    const startTs = Number(row.start_timestamp ?? 0);
+    if (startTs <= 0) continue;
+    const date = new Date(startTs * 1000);
+    if (Number.isNaN(date.getTime())) continue;
+    const dateUtc = new Date(
+      Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()),
+    );
+
+    const revBlock = (stats.product_revenue ?? {}) as Record<string, unknown>;
+    const gmv           = num(revBlock.amount);
+    const itemsSold     = Math.trunc(num(stats.product_sales_cnt));
+    const productViews  = Math.trunc(num(stats.product_view_cnt));
+    const productClicks = Math.trunc(num(stats.product_click_cnt));
+    const orderCount    = Math.trunc(num(stats.order_cnt));
+
+    // Skip fully-zero buckets — nothing to persist. A missing row
+    // in the DB reads as "no activity that day", which is what we
+    // want.
+    if (
+      gmv === 0 &&
+      itemsSold === 0 &&
+      productViews === 0 &&
+      productClicks === 0 &&
+      orderCount === 0
+    ) {
+      continue;
+    }
+
+    if (!currencyCode) {
+      currencyCode = String(revBlock.currency_code ?? "");
+    }
+
+    out.push({
+      date: dateUtc,
+      gmv,
+      itemsSold,
+      orderCount,
+      productViews,
+      productClicks,
+    });
+  }
+
+  return {
+    buckets: out.sort((a, b) => a.date.getTime() - b.date.getTime()),
+    currencyCode: currencyCode || "USD",
+  };
 }
 
 function num(v: unknown): number {

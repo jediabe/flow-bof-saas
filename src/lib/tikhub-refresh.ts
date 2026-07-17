@@ -218,10 +218,68 @@ export async function refreshAccountSnapshot(
 
     // 4. Per-product refresh — only when caller asked for it
     //    (manual button + daily cron; not the 6-hourly cron).
+    //
+    //    We use the DAILY-granularity variant of the video↔product
+    //    attribution chain (getProductAttributionDaily). This
+    //    returns per-day buckets from the finest-granularity
+    //    segment of get_video_to_product_stats. Persisted to
+    //    TikTokProductDaily so analytics queries can window-filter
+    //    at render time and match Creator Center's exact window
+    //    (7D, 30D, etc.).
+    //
+    //    TikTokProduct is still upserted here to hold product
+    //    METADATA (title, thumbnail, currency) — its stats fields
+    //    become "sum-in-window" derived at read time, but we keep
+    //    them updated with a lifetime/current-cycle snapshot for
+    //    quick single-row queries.
     if (opts.includeProducts) {
-      const products = await tikhub.getProductAnalytics({ cookie });
+      const { products, monthTotals } = await tikhub.getProductAttributionDaily({
+        cookie,
+        maxVideos: 25,
+        maxPairs:  60,
+      });
+      // Also fetch LAST month's totals in parallel so the 30-day
+      // dashboard window has both months available. One extra
+      // paginated video-list walk per refresh — a real cost, but
+      // it's the only way for a mid-month 30d view to reflect
+      // the last calendar month without adding a full second
+      // pair-chain.
+      const prevMonthTotals = await tikhub.getAccountMonthTotals({
+        cookie,
+        monthAnchor: tikhub.firstOfPrevMonthUS(),
+      });
+      // Persist the account-level month totals from the
+      // paginated video-list. These are the trustworthy "this
+      // month" numbers the operator compares to their TikTok
+      // Creator Center — the account-level insights endpoint
+      // often lags a day, but the video-list pagination adds up
+      // to the ground truth.
+      await db.tikTokAccount.update({
+        where: { id: row.id },
+        data: {
+          currentMonthGmv:        monthTotals.gmv,
+          currentMonthDirectGmv:  monthTotals.directGmv,
+          currentMonthItemsSold:  monthTotals.itemsSold,
+          currentMonthCurrency:   monthTotals.currencyCode,
+          currentMonthAnchor:     monthTotals.monthAnchor,
+          currentMonthCapturedAt: new Date(),
+          previousMonthGmv:        prevMonthTotals.gmv,
+          previousMonthDirectGmv:  prevMonthTotals.directGmv,
+          previousMonthItemsSold:  prevMonthTotals.itemsSold,
+          previousMonthCurrency:   prevMonthTotals.currencyCode,
+          previousMonthAnchor:     prevMonthTotals.monthAnchor,
+          previousMonthCapturedAt: new Date(),
+        },
+      });
       for (const p of products) {
         if (!p.externalId) continue;
+        // Metadata upsert — sum this cycle's buckets for the
+        // snapshot totals on the parent row.
+        const cycleGmv        = p.buckets.reduce((a, b) => a + b.gmv,           0);
+        const cycleItems      = p.buckets.reduce((a, b) => a + b.itemsSold,     0);
+        const cycleViews      = p.buckets.reduce((a, b) => a + b.productViews,  0);
+        const cycleClicks     = p.buckets.reduce((a, b) => a + b.productClicks, 0);
+        const cycleOrders     = p.buckets.reduce((a, b) => a + b.orderCount,    0);
         await db.tikTokProduct.upsert({
           where: {
             accountId_externalId: {
@@ -230,22 +288,133 @@ export async function refreshAccountSnapshot(
             },
           },
           create: {
-            accountId: row.id,
-            externalId: p.externalId,
-            title: p.title,
-            gmv: p.gmv,
-            itemsSold: p.itemsSold,
-            commission: p.commission,
+            accountId:     row.id,
+            externalId:    p.externalId,
+            title:         p.title,
+            gmv:           cycleGmv,
+            currencyCode:  p.currencyCode,
+            itemsSold:     cycleItems,
+            commission:    0,
+            productViews:  cycleViews,
+            productClicks: cycleClicks,
+            orderCount:    cycleOrders,
           },
           update: {
-            title: p.title,
-            gmv: p.gmv,
-            itemsSold: p.itemsSold,
-            commission: p.commission,
-            capturedAt: new Date(),
+            title:         p.title,
+            gmv:           cycleGmv,
+            currencyCode:  p.currencyCode,
+            itemsSold:     cycleItems,
+            productViews:  cycleViews,
+            productClicks: cycleClicks,
+            orderCount:    cycleOrders,
+            capturedAt:    new Date(),
           },
         });
         productsCaptured++;
+
+        // Per-day buckets — upsert by (account, product, date).
+        // pluckPairStatsDaily already dropped zero-value days;
+        // remaining rows are all meaningful. Existing rows for
+        // matching dates get updated in place; new dates get
+        // inserted; days that used to have data but no longer do
+        // stay in the DB (harmless, they still sum to their
+        // captured values).
+        for (const b of p.buckets) {
+          await db.tikTokProductDaily.upsert({
+            where: {
+              accountId_externalId_date: {
+                accountId:  row.id,
+                externalId: p.externalId,
+                date:       b.date,
+              },
+            },
+            create: {
+              accountId:     row.id,
+              externalId:    p.externalId,
+              date:          b.date,
+              gmv:           b.gmv,
+              currencyCode:  p.currencyCode,
+              itemsSold:     b.itemsSold,
+              orderCount:    b.orderCount,
+              productViews:  b.productViews,
+              productClicks: b.productClicks,
+            },
+            update: {
+              gmv:           b.gmv,
+              currencyCode:  p.currencyCode,
+              itemsSold:     b.itemsSold,
+              orderCount:    b.orderCount,
+              productViews:  b.productViews,
+              productClicks: b.productClicks,
+              capturedAt:    new Date(),
+            },
+          });
+        }
+      }
+
+      // 5. get_product_analytics_list — the operator-verified
+      //    authoritative source for per-product item_sold_cnt AND
+      //    commission. Called with a BROAD date range (one year
+      //    back → first-of-next-month, exclusive) so every
+      //    product the creator has promoted this year shows up,
+      //    with its lifetime-in-window commission and units
+      //    sold.
+      //
+      //    Results overwrite the metadata written by the pair
+      //    chain above — the pair chain gives per-day granularity
+      //    via TikTokProductDaily but doesn't return commission,
+      //    while this endpoint returns commission but only
+      //    per-product totals for the range. We keep both writes
+      //    to have both dimensions.
+      const nowRefresh = new Date();
+      const oneYearAgo = new Date(
+        Date.UTC(nowRefresh.getUTCFullYear() - 1, nowRefresh.getUTCMonth(), 1),
+      );
+      const nextMonthStart = new Date(
+        Date.UTC(nowRefresh.getUTCFullYear(), nowRefresh.getUTCMonth() + 1, 1),
+      );
+      try {
+        const productAnalyticsRows = await tikhub.getProductAnalytics({
+          cookie,
+          startDate: oneYearAgo,
+          endDate:   nextMonthStart,
+          maxPages:  30,
+        });
+        for (const p of productAnalyticsRows) {
+          if (!p.externalId) continue;
+          await db.tikTokProduct.upsert({
+            where: {
+              accountId_externalId: {
+                accountId: row.id,
+                externalId: p.externalId,
+              },
+            },
+            create: {
+              accountId:     row.id,
+              externalId:    p.externalId,
+              title:         p.title,
+              gmv:           p.gmv,
+              currencyCode:  p.currencyCode,
+              itemsSold:     p.itemsSold,
+              commission:    p.commission,
+              productViews:  0,
+              productClicks: 0,
+              orderCount:    0,
+            },
+            update: {
+              title:         p.title,
+              gmv:           p.gmv,
+              currencyCode:  p.currencyCode,
+              itemsSold:     p.itemsSold,
+              commission:    p.commission,
+              capturedAt:    new Date(),
+            },
+          });
+        }
+      } catch {
+        // Non-fatal — pair-chain metadata already covers the row.
+        // TikHub can occasionally 429 the analytics list endpoint
+        // on refresh-heavy cycles; keep going.
       }
     }
 

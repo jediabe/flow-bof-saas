@@ -614,12 +614,34 @@ model TikTokAccount {
   // Truncated to ~500 chars by the server actions before write.
   cookieError     String?
   lastCheckedAt   DateTime?
+  // Current-calendar-month totals summed from
+  // get_video_list_analytics per-video rows. Updated by every
+  // products refresh — much fresher than the daily insights
+  // rows and used as the canonical source for the "this month"
+  // metric cards + net profit calc.
+  currentMonthGmv         Decimal   @default(0)
+  currentMonthDirectGmv   Decimal   @default(0)
+  currentMonthItemsSold   Int       @default(0)
+  currentMonthCurrency    String    @default("USD")
+  currentMonthAnchor      String    @default("")
+  currentMonthCapturedAt  DateTime?
+  // Same snapshot for the PREVIOUS calendar month. Used for the
+  // 30-day dashboard window, which spans two months from mid-month
+  // "today". Populated by the same refresh call — one additional
+  // paginated video-list walk per account per refresh.
+  previousMonthGmv        Decimal   @default(0)
+  previousMonthDirectGmv  Decimal   @default(0)
+  previousMonthItemsSold  Int       @default(0)
+  previousMonthCurrency   String    @default("USD")
+  previousMonthAnchor     String    @default("")
+  previousMonthCapturedAt DateTime?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
   health   TikTokAccountHealth[]
   revenue  TikTokAccountRevenue[]
   products TikTokProduct[]
+  productDaily TikTokProductDaily[]
   pnl      TikTokAccountPnl[]
 
   @@index([workspaceId])
@@ -682,13 +704,55 @@ model TikTokProduct {
   externalId String
   title      String
   gmv        Decimal
+  // ISO 4217 code from TikHub's product_revenue.currency_code.
+  currencyCode String        @default("USD")
   itemsSold  Int
   commission Decimal
+  // Attribution funnel from get_video_to_product_stats — how many
+  // product-card views / clicks / orders drove the sales above.
+  // Populated by the video↔product chain in refresh.
+  productViews  Int @default(0)
+  productClicks Int @default(0)
+  orderCount    Int @default(0)
   capturedAt DateTime      @default(now())
   updatedAt  DateTime      @updatedAt
 
   @@unique([accountId, externalId])
   @@index([accountId])
+}
+
+// Per-day per-product attribution buckets, sourced from the
+// finest-granularity (daily) segment of get_video_to_product_stats.
+// The parent TikTokProduct row holds product METADATA (title,
+// currency, latest-cycle snapshot). This table holds the raw
+// per-day numbers so the "Top products by units sold" panel can
+// window-filter accurately at query time instead of showing the
+// whole month.
+//
+// Only non-zero buckets are stored (refresh skips days where the
+// pair returned zeros). A missing row for a day means "no sales
+// that day", which is fine for sum queries.
+model TikTokProductDaily {
+  id            String        @id @default(cuid())
+  accountId     String
+  account       TikTokAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  // TikHub product id — matches TikTokProduct.externalId. Not a
+  // FK constraint because product metadata upsert races with the
+  // daily upserts; matching by (accountId, externalId) at query
+  // time is safer than a hard foreign key.
+  externalId    String
+  date          DateTime      // UTC midnight of the bucket day
+  gmv           Decimal       @default(0)
+  currencyCode  String        @default("USD")
+  itemsSold     Int           @default(0)
+  orderCount    Int           @default(0)
+  productViews  Int           @default(0)
+  productClicks Int           @default(0)
+  capturedAt    DateTime      @default(now())
+
+  @@unique([accountId, externalId, date])
+  @@index([accountId, date])
+  @@index([accountId, externalId])
 }
 
 model TikTokAccountPnl {

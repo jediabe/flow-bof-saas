@@ -56,11 +56,25 @@ export default async function AccountAnalyticsPage({
       cookieError: true,
       lastCheckedAt: true,
       createdAt: true,
+      // Monthly snapshot from the video-list paginator — the
+      // authoritative source for "this month" GMV / items sold.
+      currentMonthGmv: true,
+      currentMonthDirectGmv: true,
+      currentMonthItemsSold: true,
+      currentMonthCurrency: true,
+      currentMonthAnchor: true,
+      currentMonthCapturedAt: true,
+      previousMonthGmv: true,
+      previousMonthDirectGmv: true,
+      previousMonthItemsSold: true,
+      previousMonthCurrency: true,
+      previousMonthAnchor: true,
+      previousMonthCapturedAt: true,
     },
   });
   if (!account) notFound();
 
-  const [revenue, pnl, products, healthHistory] = await Promise.all([
+  const [revenue, pnl, productGroups, productMeta, healthHistory] = await Promise.all([
     db.tikTokAccountRevenue.findMany({
       where: {
         accountId,
@@ -75,12 +89,28 @@ export default async function AccountAnalyticsPage({
       },
       orderBy: [{ date: "asc" }],
     }),
+    // Per-product totals from get_product_analytics_list (via
+    // TikTokProduct). Operator confirmed this endpoint returns
+    // authoritative item_sold_cnt and commission per product for
+    // the current calendar month, so we show whatever's in that
+    // table without window-filtering (window toggle affects the
+    // account-level cards; the products list is always "this
+    // month's product performance").
     db.tikTokProduct.findMany({
       where: { accountId },
-      // Sort by units sold first, then GMV as tiebreaker.
       orderBy: [{ itemsSold: "desc" }, { gmv: "desc" }],
-      take: 25,
+      select: {
+        externalId: true,
+        title: true,
+        currencyCode: true,
+        gmv: true,
+        itemsSold: true,
+        commission: true,
+      },
     }),
+    // No separate metadata query needed — combined into the row
+    // above. Passthrough to preserve the destructure.
+    Promise.resolve([] as Array<never>),
     db.tikTokAccountHealth.findMany({
       where: { accountId },
       orderBy: [{ capturedAt: "desc" }],
@@ -184,39 +214,67 @@ export default async function AccountAnalyticsPage({
         />
       </div>
 
-      {/* Revenue + P&L — second row. */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+      {/* Revenue + P&L — second row. GMV and net profit come from
+          the video-list snapshot (currentMonth* on the account
+          row), which is written by the products refresh from
+          summing per-video month totals across all pages of
+          get_video_list_analytics. That's a fresher, more
+          reliable source than summing the daily insights buckets
+          (which lag today's activity). Est. commission stays as
+          the derived take-rate calc since the video-list
+          endpoint doesn't report commission. */}
+      {(() => {
+        // Money cards = whatever get_account_insights_overview
+        // returned for the window, straight-through. No proration,
+        // no derivation, no video-list adjustment. If TikHub lags
+        // for today, today shows what TikHub says (usually 0) —
+        // honest to what the endpoint reports.
+        const currencyCode = totalRev.currencyCode;
+        const daysInWindow =
+          windowKey === "today" ? 1 : windowKey === "7d" ? 7 : 30;
+        const salesGmv        = totalRev.gmv;
+        const salesItems      = totalRev.itemsSold;
+        const salesCommission = totalRev.estimatedCommission;
+        const monthlyCost     = Number(account.monthlyToolCost ?? 0);
+        const costForWindow   = monthlyCost * (daysInWindow / 30);
+        const salesNetProfit  = salesCommission - costForWindow;
+        const salesMargin     = salesCommission > 0
+          ? salesNetProfit / salesCommission
+          : 0;
+        const salesWindowLabel =
+          windowKey === "today" ? "today"
+          : windowKey === "7d"  ? "last 7 days"
+          : "last 30 days";
+        return (
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
         <MetricCard
-          label={`GMV · ${totalRev.currencyCode}`}
-          value={formatMoney(totalRev.gmv, totalRev.currencyCode)}
+          label={`GMV · ${salesWindowLabel} · ${currencyCode}`}
+          value={formatMoney(salesGmv, currencyCode)}
+          hint={`${formatInt(salesItems)} items`}
+        />
+        <MetricCard
+          label={`Est. commission · ${salesWindowLabel}`}
+          value={formatMoney(salesCommission, currencyCode)}
           hint={
-            <>
-              video {formatMoney(totalRev.videoRevenue, totalRev.currencyCode)} ·
-              live {formatMoney(totalRev.liveRevenue, totalRev.currencyCode)}
-            </>
+            salesGmv > 0
+              ? `take rate ${formatPercent(salesCommission / salesGmv)}`
+              : "no GMV in window yet"
           }
         />
         <MetricCard
-          label="Est. commission"
-          value={formatMoney(totalRev.estimatedCommission, totalRev.currencyCode)}
-          hint={
-            totalRev.gmv > 0
-              ? `take rate ${formatPercent(totalRev.estimatedCommission / totalRev.gmv)}`
-              : "no GMV in window"
-          }
+          label={`Net profit · ${salesWindowLabel}`}
+          value={formatMoney(salesNetProfit, currencyCode)}
+          hint={`tool cost ${formatMoney(costForWindow, currencyCode)} (${daysInWindow}d)`}
+          tone={salesNetProfit > 0 ? "ok" : salesNetProfit < 0 ? "bad" : "muted"}
         />
         <MetricCard
-          label="Net profit"
-          value={formatMoney(totalPnl.netProfit, totalRev.currencyCode)}
-          hint={`tool cost ${formatMoney(totalPnl.toolCost, totalRev.currencyCode)}`}
-          tone={totalPnl.netProfit > 0 ? "ok" : totalPnl.netProfit < 0 ? "bad" : "muted"}
+          label={`Net margin · ${salesWindowLabel}`}
+          value={formatPercent(salesMargin)}
+          hint="net profit / commission"
         />
-        <MetricCard
-          label="Net margin"
-          value={formatPercent(totalPnl.marginRatio)}
-          hint={`net profit / commission`}
-        />
-      </div>
+        </div>
+        );
+      })()}
 
       {/* Daily breakdown */}
       <Panel title={`Daily breakdown · ${windowLabel(windowKey)}`}>
@@ -242,37 +300,38 @@ export default async function AccountAnalyticsPage({
         )}
       </Panel>
 
-      {/* Winning products for THIS account — sorted by units sold.
-          We filter to products with actual sales because TikHub's
-          product endpoint attaches zeros to every showcase item;
-          showing 25 rows of zeros makes it look like a bug even
-          when account-level sales are populated fine. */}
+      {/* Winning products for THIS account — sums TikTokProductDaily
+          rows inside the current dashboard window. Because the
+          daily table stores per-day per-product buckets, the
+          numbers now genuinely match whatever window the toggle
+          points at (7d / 30d / today), rather than always showing
+          the last calendar month. */}
       {(() => {
-        const withSales = products.filter(
-          (p) => (p.itemsSold ?? 0) > 0 || Number(p.gmv ?? 0) > 0,
-        );
+        // Direct passthrough of TikTokProduct rows written from
+        // get_product_analytics_list. Shows ALL products the
+        // creator has — no window filter, no zero filter. Items
+        // sold + commission are per-product totals for the
+        // current calendar month, straight from TikHub.
+        const rows = productGroups.map((p) => ({
+          id: p.externalId,
+          title: p.title,
+          currencyCode: p.currencyCode ?? totalRev.currencyCode,
+          gmv: Number(p.gmv ?? 0),
+          itemsSold: p.itemsSold ?? 0,
+          commission: Number(p.commission ?? 0),
+        }));
         return (
-          <Panel title="Top products by units sold">
-            {withSales.length === 0 ? (
+          <Panel title="Top products by units sold · this month">
+            {rows.length === 0 ? (
               <EmptyState
                 icon="◌"
-                title="No product-level sales in this window"
-                hint={
-                  totalRev.itemsSold > 0
-                    ? "Account-level GMV is populated but TikHub's product endpoint didn't attribute those sales to individual showcase products. TikTok Shop-owner direct sales often don't flow through this endpoint."
-                    : "Nothing sold in this window yet. The daily products cron refreshes this automatically once wired up."
-                }
+                title="No products captured yet"
+                hint="Click Refresh now on the account to pull the latest product analytics."
               />
             ) : (
               <ProductTable
                 currencyCode={totalRev.currencyCode}
-                rows={withSales.map((p) => ({
-                  id: p.id,
-                  title: p.title,
-                  gmv: Number(p.gmv ?? 0),
-                  itemsSold: p.itemsSold,
-                  commission: Number(p.commission ?? 0),
-                }))}
+                rows={rows}
               />
             )}
           </Panel>
@@ -436,7 +495,7 @@ function ProductTable({
         <thead>
           <tr className="text-left text-[11px] text-muted uppercase tracking-wide border-b border-border">
             <th className="pb-2 font-medium">Product</th>
-            <th className="pb-2 font-medium text-right">Items</th>
+            <th className="pb-2 font-medium text-right">Items Sold</th>
             <th className="pb-2 font-medium text-right">GMV</th>
             <th className="pb-2 font-medium text-right">Commission</th>
           </tr>

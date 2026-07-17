@@ -46,7 +46,7 @@ export default async function AnalyticsPage({
   // Pull everything in one round-trip. Each table is small enough
   // for an unbounded fetch within the window; we sort + cap on the
   // product list since that's the only one that can grow large.
-  const [accounts, revenue, pnl, products, latestHealthByAccount] =
+  const [accounts, revenue, pnl, productGroups, productMeta, latestHealthByAccount] =
     await Promise.all([
       db.tikTokAccount.findMany({
         where: { workspaceId: workspace.id },
@@ -57,6 +57,10 @@ export default async function AnalyticsPage({
           region: true,
           cookieStatus: true,
           monthlyToolCost: true,
+          currentMonthGmv: true,
+          currentMonthItemsSold: true,
+          currentMonthCurrency: true,
+          currentMonthCapturedAt: true,
         },
       }),
       db.tikTokAccountRevenue.findMany({
@@ -89,22 +93,24 @@ export default async function AnalyticsPage({
           netProfit: true,
         },
       }),
+      // All products across the workspace's accounts, sourced
+      // directly from get_product_analytics_list writes. Sort
+      // by items sold desc; show every product without filter.
       db.tikTokProduct.findMany({
         where: { account: { workspaceId: workspace.id } },
-        // Sort by units sold first (what the operator actually
-        // cares about — "which products moved"), then by GMV as
-        // tiebreaker for products with the same unit count.
         orderBy: [{ itemsSold: "desc" }, { gmv: "desc" }],
-        take: 25,
         select: {
-          id: true,
           accountId: true,
+          externalId: true,
           title: true,
+          currencyCode: true,
           gmv: true,
           itemsSold: true,
           commission: true,
         },
       }),
+      // Passthrough — kept to preserve the destructure.
+      Promise.resolve([] as Array<never>),
       // Latest health row per account. SQLite + Prisma don't have
       // a clean DISTINCT-ON, so we fetch the N rows per account
       // and pick the freshest in code.
@@ -336,44 +342,35 @@ export default async function AnalyticsPage({
         </div>
       </Panel>
 
-      {/* Top products across all accounts — sorted by units sold.
-          Same filter as the per-account view: hide showcase items
-          with no attributed sales so the panel isn't a wall of
-          zeros for accounts where TikHub's product endpoint
-          doesn't see the shop-owner attribution. */}
+      {/* Top products across all accounts — window-filtered per-day
+          sums from TikTokProductDaily. See the per-account page
+          for the rationale on why we don't sum TikTokProduct
+          directly. */}
       {(() => {
-        const withSales = products.filter(
-          (p) => p.itemsSold > 0 || Number(p.gmv ?? 0) > 0,
-        );
+        const rows = productGroups.map((p) => ({
+          id: `${p.accountId}::${p.externalId}`,
+          accountId: p.accountId,
+          accountLabel:
+            accounts.find((a) => a.id === p.accountId)?.label ?? "—",
+          title: p.title,
+          gmv: Number(p.gmv ?? 0),
+          currencyCode:
+            p.currencyCode ??
+            perAccountRevenue.get(p.accountId)?.currencyCode ??
+            "USD",
+          itemsSold: p.itemsSold ?? 0,
+          commission: Number(p.commission ?? 0),
+        }));
         return (
-          <Panel title="Top products by units sold (across all accounts)">
-            {withSales.length === 0 ? (
+          <Panel title="Top products by units sold · this month (across all accounts)">
+            {rows.length === 0 ? (
               <EmptyState
                 icon="◌"
-                title="No product-level sales in this window"
-                hint={
-                  totalRevenue.itemsSold > 0
-                    ? "Account-level GMV is populated but TikHub's product endpoint didn't attribute those sales to individual showcase products. Common for shop-owner direct sales."
-                    : "The daily products cron writes this once wired up."
-                }
+                title="No products captured yet"
+                hint="Click Refresh now on the accounts page to pull the latest product analytics."
               />
             ) : (
-              <ProductTable
-                rows={withSales.map((p) => ({
-                  id: p.id,
-                  accountId: p.accountId,
-                  accountLabel:
-                    accounts.find((a) => a.id === p.accountId)?.label ?? "—",
-                  title: p.title,
-                  gmv: Number(p.gmv ?? 0),
-                  // Look up currency from the same account's revenue
-                  // rollup — accounts don't mix currencies.
-                  currencyCode:
-                    perAccountRevenue.get(p.accountId)?.currencyCode ?? "USD",
-                  itemsSold: p.itemsSold,
-                  commission: Number(p.commission ?? 0),
-                }))}
-              />
+              <ProductTable rows={rows} />
             )}
           </Panel>
         );
@@ -448,7 +445,7 @@ function ProductTable({
           <tr className="text-left text-[11px] text-muted uppercase tracking-wide border-b border-border">
             <th className="pb-2 font-medium">Product</th>
             <th className="pb-2 font-medium">Account</th>
-            <th className="pb-2 font-medium text-right">Items</th>
+            <th className="pb-2 font-medium text-right">Items Sold</th>
             <th className="pb-2 font-medium text-right">GMV</th>
             <th className="pb-2 font-medium text-right">Commission</th>
           </tr>

@@ -455,6 +455,14 @@ export async function diagnoseTikTokAccount(
     { start_date: fmtUS(today), page: 1 },
   );
 
+  // ===== Multi-step attribution probe =====
+  // Chain: recent videos → their tagged products → per-pair sales
+  // stats via get_video_to_product_stats. This is the one endpoint
+  // that returns product_sales_cnt, product_revenue, etc. If it
+  // shows non-zero data for even one pair, we know sales attribution
+  // works and can wire this into refresh proper.
+  await probeVideoProductChain(cookie, items, today);
+
   const failed = items.filter((i) => !i.ok).length;
   return {
     ok: failed === 0,
@@ -506,4 +514,309 @@ async function callRawTikHub(
     throw new Error(`TikHub inner code ${(json as { code: number }).code}: ${msg}`);
   }
   return (json as { data?: unknown }).data ?? json;
+}
+
+/**
+ * Walk the multi-step attribution chain and append probe results
+ * to the shared diagnostic items array. Used to test whether
+ * TikHub can attribute per-product sales via the video ↔ product
+ * pair endpoint, which is the one endpoint documented to expose
+ * `product_sales_cnt` / `product_revenue`.
+ *
+ * Chain (all TikHub calls; each incurs a charge):
+ *   1. get_video_list_analytics — recent videos
+ *   2. get_video_associated_product_list — products tagged per video
+ *      (batched: accepts an array of item_ids)
+ *   3. get_video_to_product_stats — per-(video, product) sales stats
+ *      (probes up to 5 pairs)
+ *
+ * ~7 TikHub calls per invocation. Bail early at each step if the
+ * previous step returned nothing useful, so a dry account still
+ * only costs 1-2 calls instead of the full 7.
+ */
+async function probeVideoProductChain(
+  cookie: string,
+  items: DiagnosticItem[],
+  today: Date,
+): Promise<void> {
+  const fmtUS = (d: Date) =>
+    `${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}-${d.getUTCFullYear()}`;
+
+  // --- Step 1: pull the TOP-SELLING video list — sort by
+  // VIDEO_LIST_ITEM_SOLD_CNT, page=0 (0-indexed), start_date
+  // pinned to MM-01-YYYY per docs
+  // (https://docs.tikhub.io/289437016e0). Zero-sales videos are
+  // filtered out downstream since the list is sorted desc; the
+  // first zero means everything after it is also zero.
+  const monthAnchor = `${String(today.getUTCMonth() + 1).padStart(2, "0")}-01-${today.getUTCFullYear()}`;
+  let videoIds: string[] = [];
+  try {
+    const raw = await callRawTikHub(
+      "/api/v1/tiktok/creator/get_video_list_analytics",
+      {
+        cookie,
+        start_date: monthAnchor,
+        page: 0,
+        rules: "VIDEO_LIST_ITEM_SOLD_CNT",
+      },
+    );
+    videoIds = extractVideoIds(raw).slice(0, 5);
+  } catch (err) {
+    items.push({
+      label: "Chain: recent videos (for attribution probe)",
+      endpoint: "/api/v1/tiktok/creator/get_video_list_analytics",
+      ok: false,
+      raw: null,
+      error: (err as Error).message.slice(0, 300),
+    });
+    return;
+  }
+  items.push({
+    label: `Chain step 1 — recent video IDs (${videoIds.length})`,
+    endpoint: "/api/v1/tiktok/creator/get_video_list_analytics",
+    ok: true,
+    raw: JSON.stringify(videoIds, null, 2),
+    error: null,
+  });
+  if (videoIds.length === 0) return;
+
+  // --- Step 2: batch-fetch associated products for the first N
+  // videos in ONE call (endpoint accepts item_ids: array).
+  let pairs: Array<{ item_id: string; product_id: string; product_name: string }> = [];
+  try {
+    const raw = await callRawTikHub(
+      "/api/v1/tiktok/creator/get_video_associated_product_list",
+      { cookie, start_date: fmtUS(today), item_ids: videoIds },
+    );
+    pairs = extractVideoProductPairs(raw);
+    items.push({
+      label: `Chain step 2 — video↔product pairs (${pairs.length})`,
+      endpoint: "/api/v1/tiktok/creator/get_video_associated_product_list",
+      ok: true,
+      raw: JSON.stringify(pairs.slice(0, 20), null, 2),
+      error: null,
+    });
+  } catch (err) {
+    items.push({
+      label: "Chain step 2 — video associated products",
+      endpoint: "/api/v1/tiktok/creator/get_video_associated_product_list",
+      ok: false,
+      raw: null,
+      error: (err as Error).message.slice(0, 300),
+    });
+    return;
+  }
+  if (pairs.length === 0) {
+    items.push({
+      label: "Chain step 3 — SKIPPED (no video↔product pairs found)",
+      endpoint: "/api/v1/tiktok/creator/get_video_to_product_stats",
+      ok: false,
+      raw: null,
+      error:
+        "extractVideoProductPairs found nothing in the step-2 response. " +
+        "Paste the raw JSON of step 2 back and I'll adjust the extractor.",
+    });
+    return;
+  }
+
+  // --- Step 3: probe up to 5 (video, product) pairs.
+  const probePairs = pairs.slice(0, 5);
+  for (const p of probePairs) {
+    const label = `Chain step 3 — pair stats · vid …${p.item_id.slice(-6)} × prod …${p.product_id.slice(-6)}`;
+    try {
+      const raw = await callRawTikHub(
+        "/api/v1/tiktok/creator/get_video_to_product_stats",
+        {
+          cookie,
+          start_date: fmtUS(today),
+          item_id: p.item_id,
+          product_id: p.product_id,
+        },
+      );
+      const json = JSON.stringify(raw, null, 2);
+      items.push({
+        label,
+        endpoint: "/api/v1/tiktok/creator/get_video_to_product_stats",
+        ok: true,
+        raw:
+          json.length > DIAGNOSTIC_RAW_MAX
+            ? json.slice(0, DIAGNOSTIC_RAW_MAX) +
+              `\n… [truncated, ${json.length - DIAGNOSTIC_RAW_MAX} more bytes]`
+            : json,
+        error: null,
+      });
+    } catch (err) {
+      items.push({
+        label,
+        endpoint: "/api/v1/tiktok/creator/get_video_to_product_stats",
+        ok: false,
+        raw: null,
+        error: (err as Error).message.slice(0, 300),
+      });
+    }
+  }
+}
+
+/**
+ * Walk a get_video_list_analytics response and pull out the recent
+ * video IDs. Defensive against shape drift — the plucker for real
+ * lists is in tikhub.ts, but here we only care about the ids.
+ */
+function extractVideoIds(raw: unknown): string[] {
+  const r = unwrapDataEnvelope(raw);
+  const segments = Array.isArray(r.segments) ? (r.segments as unknown[]) : [];
+  const out: string[] = [];
+  for (const seg of segments) {
+    if (!seg || typeof seg !== "object") continue;
+    const s = seg as Record<string, unknown>;
+    const timedLists = Array.isArray(s.timed_lists)
+      ? (s.timed_lists as unknown[])
+      : [];
+    for (const tl of timedLists) {
+      if (!tl || typeof tl !== "object") continue;
+      const stats = Array.isArray((tl as Record<string, unknown>).stats)
+        ? ((tl as Record<string, unknown>).stats as unknown[])
+        : [];
+      for (const item of stats) {
+        if (!item || typeof item !== "object") continue;
+        const meta = ((item as Record<string, unknown>).video_meta ?? {}) as Record<
+          string,
+          unknown
+        >;
+        const id = String(meta.item_id ?? "");
+        if (id && !out.includes(id)) out.push(id);
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Walk a get_video_associated_product_list response and pull out
+ * (video_id, product_id, product_name) triples. Response shape per
+ * TikHub docs: segments[].timed_lists[].videoToProductsMap =
+ * { item_id, products: [{ id, name }] }.
+ */
+function extractVideoProductPairs(raw: unknown): Array<{
+  item_id: string;
+  product_id: string;
+  product_name: string;
+}> {
+  const r = unwrapDataEnvelope(raw);
+  const out: Array<{ item_id: string; product_id: string; product_name: string }> =
+    [];
+  const seen = new Set<string>();
+
+  /** Emit a single (video, product) pair, dedup by (video::product). */
+  const emit = (itemId: string, productId: string, productName: string): void => {
+    if (!itemId || !productId) return;
+    const key = `${itemId}::${productId}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({ item_id: itemId, product_id: productId, product_name: productName });
+  };
+
+  /** Walk a products array under a known item_id. Handles both
+   *  {id, name} and {product_id, product_name} shapes. */
+  const walkProducts = (itemId: string, products: unknown): void => {
+    if (!Array.isArray(products)) return;
+    for (const p of products) {
+      if (!p || typeof p !== "object") continue;
+      const pp = p as Record<string, unknown>;
+      const productId = String(pp.id ?? pp.product_id ?? "");
+      const productName = String(pp.name ?? pp.title ?? pp.product_name ?? "");
+      emit(itemId, productId, productName);
+    }
+  };
+
+  /** Walk a videoToProductsMap-like object. TikHub may return this
+   *  as either:
+   *    (a) an object with item_id + products fields,
+   *    (b) an array of such objects,
+   *    (c) a hashmap keyed by video ID → { products: [...] }
+   *  Try all three shapes. */
+  const walkMaps = (maps: unknown): void => {
+    if (!maps || typeof maps !== "object") return;
+
+    // Case (b): array of {item_id, products} objects.
+    if (Array.isArray(maps)) {
+      for (const entry of maps) {
+        if (!entry || typeof entry !== "object") continue;
+        const e = entry as Record<string, unknown>;
+        const itemId = String(e.item_id ?? e.itemId ?? e.video_id ?? "");
+        walkProducts(itemId, e.products ?? e.product_list);
+      }
+      return;
+    }
+
+    const obj = maps as Record<string, unknown>;
+
+    // Case (a): a single {item_id, products} object.
+    if ("item_id" in obj || "itemId" in obj || "video_id" in obj) {
+      const itemId = String(obj.item_id ?? obj.itemId ?? obj.video_id ?? "");
+      walkProducts(itemId, obj.products ?? obj.product_list);
+      return;
+    }
+
+    // Case (c): keyed hashmap where each key IS the video ID.
+    for (const [key, value] of Object.entries(obj)) {
+      if (!value || typeof value !== "object") continue;
+      // The key looks like a TikTok video ID (long numeric string) —
+      // treat it as the item_id.
+      if (/^\d{15,}$/.test(key)) {
+        const v = value as Record<string, unknown>;
+        walkProducts(key, v.products ?? v.product_list ?? v);
+      }
+    }
+  };
+
+  // Walk segments[].timed_lists[] (documented shape) …
+  const segments = Array.isArray(r.segments) ? (r.segments as unknown[]) : [];
+  for (const seg of segments) {
+    if (!seg || typeof seg !== "object") continue;
+    const s = seg as Record<string, unknown>;
+    const timedLists = Array.isArray(s.timed_lists)
+      ? (s.timed_lists as unknown[])
+      : [];
+    for (const tl of timedLists) {
+      if (!tl || typeof tl !== "object") continue;
+      const t = tl as Record<string, unknown>;
+      const map =
+        t.videoToProductsMap ??
+        t.video_to_products_map ??
+        t.videoToProducts ??
+        t.item_products ??
+        // If nothing named-map exists, fall back to the timed_list
+        // itself in case TikHub inlined the structure.
+        t;
+      walkMaps(map);
+    }
+  }
+
+  // …AND fall back to a top-level videoToProductsMap if TikHub
+  // dropped the segments/timed_lists wrapper entirely.
+  if (out.length === 0) {
+    walkMaps(
+      r.videoToProductsMap ??
+        r.video_to_products_map ??
+        r.videoToProducts ??
+        r,
+    );
+  }
+
+  return out;
+}
+
+/**
+ * Local unwrap helper — same idea as tikhub.ts's unwrapEnvelope but
+ * we keep a copy here to avoid coupling actions.ts to the internals
+ * of the service module. Peels a single {code, data} envelope layer.
+ */
+function unwrapDataEnvelope(raw: unknown): Record<string, unknown> {
+  if (!raw || typeof raw !== "object") return {};
+  const r = raw as Record<string, unknown>;
+  if ("code" in r && "data" in r && r.data && typeof r.data === "object") {
+    return r.data as Record<string, unknown>;
+  }
+  return r;
 }

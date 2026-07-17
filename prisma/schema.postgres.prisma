@@ -480,12 +480,27 @@ model TikTokAccount {
   cookieStatus    String   @default("unchecked")
   cookieError     String?
   lastCheckedAt   DateTime?
+  // See SQLite schema for full commentary — these are
+  // per-refresh monthly totals from get_video_list_analytics.
+  currentMonthGmv        Decimal   @default(0) @db.Decimal(12, 2)
+  currentMonthDirectGmv  Decimal   @default(0) @db.Decimal(12, 2)
+  currentMonthItemsSold  Int       @default(0)
+  currentMonthCurrency   String    @default("USD")
+  currentMonthAnchor     String    @default("")
+  currentMonthCapturedAt DateTime?
+  previousMonthGmv        Decimal   @default(0) @db.Decimal(12, 2)
+  previousMonthDirectGmv  Decimal   @default(0) @db.Decimal(12, 2)
+  previousMonthItemsSold  Int       @default(0)
+  previousMonthCurrency   String    @default("USD")
+  previousMonthAnchor     String    @default("")
+  previousMonthCapturedAt DateTime?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
   health   TikTokAccountHealth[]
   revenue  TikTokAccountRevenue[]
   products TikTokProduct[]
+  productDaily TikTokProductDaily[]
   pnl      TikTokAccountPnl[]
 
   @@index([workspaceId])
@@ -533,13 +548,36 @@ model TikTokProduct {
   externalId String
   title      String
   gmv        Decimal       @db.Decimal(12, 2)
+  currencyCode String      @default("USD")
   itemsSold  Int
   commission Decimal       @db.Decimal(12, 2)
+  productViews  Int         @default(0)
+  productClicks Int         @default(0)
+  orderCount    Int         @default(0)
   capturedAt DateTime      @default(now())
   updatedAt  DateTime      @updatedAt
 
   @@unique([accountId, externalId])
   @@index([accountId])
+}
+
+model TikTokProductDaily {
+  id            String        @id @default(cuid())
+  accountId     String
+  account       TikTokAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  externalId    String
+  date          DateTime      @db.Date
+  gmv           Decimal       @default(0) @db.Decimal(12, 2)
+  currencyCode  String        @default("USD")
+  itemsSold     Int           @default(0)
+  orderCount    Int           @default(0)
+  productViews  Int           @default(0)
+  productClicks Int           @default(0)
+  capturedAt    DateTime      @default(now())
+
+  @@unique([accountId, externalId, date])
+  @@index([accountId, date])
+  @@index([accountId, externalId])
 }
 
 model TikTokAccountPnl {
