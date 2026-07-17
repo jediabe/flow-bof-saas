@@ -259,11 +259,49 @@ export async function testTikTokCookie(formData: FormData): Promise<ActionResult
  * (the cheap, 6-hourly polled bundle). The cron endpoints share
  * the same underlying refreshAccountSnapshot() helper so manual
  * + scheduled refreshes are byte-for-byte equivalent.
+ *
+ * Rate limit: max 3 SUCCESSFUL manual refreshes per rolling 12h
+ * per account. Cron refreshes are NOT counted — cron is bounded
+ * by its own schedule. Failed refreshes are not counted either
+ * (the user should be able to keep trying after fixing a cookie).
+ * Enforcement lives here (the action) rather than in
+ * refreshAccountSnapshot itself so cron stays uncapped.
  */
+const MANUAL_REFRESH_WINDOW_MS = 12 * 60 * 60 * 1000;
+const MANUAL_REFRESH_MAX_PER_WINDOW = 3;
+const MANUAL_REFRESH_LOG_CAP = 5;
+
 export async function refreshTikTokAccountNow(formData: FormData): Promise<ActionResult> {
   const { workspace } = await getCurrentWorkspace();
   const accountId = String(formData.get("accountId") || "");
   if (!accountId) return { ok: false, message: "Missing accountId." };
+
+  const account = await db.tikTokAccount.findFirst({
+    where: { id: accountId, workspaceId: workspace.id },
+    select: { id: true, label: true, manualRefreshLog: true },
+  });
+  if (!account) return { ok: false, message: "Account not found." };
+
+  const now = new Date();
+  const windowStart = new Date(now.getTime() - MANUAL_REFRESH_WINDOW_MS);
+  const priorLog = parseManualRefreshLog(account.manualRefreshLog);
+  const inWindow = priorLog
+    .filter((d) => d >= windowStart)
+    .sort((a, b) => a.getTime() - b.getTime());
+
+  if (inWindow.length >= MANUAL_REFRESH_MAX_PER_WINDOW) {
+    // Next slot opens when the oldest in-window entry ages out.
+    const nextAllowedAt = new Date(
+      inWindow[0].getTime() + MANUAL_REFRESH_WINDOW_MS,
+    );
+    return {
+      ok: false,
+      message:
+        `"${account.label}" hit the manual refresh cap (${MANUAL_REFRESH_MAX_PER_WINDOW} per 12h). ` +
+        `Try again ${formatRelativeFuture(nextAllowedAt, now)} ` +
+        `(${nextAllowedAt.toISOString()}). Scheduled cron refreshes continue on their own.`,
+    };
+  }
 
   const { refreshAccountSnapshot } = await import("@/lib/tikhub-refresh");
   const result = await refreshAccountSnapshot({
@@ -271,10 +309,50 @@ export async function refreshTikTokAccountNow(formData: FormData): Promise<Actio
     workspaceId: workspace.id,
     includeProducts: true,
   });
+
+  // Only successful refreshes get logged toward the cap. Failed
+  // attempts (expired cookie, TikHub 5xx, etc.) don't count, so
+  // an operator fixing a broken cookie isn't blocked from
+  // retrying.
+  if (result.ok) {
+    const nextLog = [...inWindow, now]
+      .sort((a, b) => b.getTime() - a.getTime())
+      .slice(0, MANUAL_REFRESH_LOG_CAP)
+      .map((d) => d.toISOString())
+      .join(",");
+    await db.tikTokAccount.update({
+      where: { id: accountId },
+      data: { manualRefreshLog: nextLog },
+    });
+  }
+
   revalidatePath("/settings/tiktok-accounts");
   revalidatePath("/analytics");
   revalidatePath(`/analytics/${accountId}`);
   return result;
+}
+
+/** CSV of ISO timestamps → Date[]. Silently drops malformed entries. */
+function parseManualRefreshLog(raw: string | null): Date[] {
+  if (!raw) return [];
+  const out: Date[] = [];
+  for (const s of raw.split(",")) {
+    const t = s.trim();
+    if (!t) continue;
+    const d = new Date(t);
+    if (!Number.isNaN(d.getTime())) out.push(d);
+  }
+  return out;
+}
+
+/** "in 3h 12m" / "in 47m" — coarse-grained, good enough for the toast. */
+function formatRelativeFuture(future: Date, from: Date): string {
+  const diffMs = Math.max(0, future.getTime() - from.getTime());
+  const totalMin = Math.ceil(diffMs / 60_000);
+  if (totalMin < 60) return `in ${totalMin}m`;
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  return m === 0 ? `in ${h}h` : `in ${h}h ${m}m`;
 }
 
 /**

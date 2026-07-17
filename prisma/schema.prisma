@@ -635,6 +635,12 @@ model TikTokAccount {
   previousMonthCurrency   String    @default("USD")
   previousMonthAnchor     String    @default("")
   previousMonthCapturedAt DateTime?
+  // CSV of ISO timestamps for the most recent SUCCESSFUL manual
+  // refreshes (capped at 5 entries). Read by the manual-refresh
+  // action to enforce a per-account cap of 3 refreshes per
+  // rolling 12h. Cron refreshes don't write here — cron is gated
+  // by its own schedule instead.
+  manualRefreshLog String?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
