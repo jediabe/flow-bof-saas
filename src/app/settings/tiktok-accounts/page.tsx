@@ -59,6 +59,71 @@ export default async function TikTokAccountsPage() {
         </p>
       </header>
 
+      {/* Concrete "how to grab a cookie" walkthrough. Kept above
+          the form so operators read it before staring at the paste
+          box. See "How cookies work" further down for the
+          technical detail (required keys, encryption, expiry). */}
+      <Panel title="How to get your session cookie">
+        <ol className="text-sm text-text space-y-2 list-decimal list-inside leading-relaxed">
+          <li>
+            Open <strong>Google Chrome</strong> — the extension in
+            step 2 is Chrome-only.
+          </li>
+          <li>
+            Install the{" "}
+            <a
+              href="https://chromewebstore.google.com/detail/hlkenndednhfkekhgcdicdfddnkalmdm"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-accent hover:underline"
+            >
+              cookie exporter extension
+            </a>
+            .
+          </li>
+          <li>
+            Go to{" "}
+            <code className="id-mono">chrome://extensions</code>,
+            find the extension, click <strong>Details</strong>, and
+            turn on <strong>Allow in Incognito</strong>. TikTok
+            treats Incognito as a fresh browser, which is what
+            keeps different accounts isolated.
+          </li>
+          <li>
+            Open a new <strong>Incognito window</strong>{" "}
+            (<code className="id-mono">Ctrl</code>+
+            <code className="id-mono">Shift</code>+
+            <code className="id-mono">N</code>, or{" "}
+            <code className="id-mono">⌘</code>+
+            <code className="id-mono">Shift</code>+
+            <code className="id-mono">N</code> on Mac).
+          </li>
+          <li>
+            Go to <code className="id-mono">tiktok.com</code> and
+            log in to the Shop creator account you want to connect.
+          </li>
+          <li>
+            Click the extension icon in the toolbar and{" "}
+            <strong>export the cookies as &quot;Header String&quot;</strong>.
+            The extension copies a single long line to your clipboard.
+          </li>
+          <li>
+            Paste that value into the <strong>Cookie</strong> field
+            in the form below, fill in a label and region, and hit{" "}
+            <strong>Add account</strong>.
+          </li>
+          <li>
+            <strong>Adding a second account?</strong> Close{" "}
+            <em>every</em> open Incognito window first — Incognito
+            windows share cookies with each other as long as any are
+            open, so a new one opened alongside the first will still
+            be logged into the first account. Once every Incognito
+            window is closed, open a fresh one and start again from
+            step 4.
+          </li>
+        </ol>
+      </Panel>
+
       {/* Add form. Server action lives in actions.ts. */}
       <Panel title="Add an account">
         <AccountForm />
@@ -108,13 +173,6 @@ export default async function TikTokAccountsPage() {
 
       <Panel title="How cookies work" variant="ghost">
         <div className="text-xs text-muted space-y-2 leading-relaxed">
-          <p>
-            <strong className="text-text">Where to get the cookie.</strong>{" "}
-            Open the TikTok Shop creator dashboard in a browser
-            you&apos;re logged into. Open DevTools → Network. Reload
-            the page. Pick any request, find the &quot;Cookie:&quot;
-            header in Request Headers, and copy the entire value.
-          </p>
           <p>
             <strong className="text-text">Required keys.</strong>{" "}
             The paste MUST contain{" "}
