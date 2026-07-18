@@ -52,6 +52,11 @@ export interface MobileProduct {
   ipRiskStatus: IpRiskStatus;
   ipRiskReasons: string[];
   ipRiskOverride: boolean;
+  /** TikTok Shop discount % the reviewer captured (integer 1..100)
+   *  or null. Persisted server-side; feeds the APEX prompt
+   *  generator's %-dependent hook variants when the reviewer taps
+   *  Approve. */
+  discountPercent: number | null;
 }
 
 const STATUS_LABEL: Record<ReviewStatus, string> = {
@@ -98,6 +103,19 @@ export default function MobileReviewClient({
     ),
   );
   const [pending, startTransition] = useTransition();
+  // Discount % text buffer, keyed by product id. Stored as text so
+  // "empty" is distinguishable from "0" (empty → no discount, sent
+  // as null; anything else parsed to int at approve time). Seeded
+  // from each product's persisted discountPercent on first render.
+  const [discountText, setDiscountText] = useState<Record<string, string>>(
+    () =>
+      Object.fromEntries(
+        initial.map((p) => [
+          p.id,
+          p.discountPercent != null ? String(p.discountPercent) : "",
+        ]),
+      ),
+  );
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const counts = useMemo(() => {
@@ -142,12 +160,26 @@ export default function MobileReviewClient({
     if (!current || pending) return;
     const productId = current.id;
     const i = index;
+    // Parse the discount % text for this product. Empty / invalid
+    // input → null (server treats null as "no discount"). Server
+    // re-validates 1..100 so any garbage from a malicious client
+    // still lands as null.
+    const raw = (discountText[productId] ?? "").trim();
+    const parsed = raw === "" ? null : Number(raw);
+    const discountPercent =
+      typeof parsed === "number" &&
+      Number.isFinite(parsed) &&
+      parsed > 0 &&
+      parsed <= 100
+        ? Math.round(parsed)
+        : null;
     setErrorMsg(null);
     startTransition(async () => {
       const r = await setProductReviewStatusViaToken({
         token,
         productId,
         status,
+        discountPercent,
       });
       if (!r.ok) {
         setErrorMsg(r.message ?? "Could not save status. Try again.");
@@ -155,7 +187,9 @@ export default function MobileReviewClient({
       }
       setProducts((prev) =>
         prev.map((p) =>
-          p.id === productId ? { ...p, reviewStatus: status } : p,
+          p.id === productId
+            ? { ...p, reviewStatus: status, discountPercent }
+            : p,
         ),
       );
       advanceToNext(i);
@@ -292,6 +326,52 @@ export default function MobileReviewClient({
             </span>
           )}
         </div>
+      </section>
+
+      {/* Discount % capture — reviewer opens the TikTok Shop link
+          above, sees today's actual discount, types it in. When
+          Approve fires below, this % is persisted on the Product
+          row and used by the APEX hook generator to unlock the
+          four %-dependent variants (WAIT_3, DEAL_1, DEAL_5,
+          DEAL_6). Leaving blank is fine — the generator falls
+          back to the 30 non-% variants. */}
+      <section className="px-4 pt-4">
+        <label
+          htmlFor={`pct-${current.id}`}
+          className="block text-[11px] uppercase tracking-wide text-zinc-400 mb-1.5"
+        >
+          Discount % on TikTok Shop
+          <span className="text-zinc-500 normal-case tracking-normal ml-1">
+            · optional
+          </span>
+        </label>
+        <div className="relative">
+          <input
+            id={`pct-${current.id}`}
+            type="number"
+            inputMode="numeric"
+            min={1}
+            max={100}
+            step={1}
+            placeholder="e.g. 25"
+            value={discountText[current.id] ?? ""}
+            onChange={(e) =>
+              setDiscountText((prev) => ({
+                ...prev,
+                [current.id]: e.target.value,
+              }))
+            }
+            disabled={pending}
+            className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-4 py-3 pr-10 text-lg text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-blue-500 disabled:opacity-50"
+          />
+          <span className="absolute right-4 top-1/2 -translate-y-1/2 text-zinc-500 pointer-events-none">
+            %
+          </span>
+        </div>
+        <p className="mt-1.5 text-[11px] text-zinc-500 leading-relaxed">
+          Unlocks the four percentage-based hook variants. Leave blank if
+          the product isn&apos;t discounted right now.
+        </p>
       </section>
 
       {/* Phase 9 — IP / trademark risk banner. Surfaces the verdict

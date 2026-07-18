@@ -3,6 +3,7 @@ import { db } from "@/lib/db";
 import { getCurrentWorkspace } from "@/lib/workspace";
 import Panel from "@/components/ui/Panel";
 import EmptyState from "@/components/ui/EmptyState";
+import KalodataImportPanel from "./KalodataImportPanel";
 import PromptsClient, { type ProductSummary } from "./PromptsClient";
 
 /**
@@ -62,12 +63,14 @@ export default async function PromptsPage() {
         </p>
       </header>
 
+      <KalodataImportPanel />
+
       {summaries.length === 0 ? (
-        <Panel title="No products yet" variant="ghost">
+        <Panel title="Or pick from existing products" variant="ghost">
           <EmptyState
             icon="◇"
-            title="Add products before generating"
-            hint="This surface reuses your uploaded product library. Add products through a batch first — image gen and hook generation both pull from the same list."
+            title="No products yet"
+            hint="Import a Kalodata workbook above, or add products through a batch. Hook generation and image gen both read from the same product library."
             action={
               <Link href="/batches" className="btn btn-primary text-xs">
                 Go to Batches

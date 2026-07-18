@@ -6,6 +6,11 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
+// after() runs a callback AFTER the server-action response is
+// flushed to the client. Used by setProductReviewStatusViaToken
+// to fire post-approve AI generation without blocking the mobile
+// reviewer's swipe UI on the LLM round-trip.
+import { after } from "next/server";
 import { db } from "@/lib/db";
 import { getCurrentWorkspace } from "@/lib/workspace";
 import {
@@ -722,6 +727,15 @@ export async function setProductReviewStatusViaToken(input: {
   token: string;
   productId: string;
   status: string;
+  /**
+   * TikTok Shop discount percentage the reviewer captured on the
+   * mobile card (integer 1..100). Only meaningful when
+   * status === "approved" — feeds the APEX prompt generator's
+   * %-dependent hook variants when we auto-generate below. Any
+   * non-int / out-of-range value is coerced to null so we never
+   * pass garbage to the LLM.
+   */
+  discountPercent?: number | null;
 }): Promise<{ ok: boolean; message?: string }> {
   const { token, productId, status } = input;
   if (!token || !productId) {
@@ -755,10 +769,52 @@ export async function setProductReviewStatusViaToken(input: {
     return { ok: false, message: "product not found in batch" };
   }
 
+  // Sanitize discountPercent. Must be an integer 1..100. Anything
+  // else (NaN, negative, >100, non-int) → null.
+  const pctRaw = input.discountPercent;
+  const discountPercent =
+    typeof pctRaw === "number" &&
+    Number.isFinite(pctRaw) &&
+    pctRaw > 0 &&
+    pctRaw <= 100
+      ? Math.round(pctRaw)
+      : null;
+
   await db.product.update({
     where: { id: product.id },
-    data:  { reviewStatus: status },
+    // Save discountPercent regardless of the resulting status —
+    // if the reviewer typed a % then rejected, we still want to
+    // remember it in case they change their mind. Approving with
+    // no % is fine — the field stays null and the generator will
+    // fall back to the 30 non-% hooks.
+    data:  {
+      reviewStatus: status,
+      discountPercent,
+    },
   });
+
+  // Post-approve auto-generation. Fire-and-forget via Next 15's
+  // `after()` so the mobile-swipe UI doesn't wait for the LLM
+  // round-trip (a phone reviewer swiping through 30 products at
+  // 3s each would spend 90s waiting). Errors get server-logged;
+  // the desktop /prompts surface polls the Product row for
+  // aiPromptGeneratedAt to know when hooks are ready.
+  if (status === "approved") {
+    after(async () => {
+      try {
+        await generateAiPromptForProduct({
+          batchId: batch.id,
+          productId: product.id,
+          force: true,
+        });
+      } catch (err) {
+        console.error(
+          `[mobile-review] post-approve generation failed for product=${product.id}:`,
+          err,
+        );
+      }
+    });
+  }
 
   // Revalidate both the mobile page (so subsequent loads see the
   // new status if the reviewer hits Back) AND the owner-facing
@@ -1478,6 +1534,10 @@ export async function generateAiPromptForProduct(input: {
       referenceImageUrl: true,
       imagePrompt: true,
       market: true,
+      // Feeds the APEX prompt generator's %-dependent hook
+      // variants. Captured on the mobile review card at approval
+      // time. Null when the reviewer didn't type a %.
+      discountPercent: true,
     },
   });
   if (!product) {
@@ -1517,6 +1577,7 @@ export async function generateAiPromptForProduct(input: {
         tiktokUrl:         product.tiktokUrl,
         referenceImageUrl: visionUrl ?? product.referenceImageUrl,
         market:            effectiveMarket,
+        discountPercent:   product.discountPercent ?? null,
       },
       settings,
       { useVision: visionUrl !== null },

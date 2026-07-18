@@ -57,6 +57,11 @@ export default async function MobileReviewPage({
           ipRiskStatus: true,
           ipRiskReasons: true,
           ipRiskOverride: true,
+          // TikTok Shop discount % captured on a prior visit. The
+          // input on the mobile card seeds from this so a reviewer
+          // returning to an already-approved product sees what
+          // they typed last time.
+          discountPercent: true,
         },
         orderBy: [
           // Push needs_review to the top so the user lands on
@@ -114,6 +119,7 @@ export default async function MobileReviewPage({
         : "low") as MobileProduct["ipRiskStatus"],
       ipRiskReasons:     ipRiskChecksEnabled ? reasons : [],
       ipRiskOverride:    p.ipRiskOverride,
+      discountPercent:   p.discountPercent ?? null,
     };
   });
 
