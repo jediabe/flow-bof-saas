@@ -13,6 +13,7 @@ import type { AiPromptOutput } from "@/lib/ai/types";
 import {
   importKalodataXlsx,
   getOrCreateBatchReviewToken,
+  getOrCreateBatchPostingToken,
   generateAiPromptForProduct,
   type KalodataImportReport,
 } from "@/app/batches/actions";
@@ -512,6 +513,258 @@ export async function getApprovedHooksForBatch(
   });
 
   return { ok: true, products };
+}
+
+// ---------------------------------------------------------------------
+// Unified batch state — powers the redesigned /prompts hub
+// ---------------------------------------------------------------------
+//
+// One fetch call returns everything the /prompts UI needs about the
+// currently-active batch: header info + review QR + posting QR +
+// full product list with review status, discount %, image, and
+// generated hooks.
+//
+// The client polls this at a modest cadence; server work is a
+// single findFirst with nested selects.
+
+export interface BatchPromptsProduct {
+  id: string;
+  productName: string;
+  referenceImageUrl: string | null;
+  imageUrl: string | null;
+  category: string | null;
+  reviewStatus: string;
+  discountPercent: number | null;
+  imagePrompt: string | null;
+  caption: string | null;
+  hashtags: string[];
+  hook: string | null;
+  hookVariants: Array<{ label: string; text: string }>;
+  aiPromptGeneratedAt: string | null;
+  aiPromptError: string | null;
+}
+
+export interface BatchPromptsCounts {
+  total: number;
+  needs_review: number;
+  approved: number;
+  rejected: number;
+  maybe: number;
+  hasHooks: number;
+}
+
+export interface BatchPromptsState {
+  ok: boolean;
+  message?: string;
+  batchId?: string;
+  batchName?: string;
+  createdAt?: string;
+  reviewUrl?: string;
+  reviewQrDataUrl?: string;
+  postingUrl?: string;
+  postingQrDataUrl?: string;
+  products?: BatchPromptsProduct[];
+  counts?: BatchPromptsCounts;
+}
+
+/** Absolute base URL for QR-encoded links. Falls back to a
+ *  relative "/" if NEXT_PUBLIC_APP_URL isn't set — QRs won't work
+ *  when scanned but at least the URLs display on desktop. */
+function appBaseUrl(): string {
+  return (process.env.NEXT_PUBLIC_APP_URL || "").trim().replace(/\/+$/, "");
+}
+
+async function renderQr(fullUrl: string): Promise<string | undefined> {
+  try {
+    return await QRCode.toDataURL(fullUrl, {
+      width: 240,
+      margin: 1,
+      color: { dark: "#0A1020", light: "#FFFFFF" },
+    });
+  } catch (err) {
+    console.error("[prompts] QR render failed:", err);
+    return undefined;
+  }
+}
+
+export async function getBatchPromptsState(
+  batchId: string,
+): Promise<BatchPromptsState> {
+  if (!batchId) return { ok: false, message: "missing batchId" };
+  const { workspace } = await getCurrentWorkspace();
+  const batch = await db.batch.findFirst({
+    where: { id: batchId, workspaceId: workspace.id },
+    select: {
+      id: true,
+      name: true,
+      createdAt: true,
+      products: {
+        where: { deletedAt: null },
+        orderBy: [{ createdAt: "asc" }],
+        select: {
+          id: true,
+          productName: true,
+          referenceImageUrl: true,
+          imageUrl: true,
+          category: true,
+          reviewStatus: true,
+          discountPercent: true,
+          imagePrompt: true,
+          caption: true,
+          hashtags: true,
+          hook: true,
+          hookVariants: true,
+          aiPromptGeneratedAt: true,
+          aiPromptError: true,
+        },
+      },
+    },
+  });
+  if (!batch) return { ok: false, message: "batch not found" };
+
+  const products: BatchPromptsProduct[] = batch.products.map((p) => {
+    let hashtags: string[] = [];
+    if (p.hashtags) {
+      try {
+        const decoded = JSON.parse(p.hashtags);
+        if (Array.isArray(decoded)) {
+          hashtags = decoded.filter((t) => typeof t === "string");
+        }
+      } catch {
+        // malformed JSON — surface no hashtags
+      }
+    }
+    let hookVariants: Array<{ label: string; text: string }> = [];
+    if (p.hookVariants) {
+      try {
+        const decoded = JSON.parse(p.hookVariants);
+        if (Array.isArray(decoded)) {
+          for (const v of decoded) {
+            if (
+              v &&
+              typeof v === "object" &&
+              typeof (v as { label?: unknown }).label === "string" &&
+              typeof (v as { text?: unknown }).text === "string"
+            ) {
+              hookVariants.push({
+                label: (v as { label: string }).label,
+                text: (v as { text: string }).text,
+              });
+            }
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+    return {
+      id: p.id,
+      productName: p.productName,
+      referenceImageUrl: p.referenceImageUrl,
+      imageUrl: p.imageUrl,
+      category: p.category,
+      reviewStatus: p.reviewStatus,
+      discountPercent: p.discountPercent ?? null,
+      imagePrompt: p.imagePrompt ?? null,
+      caption: p.caption ?? null,
+      hashtags,
+      hook: p.hook ?? null,
+      hookVariants,
+      aiPromptGeneratedAt: p.aiPromptGeneratedAt
+        ? p.aiPromptGeneratedAt.toISOString()
+        : null,
+      aiPromptError: p.aiPromptError ?? null,
+    };
+  });
+
+  const counts: BatchPromptsCounts = {
+    total: products.length,
+    needs_review: 0,
+    approved: 0,
+    rejected: 0,
+    maybe: 0,
+    hasHooks: 0,
+  };
+  for (const p of products) {
+    if (p.reviewStatus in counts) {
+      (counts as unknown as Record<string, number>)[p.reviewStatus]++;
+    }
+    if (p.hookVariants.length > 0 || p.hook) counts.hasHooks++;
+  }
+
+  // Mint / retrieve both tokens. Failures are non-fatal — the UI
+  // still renders product cards; QR panels just won't appear.
+  const [reviewTokenResp, postingTokenResp] = await Promise.all([
+    getOrCreateBatchReviewToken(batch.id),
+    getOrCreateBatchPostingToken(batch.id),
+  ]);
+
+  const base = appBaseUrl();
+  let reviewUrl: string | undefined;
+  let reviewQrDataUrl: string | undefined;
+  if (reviewTokenResp.ok && reviewTokenResp.token) {
+    reviewUrl = base
+      ? `${base}/mobile-review/${reviewTokenResp.token}`
+      : `/mobile-review/${reviewTokenResp.token}`;
+    reviewQrDataUrl = await renderQr(reviewUrl);
+  }
+  let postingUrl: string | undefined;
+  let postingQrDataUrl: string | undefined;
+  if (postingTokenResp.ok && postingTokenResp.token) {
+    postingUrl = base
+      ? `${base}/mobile-posting/${postingTokenResp.token}`
+      : `/mobile-posting/${postingTokenResp.token}`;
+    // Only bother rendering the posting QR if there's actually
+    // something to post — approved + hooks-ready.
+    if (counts.hasHooks > 0) {
+      postingQrDataUrl = await renderQr(postingUrl);
+    }
+  }
+
+  return {
+    ok: true,
+    batchId: batch.id,
+    batchName: batch.name,
+    createdAt: batch.createdAt.toISOString(),
+    reviewUrl,
+    reviewQrDataUrl,
+    postingUrl,
+    postingQrDataUrl,
+    products,
+    counts,
+  };
+}
+
+/** Recent Kalodata batches in the workspace — for the "resume"
+ *  chip when a user visits /prompts without a ?batch param. */
+export interface RecentBatchSummary {
+  id: string;
+  name: string;
+  createdAt: string;
+  productCount: number;
+}
+
+export async function listRecentPromptBatches(
+  limit = 5,
+): Promise<RecentBatchSummary[]> {
+  const { workspace } = await getCurrentWorkspace();
+  const batches = await db.batch.findMany({
+    where: { workspaceId: workspace.id },
+    orderBy: [{ createdAt: "desc" }],
+    take: Math.max(1, Math.min(limit, 20)),
+    select: {
+      id: true,
+      name: true,
+      createdAt: true,
+      _count: { select: { products: true } },
+    },
+  });
+  return batches.map((b) => ({
+    id: b.id,
+    name: b.name,
+    createdAt: b.createdAt.toISOString(),
+    productCount: b._count.products,
+  }));
 }
 
 export async function getBatchReviewProgress(

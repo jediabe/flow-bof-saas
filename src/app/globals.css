@@ -22,7 +22,7 @@
   }
   /* Selection: APEX blue tint. */
   ::selection {
-    background: rgba(74, 158, 255, 0.25);
+    background: rgba(51, 143, 234, 0.25);
     color: theme("colors.text");
   }
   /* Scrollbars (webkit) — thin + dark so they don't compete with the
@@ -133,10 +133,10 @@
     z-index: 0;
   }
   .card-accent-blue::before {
-    background: linear-gradient(90deg, rgba(74,158,255,0.05), transparent 40%);
+    background: linear-gradient(90deg, rgba(51,143,234,0.05), transparent 40%);
   }
   .card-accent-red::before {
-    background: linear-gradient(90deg, rgba(239,59,65,0.05), transparent 40%);
+    background: linear-gradient(90deg, rgba(233,52,65,0.05), transparent 40%);
   }
   .card-accent-blue > *,
   .card-accent-red > * {
@@ -182,7 +182,7 @@
   }
   .timeline-dot-bad   {
     background: theme("colors.bad");
-    box-shadow: 0 0 0 3px rgba(239,59,65,0.20), 0 0 12px rgba(239,59,65,0.50);
+    box-shadow: 0 0 0 3px rgba(233,52,65,0.20), 0 0 12px rgba(233,52,65,0.50);
   }
   .timeline-dot-warn  {
     background: theme("colors.warn");
@@ -194,7 +194,7 @@
   }
   .timeline-dot-accent {
     background: theme("colors.accent");
-    box-shadow: 0 0 0 3px rgba(74,158,255,0.20), 0 0 12px rgba(74,158,255,0.55);
+    box-shadow: 0 0 0 3px rgba(51,143,234,0.20), 0 0 12px rgba(51,143,234,0.55);
   }
 
   /* Pulse animation for the "running" dot on Job detail. */
@@ -204,7 +204,7 @@
   }
   .timeline-dot-running {
     background: theme("colors.accent");
-    box-shadow: 0 0 0 3px rgba(74,158,255,0.20), 0 0 12px rgba(74,158,255,0.55);
+    box-shadow: 0 0 0 3px rgba(51,143,234,0.20), 0 0 12px rgba(51,143,234,0.55);
     animation: saas-pulse 1.4s ease-in-out infinite;
   }
 
@@ -229,7 +229,7 @@
   }
   .plane--drop-active {
     @apply border-accent;
-    box-shadow: 0 0 0 1px rgba(74,158,255,0.30), 0 0 24px -8px rgba(74,158,255,0.55);
+    box-shadow: 0 0 0 1px rgba(51,143,234,0.30), 0 0 24px -8px rgba(51,143,234,0.55);
   }
   .plane-head {
     @apply flex items-center gap-2 px-4 py-2.5 cursor-pointer select-none
@@ -297,8 +297,8 @@
   .pcard--expanded {
     @apply border-accent cursor-default;
     box-shadow:
-      0 0 0 1px rgba(74,158,255,0.30),
-      0 0 24px -8px rgba(74,158,255,0.55);
+      0 0 0 1px rgba(51,143,234,0.30),
+      0 0 24px -8px rgba(51,143,234,0.55);
   }
   .pcard--expanded:active { transform: none; cursor: default; }
 
@@ -373,8 +373,8 @@
     width: 64px;
     height: 64px;
     border-radius: 9999px;
-    background: rgba(74,158,255,0.10);
-    border: 1px solid rgba(74,158,255,0.30);
+    background: rgba(51,143,234,0.10);
+    border: 1px solid rgba(51,143,234,0.30);
   }
   .empty-hero-title {
     @apply text-2xl font-semibold tracking-tight mb-1.5;
