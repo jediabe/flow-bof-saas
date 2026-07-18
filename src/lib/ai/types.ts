@@ -69,6 +69,16 @@ export interface ProductPromptInput {
    * been updated yet (back-compat).
    */
   market?:            AiMarket;
+  /**
+   * Optional TikTok Shop discount percentage (e.g. 25 for "25% off").
+   * When set, the UK generator emits the [X]% off hook variants from
+   * the APEX curriculum (WAIT_3, DEAL_1, DEAL_5, DEAL_6). When null
+   * or undefined, those variants are SKIPPED entirely — the PDF is
+   * explicit that inventing a percentage is worse than omitting the
+   * hook. Never carries a currency; TikTok Shop's misleading-price
+   * rule bans on-screen prices.
+   */
+  discountPercent?:   number | null;
 }
 
 /**
