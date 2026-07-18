@@ -6,11 +6,6 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-// after() runs a callback AFTER the server-action response is
-// flushed to the client. Used by setProductReviewStatusViaToken
-// to fire post-approve AI generation without blocking the mobile
-// reviewer's swipe UI on the LLM round-trip.
-import { after } from "next/server";
 import { db } from "@/lib/db";
 import { getCurrentWorkspace } from "@/lib/workspace";
 import {
@@ -828,23 +823,46 @@ export async function setProductReviewStatusViaToken(input: {
     };
   }
 
-  // Post-approve auto-generation. Fire-and-forget via Next 15's
-  // `after()` so the mobile-swipe UI doesn't wait for the LLM
-  // round-trip (a phone reviewer swiping through 30 products at
-  // 3s each would spend 90s waiting). Errors get server-logged;
-  // the desktop /prompts surface polls the Product row for
-  // aiPromptGeneratedAt to know when hooks are ready.
+  // Post-approve auto-generation. Fire-and-forget: kick off the
+  // generator in the background so the mobile-swipe UI doesn't
+  // wait for the LLM round-trip (a reviewer swiping through 30
+  // products at 3s each would spend 90s waiting).
+  //
+  // Why a plain unawaited Promise instead of Next 15's `after()`:
+  // in 15.0.x `after` is behind an experimental.after flag and
+  // silently drops the callback when the flag is unset — the
+  // exact failure mode that stranded every product on
+  // "generating…" the first time this shipped. Our production
+  // runs in a long-lived Node.js container (docker-compose), so
+  // unawaited promises reliably continue running after the
+  // response is sent. `Promise.resolve().then(...)` yields one
+  // microtask first so revalidatePath's writes complete before
+  // the generator queries the row.
   if (status === "approved") {
-    after(async () => {
+    const bgBatchId = batch.id;
+    const bgProductId = product.id;
+    console.log(
+      `[mobile-review] queueing post-approve generation for product=${bgProductId}`,
+    );
+    Promise.resolve().then(async () => {
       try {
-        await generateAiPromptForProduct({
-          batchId: batch.id,
-          productId: product.id,
+        const r = await generateAiPromptForProduct({
+          batchId: bgBatchId,
+          productId: bgProductId,
           force: true,
         });
+        if (r.ok) {
+          console.log(
+            `[mobile-review] generation OK for product=${bgProductId} via ${r.provider}`,
+          );
+        } else {
+          console.error(
+            `[mobile-review] generation returned not-ok for product=${bgProductId}: ${r.message}`,
+          );
+        }
       } catch (err) {
         console.error(
-          `[mobile-review] post-approve generation failed for product=${product.id}:`,
+          `[mobile-review] generation threw for product=${bgProductId}:`,
           err,
         );
       }
