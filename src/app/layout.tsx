@@ -4,9 +4,9 @@ import Nav from "@/components/Nav";
 import { getCurrentUser } from "@/lib/workspace";
 
 export const metadata: Metadata = {
-  title: "Flow BOF SaaS",
+  title: "APEX — TikTok Shop hub",
   description:
-    "Hosted dashboard for Flow BOF Automation. Brain to the local agent's hands.",
+    "APEX Initiative — TikTok Shop analytics, hook & prompt generation, and mobile posting for UK BOF creators.",
 };
 
 // Disable static rendering so every visit re-checks the session

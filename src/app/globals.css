@@ -20,9 +20,9 @@
   a {
     @apply text-text hover:text-accent transition-colors;
   }
-  /* Selection: gentle cyan tint instead of the default OS blue. */
+  /* Selection: APEX blue tint. */
   ::selection {
-    background: rgba(56, 189, 248, 0.25);
+    background: rgba(74, 158, 255, 0.25);
     color: theme("colors.text");
   }
   /* Scrollbars (webkit) — thin + dark so they don't compete with the
@@ -98,6 +98,51 @@
   .chip-warn  { @apply text-warn  border-warn/40  bg-warn/[0.06]; }
   .chip-bad   { @apply text-bad   border-bad/40   bg-bad/[0.06]; }
   .chip-accent{ @apply text-accent border-accent/40 bg-accent/[0.06]; }
+  .chip-red   { @apply text-accent-red border-accent-red/40 bg-accent-red/[0.08]; }
+
+  /* Numbered section chips — the "01", "02" markers from the APEX
+     curriculum PDF. Sits at the head of a section title. */
+  .chip-num {
+    @apply inline-flex items-center justify-center font-mono
+           text-[10px] tracking-[0.06em] w-7 h-5 rounded-md
+           text-accent-red bg-accent-red/[0.08]
+           border border-accent-red/40;
+  }
+  .chip-num-blue {
+    @apply text-accent bg-accent/[0.10] border-accent/40;
+  }
+
+  /* APEX card variants — left-border colored bar plus tinted
+     background wash, matching the curriculum PDF's callout cards.
+     Use .card-accent-blue for informational blocks, .card-accent-red
+     for urgency / important-notice blocks. */
+  .card-accent-blue {
+    @apply panel relative overflow-hidden;
+    border-left: 3px solid theme("colors.accent");
+  }
+  .card-accent-red {
+    @apply panel relative overflow-hidden;
+    border-left: 3px solid theme("colors.accent-red");
+  }
+  .card-accent-blue::before,
+  .card-accent-red::before {
+    content: "";
+    position: absolute;
+    inset: 0 0 0 0;
+    pointer-events: none;
+    z-index: 0;
+  }
+  .card-accent-blue::before {
+    background: linear-gradient(90deg, rgba(74,158,255,0.05), transparent 40%);
+  }
+  .card-accent-red::before {
+    background: linear-gradient(90deg, rgba(239,59,65,0.05), transparent 40%);
+  }
+  .card-accent-blue > *,
+  .card-accent-red > * {
+    position: relative;
+    z-index: 1;
+  }
 
   /* Section headings */
   .section-header {
@@ -106,8 +151,19 @@
   .section-title {
     @apply text-xs uppercase tracking-[0.14em] text-muted font-medium;
   }
+  /* Page-level heading — bolder + a hair looser tracking, taking
+     cue from the PDF's chunky display headers. */
   .h-page {
-    @apply text-2xl font-semibold tracking-tight;
+    @apply text-2xl font-bold tracking-tight;
+  }
+  /* APEX-style dual-tone display header — first span uses white,
+     second span uses accent-blue like "UK Hooks & Hashtags" in
+     the PDF. Wrap two spans and this class applies to the parent. */
+  .h-apex {
+    @apply text-3xl font-bold tracking-tight italic;
+  }
+  .h-apex > .apex-accent {
+    @apply text-accent not-italic;
   }
 
   /* Mono / ID styling */
@@ -126,7 +182,7 @@
   }
   .timeline-dot-bad   {
     background: theme("colors.bad");
-    box-shadow: 0 0 0 3px rgba(248,113,113,0.18), 0 0 12px rgba(248,113,113,0.45);
+    box-shadow: 0 0 0 3px rgba(239,59,65,0.20), 0 0 12px rgba(239,59,65,0.50);
   }
   .timeline-dot-warn  {
     background: theme("colors.warn");
@@ -134,11 +190,11 @@
   }
   .timeline-dot-muted {
     background: theme("colors.muted2");
-    box-shadow: 0 0 0 3px rgba(94,102,121,0.15);
+    box-shadow: 0 0 0 3px rgba(110,120,147,0.18);
   }
   .timeline-dot-accent {
     background: theme("colors.accent");
-    box-shadow: 0 0 0 3px rgba(56,189,248,0.18), 0 0 12px rgba(56,189,248,0.55);
+    box-shadow: 0 0 0 3px rgba(74,158,255,0.20), 0 0 12px rgba(74,158,255,0.55);
   }
 
   /* Pulse animation for the "running" dot on Job detail. */
@@ -148,7 +204,7 @@
   }
   .timeline-dot-running {
     background: theme("colors.accent");
-    box-shadow: 0 0 0 3px rgba(56,189,248,0.18), 0 0 12px rgba(56,189,248,0.55);
+    box-shadow: 0 0 0 3px rgba(74,158,255,0.20), 0 0 12px rgba(74,158,255,0.55);
     animation: saas-pulse 1.4s ease-in-out infinite;
   }
 
@@ -173,12 +229,12 @@
   }
   .plane--drop-active {
     @apply border-accent;
-    box-shadow: 0 0 0 1px rgba(56,189,248,0.30), 0 0 24px -8px rgba(56,189,248,0.45);
+    box-shadow: 0 0 0 1px rgba(74,158,255,0.30), 0 0 24px -8px rgba(74,158,255,0.55);
   }
   .plane-head {
     @apply flex items-center gap-2 px-4 py-2.5 cursor-pointer select-none
            border-b border-border;
-    background: rgba(20, 26, 37, 0.4);
+    background: rgba(23, 32, 53, 0.4);
   }
   .plane-caret {
     @apply text-muted2 text-[10px] w-3 transition-transform;
@@ -241,8 +297,8 @@
   .pcard--expanded {
     @apply border-accent cursor-default;
     box-shadow:
-      0 0 0 1px rgba(56,189,248,0.30),
-      0 0 24px -8px rgba(56,189,248,0.45);
+      0 0 0 1px rgba(74,158,255,0.30),
+      0 0 24px -8px rgba(74,158,255,0.55);
   }
   .pcard--expanded:active { transform: none; cursor: default; }
 
@@ -254,7 +310,7 @@
     @apply w-11 h-11 shrink-0 rounded-md overflow-hidden
            flex items-center justify-center text-[10px]
            text-muted2 border border-border;
-    background: linear-gradient(135deg, #1d2433 0%, #283044 100%);
+    background: linear-gradient(135deg, #23304A 0%, #2F3D5C 100%);
   }
   .pcard-thumb img {
     @apply w-full h-full object-cover;
@@ -295,7 +351,7 @@
   .pcard-spinner {
     @apply absolute top-2 right-2 w-3.5 h-3.5 rounded-full;
     border: 2px solid theme("colors.border");
-    border-top-color: theme("colors.pink");
+    border-top-color: theme("colors.accent-red");
     animation: saas-spin 0.9s linear infinite;
   }
   @keyframes saas-spin { to { transform: rotate(360deg); } }
@@ -317,8 +373,8 @@
     width: 64px;
     height: 64px;
     border-radius: 9999px;
-    background: rgba(56,189,248,0.10);
-    border: 1px solid rgba(56,189,248,0.30);
+    background: rgba(74,158,255,0.10);
+    border: 1px solid rgba(74,158,255,0.30);
   }
   .empty-hero-title {
     @apply text-2xl font-semibold tracking-tight mb-1.5;
@@ -336,7 +392,7 @@
   .drawer-overlay {
     @apply fixed inset-0 z-40 opacity-0 pointer-events-none
            transition-opacity duration-150;
-    background: rgba(7, 10, 16, 0.55);
+    background: rgba(10, 18, 32, 0.55);
   }
   body.drawer-open .drawer-overlay {
     @apply opacity-100 pointer-events-auto;

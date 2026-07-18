@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { getCurrentUser } from "@/lib/workspace";
 import { logoutAction } from "@/app/(auth)/actions";
+import ApexLogo from "@/components/ApexLogo";
 
 /**
  * Left-rail navigation.
@@ -40,15 +41,10 @@ export default async function Nav() {
     >
       <Link
         href="/dashboard"
-        className="px-5 pt-5 pb-4 flex items-baseline gap-2 group"
+        className="px-5 pt-5 pb-4 flex items-baseline justify-between group"
       >
-        <span className="text-accent text-lg leading-none drop-shadow-[0_0_8px_rgba(56,189,248,0.6)]">
-          ◇
-        </span>
-        <span className="font-semibold tracking-tight text-text group-hover:text-accent transition-colors">
-          Flow BOF
-        </span>
-        <span className="text-[10px] uppercase tracking-[0.16em] text-muted ml-auto">
+        <ApexLogo size="sm" />
+        <span className="text-[10px] uppercase tracking-[0.16em] text-muted">
           alpha
         </span>
       </Link>
