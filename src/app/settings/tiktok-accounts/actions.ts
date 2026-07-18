@@ -332,6 +332,90 @@ export async function refreshTikTokAccountNow(formData: FormData): Promise<Actio
   return result;
 }
 
+/**
+ * Refresh every TikTok account in the current workspace in one
+ * shot. Iterates serially — TikHub throttles concurrent calls
+ * from the same API key, and cron does the same for the same
+ * reason.
+ *
+ * Rate limit: same per-account 12h cap as the single-account
+ * button. Accounts already at the cap are skipped (not errored) so
+ * a "refresh all" that partially hits the cap still refreshes the
+ * accounts that have room.
+ *
+ * Returns a summary — succeeded / rate-limited / failed — that the
+ * toast surfaces to the operator.
+ */
+export async function refreshAllTikTokAccounts(): Promise<ActionResult> {
+  const { workspace } = await getCurrentWorkspace();
+
+  const accounts = await db.tikTokAccount.findMany({
+    where: { workspaceId: workspace.id },
+    select: { id: true, label: true, manualRefreshLog: true },
+    orderBy: [{ createdAt: "asc" }],
+  });
+  if (accounts.length === 0) {
+    return { ok: false, message: "No accounts to refresh." };
+  }
+
+  const { refreshAccountSnapshot } = await import("@/lib/tikhub-refresh");
+  const windowStart = new Date(Date.now() - MANUAL_REFRESH_WINDOW_MS);
+  let succeeded = 0;
+  let rateLimited = 0;
+  let failed = 0;
+
+  for (const a of accounts) {
+    const inWindow = parseManualRefreshLog(a.manualRefreshLog).filter(
+      (d) => d >= windowStart,
+    );
+    if (inWindow.length >= MANUAL_REFRESH_MAX_PER_WINDOW) {
+      rateLimited++;
+      continue;
+    }
+
+    let ok = false;
+    try {
+      const r = await refreshAccountSnapshot({
+        accountId: a.id,
+        workspaceId: workspace.id,
+        includeProducts: true,
+      });
+      ok = r.ok;
+    } catch {
+      ok = false;
+    }
+
+    if (ok) {
+      succeeded++;
+      const nextLog = [...inWindow, new Date()]
+        .sort((x, y) => y.getTime() - x.getTime())
+        .slice(0, MANUAL_REFRESH_LOG_CAP)
+        .map((d) => d.toISOString())
+        .join(",");
+      await db.tikTokAccount.update({
+        where: { id: a.id },
+        data: { manualRefreshLog: nextLog },
+      });
+    } else {
+      failed++;
+    }
+  }
+
+  revalidatePath("/settings/tiktok-accounts");
+  revalidatePath("/analytics");
+
+  const parts = [`${succeeded}/${accounts.length} refreshed`];
+  if (rateLimited > 0) parts.push(`${rateLimited} at 12h cap`);
+  if (failed > 0) parts.push(`${failed} failed`);
+  // "ok" if we actually refreshed something OR if the only reason
+  // we didn't was that everything was rate-limited (a "come back
+  // later" situation, not a failure).
+  return {
+    ok: succeeded > 0 || (failed === 0 && rateLimited > 0),
+    message: parts.join(" · "),
+  };
+}
+
 /** CSV of ISO timestamps → Date[]. Silently drops malformed entries. */
 function parseManualRefreshLog(raw: string | null): Date[] {
   if (!raw) return [];

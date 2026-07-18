@@ -6,6 +6,7 @@ import StatusChip from "@/components/StatusChip";
 import EmptyState from "@/components/ui/EmptyState";
 import AccountForm from "./AccountForm";
 import AccountRow from "./AccountRow";
+import RefreshAllButton from "./RefreshAllButton";
 
 /**
  * BOF Dashboard — Account Management.
@@ -134,12 +135,15 @@ export default async function TikTokAccountsPage() {
         title={`Connected accounts (${accounts.length})`}
         action={
           accounts.length > 0 ? (
-            <Link
-              href="/analytics"
-              className="text-accent hover:underline"
-            >
-              Go to dashboard →
-            </Link>
+            <div className="flex items-center gap-4">
+              <RefreshAllButton accountCount={accounts.length} />
+              <Link
+                href="/analytics"
+                className="text-accent hover:underline"
+              >
+                Go to dashboard →
+              </Link>
+            </div>
           ) : null
         }
       >
