@@ -780,18 +780,53 @@ export async function setProductReviewStatusViaToken(input: {
       ? Math.round(pctRaw)
       : null;
 
-  await db.product.update({
-    where: { id: product.id },
-    // Save discountPercent regardless of the resulting status —
-    // if the reviewer typed a % then rejected, we still want to
-    // remember it in case they change their mind. Approving with
-    // no % is fine — the field stays null and the generator will
-    // fall back to the 30 non-% hooks.
-    data:  {
-      reviewStatus: status,
-      discountPercent,
-    },
-  });
+  // Write in a try/catch so a schema mismatch (e.g. dev DB
+  // hasn't been `prisma db push`'d yet after adding
+  // discountPercent) surfaces as a real error the mobile UI can
+  // show, rather than a silent 500 that leaves the reviewer
+  // thinking the tap worked when nothing was persisted.
+  //
+  // Fallback: if the write fails specifically because
+  // discountPercent isn't a known column (P2022 / unknown-arg
+  // 2018 depending on engine version), retry WITHOUT
+  // discountPercent so at least the status change persists. The
+  // caller message flags that the % couldn't be saved and points
+  // at the fix.
+  try {
+    await db.product.update({
+      where: { id: product.id },
+      data:  { reviewStatus: status, discountPercent },
+    });
+  } catch (err) {
+    const msg = (err as Error).message || "";
+    const looksLikeMissingColumn =
+      msg.includes("discountPercent") ||
+      msg.includes("P2022") ||
+      msg.includes("Unknown arg `discountPercent`") ||
+      msg.includes("no such column");
+    if (looksLikeMissingColumn) {
+      try {
+        await db.product.update({
+          where: { id: product.id },
+          data:  { reviewStatus: status },
+        });
+        return {
+          ok: true,
+          message:
+            "Status saved, but the discount % column is missing on this deployment. Run `prisma db push` (dev) or the equivalent prod migration to enable capturing discounts.",
+        };
+      } catch (err2) {
+        return {
+          ok: false,
+          message: `Could not save: ${(err2 as Error).message.slice(0, 200)}`,
+        };
+      }
+    }
+    return {
+      ok: false,
+      message: `Could not save: ${msg.slice(0, 200)}`,
+    };
+  }
 
   // Post-approve auto-generation. Fire-and-forget via Next 15's
   // `after()` so the mobile-swipe UI doesn't wait for the LLM

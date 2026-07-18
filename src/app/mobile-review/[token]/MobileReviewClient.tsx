@@ -175,15 +175,34 @@ export default function MobileReviewClient({
         : null;
     setErrorMsg(null);
     startTransition(async () => {
-      const r = await setProductReviewStatusViaToken({
-        token,
-        productId,
-        status,
-        discountPercent,
-      });
+      let r: { ok: boolean; message?: string };
+      try {
+        r = await setProductReviewStatusViaToken({
+          token,
+          productId,
+          status,
+          discountPercent,
+        });
+      } catch (e) {
+        // A raw throw from the server action ends up here — most
+        // often a transport error or an unhandled exception the
+        // action forgot to wrap. Surface it so the reviewer isn't
+        // left staring at a button that did nothing.
+        setErrorMsg(
+          `Save failed: ${(e as Error).message?.slice(0, 200) || "unknown error"}`,
+        );
+        return;
+      }
       if (!r.ok) {
         setErrorMsg(r.message ?? "Could not save status. Try again.");
         return;
+      }
+      // If the server saved but flagged a partial-success
+      // condition (e.g. discountPercent column missing on this
+      // deployment), keep the reviewer moving but surface the
+      // note as a non-blocking warning banner.
+      if (r.message) {
+        setErrorMsg(r.message);
       }
       setProducts((prev) =>
         prev.map((p) =>

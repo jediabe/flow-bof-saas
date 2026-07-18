@@ -13,6 +13,7 @@ import type { AiPromptOutput } from "@/lib/ai/types";
 import {
   importKalodataXlsx,
   getOrCreateBatchReviewToken,
+  generateAiPromptForProduct,
   type KalodataImportReport,
 } from "@/app/batches/actions";
 
@@ -294,6 +295,104 @@ export interface BatchReviewProgress {
     discountPercent: number | null;
     hasPrompt: boolean;
   }>;
+}
+
+/**
+ * Manual "Regenerate for approved products" — the safety net if
+ * the mobile-side `after()` auto-generation didn't fire (silent
+ * failure, cold start on a serverless boundary, or the operator
+ * changed the discount % after approval). Iterates every approved
+ * product in the batch and runs the prompt generator with the
+ * currently-persisted discountPercent on each row.
+ *
+ * Sequential so we don't concurrently hammer the LLM provider from
+ * one workspace. Non-approved products are skipped. Returns a
+ * summary the UI can render as a toast.
+ */
+export interface RegenerateApprovedResult {
+  ok: boolean;
+  message: string;
+  attempted: number;
+  succeeded: number;
+  failed: number;
+}
+
+export async function regenerateApprovedInBatch(
+  batchId: string,
+): Promise<RegenerateApprovedResult> {
+  if (!batchId) {
+    return {
+      ok: false,
+      message: "missing batchId",
+      attempted: 0,
+      succeeded: 0,
+      failed: 0,
+    };
+  }
+  const { workspace } = await getCurrentWorkspace();
+  const batch = await db.batch.findFirst({
+    where: { id: batchId, workspaceId: workspace.id },
+    select: {
+      id: true,
+      products: {
+        where: {
+          deletedAt: null,
+          reviewStatus: "approved",
+        },
+        select: { id: true },
+      },
+    },
+  });
+  if (!batch) {
+    return {
+      ok: false,
+      message: "batch not found",
+      attempted: 0,
+      succeeded: 0,
+      failed: 0,
+    };
+  }
+  const approved = batch.products;
+  if (approved.length === 0) {
+    return {
+      ok: false,
+      message: "No approved products to regenerate.",
+      attempted: 0,
+      succeeded: 0,
+      failed: 0,
+    };
+  }
+
+  let succeeded = 0;
+  let failed = 0;
+  for (const p of approved) {
+    try {
+      const r = await generateAiPromptForProduct({
+        batchId: batch.id,
+        productId: p.id,
+        force: true,
+      });
+      if (r.ok) {
+        succeeded++;
+      } else {
+        failed++;
+      }
+    } catch {
+      failed++;
+    }
+  }
+
+  revalidatePath("/prompts");
+  return {
+    ok: succeeded > 0,
+    message:
+      succeeded === approved.length
+        ? `Regenerated ${succeeded} product${succeeded === 1 ? "" : "s"}.`
+        : `${succeeded}/${approved.length} regenerated · ${failed} failed.`,
+    attempted: approved.length,
+    succeeded,
+    failed,
+  };
 }
 
 export async function getBatchReviewProgress(
