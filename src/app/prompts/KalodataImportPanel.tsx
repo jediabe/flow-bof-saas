@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import Panel from "@/components/ui/Panel";
 import StatusChip from "@/components/StatusChip";
+import ApprovedHooksSection from "./ApprovedHooksSection";
 import {
   importKalodataForPrompts,
   getBatchReviewProgress,
@@ -213,6 +214,7 @@ export default function KalodataImportPanel() {
   }
 
   return (
+    <>
     <Panel title="Import from Kalodata">
       <div className="space-y-4">
         <p className="text-xs text-muted leading-relaxed">
@@ -342,6 +344,13 @@ export default function KalodataImportPanel() {
         )}
       </div>
     </Panel>
+
+    {/* Live-updating list of every approved product's generated
+        hooks. Renders nothing when there's no active batch or no
+        approvals yet; expands into a collapsible card per product
+        as the mobile reviewer works through the list. */}
+    {imported && <ApprovedHooksSection batchId={imported.batchId} />}
+    </>
   );
 }
 

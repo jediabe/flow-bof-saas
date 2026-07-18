@@ -395,6 +395,125 @@ export async function regenerateApprovedInBatch(
   };
 }
 
+/**
+ * Return the actual generated hook + prompt content for every
+ * approved product in a batch that has hooks ready. Powers the
+ * "Auto-generated hooks" section on /prompts — the missing piece
+ * that surfaces post-approve output on the desktop side instead
+ * of leaving the operator to hunt through /batches/[id] for it.
+ *
+ * Includes rejected + maybe products would be noise; we only
+ * return `approved` because that's what the reviewer said they
+ * wanted content for.
+ */
+export interface ApprovedHooksProduct {
+  id: string;
+  productName: string;
+  discountPercent: number | null;
+  imagePrompt: string | null;
+  caption: string | null;
+  hashtags: string[];
+  hook: string | null;
+  hookVariants: Array<{ label: string; text: string }>;
+  aiPromptGeneratedAt: string | null;
+  aiPromptError: string | null;
+}
+
+export interface ApprovedHooksResult {
+  ok: boolean;
+  message?: string;
+  products?: ApprovedHooksProduct[];
+}
+
+export async function getApprovedHooksForBatch(
+  batchId: string,
+): Promise<ApprovedHooksResult> {
+  if (!batchId) return { ok: false, message: "missing batchId" };
+  const { workspace } = await getCurrentWorkspace();
+  const batch = await db.batch.findFirst({
+    where: { id: batchId, workspaceId: workspace.id },
+    select: {
+      id: true,
+      products: {
+        where: {
+          deletedAt: null,
+          reviewStatus: "approved",
+        },
+        orderBy: [{ createdAt: "asc" }],
+        select: {
+          id: true,
+          productName: true,
+          discountPercent: true,
+          imagePrompt: true,
+          caption: true,
+          hashtags: true,
+          hook: true,
+          hookVariants: true,
+          aiPromptGeneratedAt: true,
+          aiPromptError: true,
+        },
+      },
+    },
+  });
+  if (!batch) return { ok: false, message: "batch not found" };
+
+  const products: ApprovedHooksProduct[] = batch.products.map((p) => {
+    // hashtags is a JSON-encoded string[] on both engines (SQLite
+    // has no array type; Postgres matches for schema parity).
+    let hashtags: string[] = [];
+    if (p.hashtags) {
+      try {
+        const decoded = JSON.parse(p.hashtags);
+        if (Array.isArray(decoded)) {
+          hashtags = decoded.filter((t) => typeof t === "string");
+        }
+      } catch {
+        // ignore malformed
+      }
+    }
+    // hookVariants is a JSON-encoded [{label, text, lever_name?}].
+    let hookVariants: Array<{ label: string; text: string }> = [];
+    if (p.hookVariants) {
+      try {
+        const decoded = JSON.parse(p.hookVariants);
+        if (Array.isArray(decoded)) {
+          for (const v of decoded) {
+            if (
+              v &&
+              typeof v === "object" &&
+              typeof (v as { label?: unknown }).label === "string" &&
+              typeof (v as { text?: unknown }).text === "string"
+            ) {
+              hookVariants.push({
+                label: (v as { label: string }).label,
+                text: (v as { text: string }).text,
+              });
+            }
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+    return {
+      id: p.id,
+      productName: p.productName,
+      discountPercent: p.discountPercent ?? null,
+      imagePrompt: p.imagePrompt ?? null,
+      caption: p.caption ?? null,
+      hashtags,
+      hook: p.hook ?? null,
+      hookVariants,
+      aiPromptGeneratedAt: p.aiPromptGeneratedAt
+        ? p.aiPromptGeneratedAt.toISOString()
+        : null,
+      aiPromptError: p.aiPromptError ?? null,
+    };
+  });
+
+  return { ok: true, products };
+}
+
 export async function getBatchReviewProgress(
   batchId: string,
 ): Promise<BatchReviewProgress> {
