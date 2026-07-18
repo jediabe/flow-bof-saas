@@ -5,6 +5,7 @@ import Panel from "@/components/ui/Panel";
 import MetricCard from "@/components/ui/MetricCard";
 import StatusChip from "@/components/StatusChip";
 import EmptyState from "@/components/ui/EmptyState";
+import RefreshAllButton from "@/app/settings/tiktok-accounts/RefreshAllButton";
 import {
   windowRange,
   sumRevenue,
@@ -262,7 +263,26 @@ export default async function AnalyticsPage({
       </div>
 
       {/* Per-account list — sorted by window GMV desc */}
-      <Panel title={`Accounts (${totalAccounts})`}>
+      <Panel
+        title={`Accounts (${totalAccounts})`}
+        action={
+          <div className="flex items-center gap-3">
+            <RefreshAllButton accountCount={totalAccounts} />
+            <Link
+              href="/settings/tiktok-accounts"
+              className="text-xs text-accent hover:underline whitespace-nowrap"
+            >
+              Add account →
+            </Link>
+          </div>
+        }
+      >
+        <div className="text-[11px] text-muted2 mb-3 leading-relaxed">
+          Health &amp; revenue refresh automatically every 6 hours; product
+          lists sync once a day at 03:15 UTC. Use{" "}
+          <span className="text-text">Refresh all</span> for an immediate
+          pull — capped at 3 manual refreshes per 12h per account.
+        </div>
         <div className="space-y-2">
           {sortedAccounts.map((a) => {
             const rev = perAccountRevenue.get(a.id) ?? {

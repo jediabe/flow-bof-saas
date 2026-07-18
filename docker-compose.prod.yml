@@ -95,6 +95,37 @@ services:
     depends_on:
       - app
 
+  # Auto-refresh cron sidecar for the BOF Dashboard.
+  #
+  # Hits /api/cron/{health-and-revenue,products} on a schedule:
+  #   - health-and-revenue: every 6 hours (00:00, 06:00, 12:00, 18:00)
+  #   - products:           once a day at 03:15 (both times in $TZ)
+  # See docker/cron/entrypoint.sh for the crontab definition.
+  #
+  # Auth: passes CRON_SECRET from env_file as a Bearer token, which
+  # /api/cron/[task]/route.ts validates with a constant-time
+  # compare. If CRON_SECRET is unset the container refuses to
+  # start rather than silently doing nothing.
+  #
+  # Network: reaches the app over the default compose network by
+  # service name (http://app:3000), so no host port publishing is
+  # needed and the /api/cron/* routes never need to be exposed
+  # publicly.
+  cron:
+    build:
+      context: ./docker/cron
+      dockerfile: Dockerfile
+    container_name: flow-bof-cron
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    environment:
+      # Internal-network URL the sidecar hits. Overridable if the
+      # app service is renamed. Never leaks outside the compose net.
+      APP_INTERNAL_URL: http://app:3000
+    depends_on:
+      - app
+
 volumes:
   postgres_data:
   caddy_data:
