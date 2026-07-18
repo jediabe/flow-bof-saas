@@ -2,11 +2,32 @@ import Link from "next/link";
 import { db } from "@/lib/db";
 import { getCurrentWorkspace } from "@/lib/workspace";
 import Panel from "@/components/ui/Panel";
-import MetricCard from "@/components/ui/MetricCard";
 import StatusChip from "@/components/StatusChip";
 import EmptyState from "@/components/ui/EmptyState";
-import { parseJson } from "@/lib/json-column";
+import ApexLogo from "@/components/ApexLogo";
 import { friendlyJobType } from "@/lib/job-types";
+
+/**
+ * APEX Hub — landing page for the APEX Initiative TikTok Shop
+ * dashboard.
+ *
+ * Structure:
+ *   1. Hero  — big //APEX mark + workspace name + workspace
+ *              scoped 7d GMV headline (or a "connect an account"
+ *              CTA when nothing's linked yet).
+ *   2. Primary tiles — three cards, one per top-level surface
+ *              (Shop Analytics, Hooks & Prompts, Mobile Posting).
+ *              Each shows a headline number + short prompt.
+ *   3. Tools row — subdued cards for the image-gen pipeline
+ *              (batches, runner, jobs). Kept visible for operators
+ *              who still want it; visually demoted so it doesn't
+ *              compete with the primary surfaces.
+ *   4. Recent activity — small table below the fold. Same content
+ *              as before, just repositioned.
+ *
+ * All data reads are best-effort — an empty database renders the
+ * hub cleanly with prompts to add first-run content.
+ */
 
 export const dynamic = "force-dynamic";
 
@@ -28,333 +49,216 @@ function timeAgo(d: Date | null | undefined): string {
   return `${Math.floor(s / 86400)}d ago`;
 }
 
-// Pipeline counters derived from the most recent scan_favorited_images
-// result + the most recent generate_flow_videos_from_favorites result.
-// These are best-effort: if the user hasn't run a scan yet, we show "—".
-async function getPipelineMetrics(workspaceId: string) {
-  const [productsCount, lastScan, lastVideoRun] = await Promise.all([
-    db.product.count({ where: { batch: { workspaceId } } }),
-    db.job.findFirst({
+/** GBP first, then whatever, then USD. UK-first because that's who
+ *  the APEX curriculum is currently built for. */
+function formatCurrency(amount: number, code: string): string {
+  const symbol = code === "GBP" ? "£" : code === "USD" ? "$" : "";
+  return `${symbol}${Math.round(amount).toLocaleString()}`;
+}
+
+export default async function HubPage() {
+  const { workspace } = await getCurrentWorkspace();
+
+  // 7-day window for the headline metric — matches the /analytics
+  // page default so the numbers reconcile.
+  const now = new Date();
+  const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+
+  const [
+    accountsCount,
+    revenue7d,
+    productsCount,
+    activeBatch,
+    recentJobs,
+    agent,
+  ] = await Promise.all([
+    db.tikTokAccount.count({ where: { workspaceId: workspace.id } }),
+    db.tikTokAccountRevenue.findMany({
       where: {
-        workspaceId,
-        jobType: "scan_favorited_images",
-        status: "succeeded",
+        account: { workspaceId: workspace.id },
+        date: { gte: sevenDaysAgo },
       },
-      orderBy: { createdAt: "desc" },
-      select: { result: true, createdAt: true },
+      select: { gmv: true, currencyCode: true, itemsSold: true },
     }),
-    db.job.findFirst({
-      where: {
-        workspaceId,
-        jobType: "generate_flow_videos_from_favorites",
-        status: "succeeded",
-      },
+    db.tikTokProduct.count({
+      where: { account: { workspaceId: workspace.id } },
+    }),
+    db.batch.findFirst({
+      where: { workspaceId: workspace.id },
+      orderBy: { updatedAt: "desc" },
+      include: { _count: { select: { products: true, jobs: true } } },
+    }),
+    db.job.findMany({
+      where: { workspaceId: workspace.id },
       orderBy: { createdAt: "desc" },
-      select: { result: true, createdAt: true },
+      take: 5,
+      select: {
+        id: true,
+        jobType: true,
+        status: true,
+        createdAt: true,
+        batch: { select: { name: true } },
+      },
+    }),
+    db.agent.findFirst({
+      where: { workspaceId: workspace.id },
+      orderBy: { createdAt: "asc" },
+      select: { name: true, status: true, lastSeenAt: true },
     }),
   ]);
 
-  const scan = lastScan?.result
-    ? (parseJson(lastScan.result) as {
-        favorited_images_count?: number;
-        tiles_scanned?: number;
-      } | null)
-    : null;
-  const video = lastVideoRun?.result
-    ? (parseJson(lastVideoRun.result) as {
-        submitted?: number;
-      } | null)
-    : null;
-
-  return {
-    productsCount,
-    imagesSubmitted: scan?.tiles_scanned ?? null,
-    favoritedImages: scan?.favorited_images_count ?? null,
-    videosGenerated: video?.submitted ?? null,
-    lastScanAt: lastScan?.createdAt ?? null,
-  };
-}
-
-export default async function DashboardPage() {
-  const { workspace } = await getCurrentWorkspace();
-
-  const [agent, lastFlowCheck, activeBatch, recentJobs, metrics] =
-    await Promise.all([
-      db.agent.findFirst({
-        where: { workspaceId: workspace.id },
-        orderBy: { createdAt: "asc" },
-      }),
-      db.job.findFirst({
-        where: {
-          workspaceId: workspace.id,
-          jobType: "check_flow_connection",
-          status: "succeeded",
-        },
-        orderBy: { createdAt: "desc" },
-        select: { result: true, createdAt: true },
-      }),
-      db.batch.findFirst({
-        where: { workspaceId: workspace.id },
-        orderBy: { updatedAt: "desc" },
-        include: { _count: { select: { products: true, jobs: true } } },
-      }),
-      db.job.findMany({
-        where: { workspaceId: workspace.id },
-        orderBy: { createdAt: "desc" },
-        take: 6,
-        select: {
-          id: true,
-          jobType: true,
-          status: true,
-          createdAt: true,
-          batch: { select: { name: true } },
-        },
-      }),
-      getPipelineMetrics(workspace.id),
-    ]);
-
-  const flowProbe = lastFlowCheck?.result
-    ? (parseJson(lastFlowCheck.result) as {
-        chrome_reachable?: boolean;
-        flow_reachable?: boolean;
-      } | null)
-    : null;
-
-  // Choose the single "next recommended action" based on what's
-  // missing. Priorities mirror the user's pipeline: get a runner →
-  // create a batch → scan favorites → generate videos.
-  const nextAction = (() => {
-    if (!agent)
-      return {
-        title: "Register your local runner",
-        body:
-          "The cockpit needs a local runner to drive Flow. Add one on the Runner page.",
-        href: "/agents",
-        cta: "Open Runner",
-      };
-    if (agent.status !== "online")
-      return {
-        title: "Test your runner",
-        body:
-          "Your runner hasn't checked in. Test it to confirm Chrome and Flow are reachable.",
-        href: "/agents",
-        cta: "Test runner",
-      };
-    if (!activeBatch)
-      return {
-        title: "Create your first batch",
-        body: "Batches group products through the image → favorite → video pipeline.",
-        href: "/batches",
-        cta: "New batch",
-      };
-    if ((metrics.favoritedImages ?? 0) === 0)
-      return {
-        title: "Scan favorited images",
-        body:
-          "Once you've favorited tiles in Flow, scan them so the cockpit knows what to animate.",
-        href: `/batches/${activeBatch.id}`,
-        cta: "Open batch",
-      };
-    return {
-      title: "Generate videos from favorites",
-      body:
-        "Favorites detected. Generate videos to push them through the next stage.",
-      href: `/batches/${activeBatch.id}`,
-      cta: "Open batch",
-    };
-  })();
-
-  const runnerOnline = agent?.status === "online";
+  // Aggregate 7d GMV in the dominant currency; if operators mix
+  // currencies we surface "mixed" and skip the symbol.
+  const currencyCounts = new Map<string, number>();
+  let gmv7d = 0;
+  let items7d = 0;
+  for (const r of revenue7d) {
+    const c = r.currencyCode || "USD";
+    currencyCounts.set(c, (currencyCounts.get(c) ?? 0) + 1);
+    gmv7d += Number(r.gmv ?? 0);
+    items7d += r.itemsSold ?? 0;
+  }
+  const dominantCurrency =
+    [...currencyCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ??
+    "GBP";
+  const currencyMixed = currencyCounts.size > 1;
 
   return (
     <div className="space-y-8">
-      <header>
-        <h1 className="h-page">{workspace.name}</h1>
-        <p className="text-sm text-muted mt-1">
-          Cockpit overview · {new Date().toLocaleString()}
-        </p>
+      {/* Hero ------------------------------------------------------- */}
+      <header className="flex flex-col md:flex-row md:items-end md:justify-between gap-4 pb-2">
+        <div>
+          <ApexLogo size="lg" subline="TikTok Shop hub" />
+          <div className="text-sm text-muted mt-3">
+            {workspace.name} · {new Date().toLocaleDateString()}
+          </div>
+        </div>
+        <div className="text-right">
+          <div className="text-[10px] uppercase tracking-[0.16em] text-muted">
+            GMV · last 7 days
+          </div>
+          <div className="text-3xl font-bold tracking-tight text-text mt-1">
+            {accountsCount === 0
+              ? "—"
+              : currencyMixed
+                ? gmv7d.toLocaleString()
+                : formatCurrency(gmv7d, dominantCurrency)}
+          </div>
+          <div className="text-[11px] text-muted mt-0.5">
+            {accountsCount === 0
+              ? "no accounts connected yet"
+              : `${items7d.toLocaleString()} items · ${accountsCount} account${accountsCount === 1 ? "" : "s"}`}
+          </div>
+        </div>
       </header>
 
-      {/* Top row: runner status (left, wide) + next action (right) ---- */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-        <Panel
-          className="lg:col-span-2"
-          title="Local runner"
-          action={
-            <Link
-              href="/agents"
-              className="text-xs text-accent hover:underline"
-            >
-              Manage →
-            </Link>
-          }
-        >
-          {!agent ? (
-            <EmptyState
-              icon="◇"
-              title="No runner registered yet"
-              hint="Register your local flow-bof-automation install to start driving Flow from the cockpit."
-              action={
-                <Link href="/agents" className="btn btn-primary">
-                  Register runner
-                </Link>
-              }
-            />
-          ) : (
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              <MetricCard
-                label="Runner"
-                value={runnerOnline ? "Connected" : "Offline"}
-                tone={runnerOnline ? "ok" : "bad"}
-                hint={agent.name}
-              />
-              <MetricCard
-                label="Chrome"
-                value={
-                  flowProbe?.chrome_reachable === undefined
-                    ? "Unknown"
-                    : flowProbe.chrome_reachable
-                      ? "Reachable"
-                      : "Not reachable"
-                }
-                tone={
-                  flowProbe?.chrome_reachable === true
-                    ? "ok"
-                    : flowProbe?.chrome_reachable === false
-                      ? "bad"
-                      : "muted"
-                }
-              />
-              <MetricCard
-                label="Flow"
-                value={
-                  flowProbe?.flow_reachable === undefined
-                    ? "Unknown"
-                    : flowProbe.flow_reachable
-                      ? "Reachable"
-                      : "Not reachable"
-                }
-                tone={
-                  flowProbe?.flow_reachable === true
-                    ? "ok"
-                    : flowProbe?.flow_reachable === false
-                      ? "bad"
-                      : "muted"
-                }
-              />
-              <MetricCard
-                label="Last seen"
-                value={timeAgo(agent.lastSeenAt)}
-                tone="muted"
-                hint={
-                  agent.lastSeenAt
-                    ? new Date(agent.lastSeenAt).toLocaleString()
-                    : undefined
-                }
-              />
-            </div>
-          )}
-        </Panel>
+      {/* Primary tiles --------------------------------------------- */}
+      <section>
+        <div className="flex items-center gap-3 mb-4">
+          <span className="chip-num">01</span>
+          <h2 className="text-xs uppercase tracking-[0.16em] text-muted font-medium">
+            Everyday surfaces
+          </h2>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <HubTile
+            variant="blue"
+            title="Shop Analytics"
+            body={
+              accountsCount === 0
+                ? "Connect a TikTok Shop account to start pulling health, revenue, and product analytics."
+                : `${accountsCount} account${accountsCount === 1 ? "" : "s"} connected · ${productsCount} product${productsCount === 1 ? "" : "s"} tracked.`
+            }
+            cta={accountsCount === 0 ? "Connect first account" : "Open dashboard"}
+            href={
+              accountsCount === 0
+                ? "/settings/tiktok-accounts"
+                : "/analytics"
+            }
+          />
+          <HubTile
+            variant="red"
+            title="Hooks & Prompts"
+            body="Generate all seven APEX hook families per product — I'm So Sorry, Wait, POV, Curiosity, Scarcity, Deal, Social Proof — plus caption and hashtag block."
+            cta="Generate hooks"
+            href="/prompts"
+          />
+          <HubTile
+            variant="blue"
+            title="Mobile Posting"
+            body="From a batch page, scan the QR to post from your phone. Review products, prompts, and hooks on the go."
+            cta={activeBatch ? "Open active batch" : "Create a batch"}
+            href={activeBatch ? `/batches/${activeBatch.id}` : "/batches"}
+          />
+        </div>
+      </section>
 
-        <Panel variant="accent" title="Next action">
-          <div className="space-y-3">
-            <div className="text-base font-medium text-text">
-              {nextAction.title}
-            </div>
-            <p className="text-sm text-muted leading-relaxed">
-              {nextAction.body}
-            </p>
-            <Link href={nextAction.href} className="btn btn-primary inline-flex">
-              {nextAction.cta} →
-            </Link>
-          </div>
-        </Panel>
-      </div>
+      {/* Tools row — image gen + supporting pieces ----------------- */}
+      <section>
+        <div className="flex items-center gap-3 mb-4">
+          <span className="chip-num chip-num-blue">02</span>
+          <h2 className="text-xs uppercase tracking-[0.16em] text-muted font-medium">
+            Tools
+          </h2>
+          <span className="text-[11px] text-muted2">
+            Image-gen automation is still hooked up to your uploaded products.
+          </span>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <ToolTile
+            title="Image Gen"
+            body={
+              activeBatch
+                ? `${activeBatch.name} · ${activeBatch._count.products} products`
+                : "Batches drive product uploads through the image → favorite → video pipeline."
+            }
+            cta={activeBatch ? "Open batch" : "New batch"}
+            href={activeBatch ? `/batches/${activeBatch.id}` : "/batches"}
+            chips={
+              activeBatch
+                ? [
+                    { label: activeBatch.status, variant: "muted" as const },
+                    {
+                      label: `${activeBatch._count.jobs} jobs`,
+                      variant: "muted" as const,
+                    },
+                  ]
+                : undefined
+            }
+          />
+          <ToolTile
+            title="Runner Setup"
+            body={
+              agent
+                ? `${agent.name} · last seen ${timeAgo(agent.lastSeenAt)}`
+                : "Register your local runner so image gen can drive Flow."
+            }
+            cta={agent ? "Manage runner" : "Register runner"}
+            href="/agents"
+            chips={
+              agent
+                ? [
+                    {
+                      label: agent.status,
+                      variant:
+                        agent.status === "online"
+                          ? ("ok" as const)
+                          : ("muted" as const),
+                    },
+                  ]
+                : undefined
+            }
+          />
+          <ToolTile
+            title="Jobs"
+            body="Every runner job — scans, generations, uploads — logged with status and duration."
+            cta="Browse jobs"
+            href="/jobs"
+          />
+        </div>
+      </section>
 
-      {/* Pipeline + active batch row ---------------------------------- */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-        <Panel
-          className="lg:col-span-2"
-          title="Creative pipeline"
-          action={
-            metrics.lastScanAt && (
-              <span className="text-[11px] text-muted">
-                last scan {timeAgo(metrics.lastScanAt)}
-              </span>
-            )
-          }
-        >
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <MetricCard label="Products" value={metrics.productsCount} />
-            <MetricCard
-              label="Images submitted"
-              value={metrics.imagesSubmitted ?? "—"}
-              tone={metrics.imagesSubmitted ? "accent" : "muted"}
-            />
-            <MetricCard
-              label="Favorited images"
-              value={metrics.favoritedImages ?? "—"}
-              tone={metrics.favoritedImages ? "ok" : "muted"}
-            />
-            <MetricCard
-              label="Videos generated"
-              value={metrics.videosGenerated ?? "—"}
-              tone={metrics.videosGenerated ? "accent" : "muted"}
-            />
-          </div>
-        </Panel>
-
-        <Panel
-          title="Active batch"
-          action={
-            activeBatch && (
-              <Link
-                href={`/batches/${activeBatch.id}`}
-                className="text-xs text-accent hover:underline"
-              >
-                Open →
-              </Link>
-            )
-          }
-        >
-          {!activeBatch ? (
-            <EmptyState
-              icon="▤"
-              title="No batches yet"
-              hint="Create a batch to start grouping products."
-              action={
-                <Link href="/batches" className="btn btn-primary">
-                  New batch
-                </Link>
-              }
-            />
-          ) : (
-            <div className="space-y-3">
-              <div>
-                <div className="text-base font-medium text-text">
-                  {activeBatch.name}
-                </div>
-                <div className="text-xs text-muted mt-0.5">
-                  updated {timeAgo(activeBatch.updatedAt)}
-                </div>
-              </div>
-              <div className="flex gap-2">
-                <StatusChip label={activeBatch.status} variant="muted" />
-                <StatusChip
-                  label={`${activeBatch._count.products} products`}
-                  variant="muted"
-                />
-                <StatusChip
-                  label={`${activeBatch._count.jobs} jobs`}
-                  variant="muted"
-                />
-              </div>
-            </div>
-          )}
-        </Panel>
-      </div>
-
-      {/* Recent activity --------------------------------------------- */}
+      {/* Recent activity ------------------------------------------- */}
       <Panel
         title="Recent activity"
         action={
@@ -367,7 +271,7 @@ export default async function DashboardPage() {
           <EmptyState
             icon="≡"
             title="No activity yet"
-            hint="Sample jobs run from any batch detail page will land here."
+            hint="Jobs run from any batch detail page will land here."
           />
         ) : (
           <ul className="divide-y divide-border">
@@ -397,6 +301,88 @@ export default async function DashboardPage() {
           </ul>
         )}
       </Panel>
+
     </div>
   );
 }
+
+/**
+ * Large primary tile — one of the top-row cards. Uses the
+ * APEX card accents (blue or red left-border) from the shared
+ * primitives so it matches the curriculum PDF's callout style.
+ */
+function HubTile({
+  variant,
+  title,
+  body,
+  cta,
+  href,
+}: {
+  variant: "blue" | "red";
+  title: string;
+  body: string;
+  cta: string;
+  href: string;
+}) {
+  const cardClass =
+    variant === "blue" ? "card-accent-blue" : "card-accent-red";
+  const ctaColour =
+    variant === "blue" ? "text-accent" : "text-accent-red";
+  return (
+    <Link
+      href={href}
+      className={`${cardClass} p-5 flex flex-col gap-3 min-h-[180px] hover:border-border-strong transition-colors group`}
+    >
+      <div className="text-base font-semibold tracking-tight text-text">
+        {title}
+      </div>
+      <p className="text-sm text-muted leading-relaxed flex-1">{body}</p>
+      <div
+        className={`text-[13px] font-medium ${ctaColour} group-hover:underline`}
+      >
+        {cta} →
+      </div>
+    </Link>
+  );
+}
+
+/**
+ * Smaller "Tools" tile — same shape as HubTile but muted. No
+ * accent left-border; uses the plain panel primitive.
+ */
+function ToolTile({
+  title,
+  body,
+  cta,
+  href,
+  chips,
+}: {
+  title: string;
+  body: string;
+  cta: string;
+  href: string;
+  chips?: Array<{ label: string; variant: "ok" | "warn" | "bad" | "muted" }>;
+}) {
+  return (
+    <Link
+      href={href}
+      className="panel p-4 flex flex-col gap-2 min-h-[140px] hover:border-border-strong transition-colors group"
+    >
+      <div className="text-sm font-semibold tracking-tight text-text">
+        {title}
+      </div>
+      {chips && chips.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {chips.map((c, i) => (
+            <StatusChip key={i} label={c.label} variant={c.variant} />
+          ))}
+        </div>
+      )}
+      <p className="text-[13px] text-muted leading-relaxed flex-1">{body}</p>
+      <div className="text-[12px] font-medium text-muted group-hover:text-text transition-colors">
+        {cta} →
+      </div>
+    </Link>
+  );
+}
+
