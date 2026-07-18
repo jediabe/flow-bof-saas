@@ -196,6 +196,21 @@ export default function AccountRow({
         >
           Diagnose
         </button>
+        {/* Delete lives at the top-level so it's discoverable —
+            same underlying DeleteButton also renders in the
+            expanded panel below, giving users two paths to the
+            same action. Confirm dialog inside DeleteButton
+            protects against accidental taps. */}
+        <DeleteButton
+          accountId={account.id}
+          label={account.label}
+          disabled={pending}
+          onAfter={(r) => {
+            flash(r.ok ? "ok" : "bad", r.message);
+            if (r.ok) router.refresh();
+          }}
+          variant="chip"
+        />
         {toast && (
           <span
             className={`text-[11px] ${
@@ -342,11 +357,17 @@ function DeleteButton({
   label,
   disabled,
   onAfter,
+  /** "chip" renders a compact top-level chip alongside Test cookie /
+   *  Refresh now / Diagnose; "full" renders the wider danger-zone
+   *  button in the expanded panel. Both go through the same
+   *  confirm dialog + server action. */
+  variant = "full",
 }: {
   accountId: string;
   label: string;
   disabled: boolean;
   onAfter: (r: { ok: boolean; message: string }) => void;
+  variant?: "chip" | "full";
 }) {
   const [pending, startTransition] = useTransition();
 
@@ -371,9 +392,18 @@ function DeleteButton({
       type="button"
       onClick={confirmDelete}
       disabled={disabled || pending}
-      className="btn btn-danger text-xs"
+      className={
+        variant === "chip"
+          ? "btn btn-sm text-bad border-bad/40 hover:bg-bad/10"
+          : "btn btn-danger text-xs"
+      }
+      title={
+        variant === "chip"
+          ? `Delete "${label}" and all its analytics data.`
+          : undefined
+      }
     >
-      Delete account
+      {pending ? "Deleting…" : variant === "chip" ? "Delete" : "Delete account"}
     </button>
   );
 }
