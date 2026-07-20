@@ -313,22 +313,29 @@ export interface BatchReviewProgress {
 export interface RegenerateApprovedResult {
   ok: boolean;
   message: string;
-  attempted: number;
-  succeeded: number;
-  failed: number;
+  queued: number;
 }
 
+/**
+ * Queue every approved product in a batch for hook regeneration.
+ *
+ * Returns immediately after DB validation — the actual N sequential
+ * LLM calls run fire-and-forget in the background. This is REQUIRED
+ * because awaiting them synchronously in a server action puts the
+ * request on the wrong side of Cloudflare's 100s origin timeout
+ * (a 7-product batch at ~10s/product is already 70s). The client
+ * polls getBatchPromptsState every 4s, so hooks appear card-by-card
+ * as they land — same live-updating UX, without the 524.
+ *
+ * Long-lived Node.js container (Docker Compose, not serverless) so
+ * the unawaited Promise reliably keeps running past the response
+ * flush.
+ */
 export async function regenerateApprovedInBatch(
   batchId: string,
 ): Promise<RegenerateApprovedResult> {
   if (!batchId) {
-    return {
-      ok: false,
-      message: "missing batchId",
-      attempted: 0,
-      succeeded: 0,
-      failed: 0,
-    };
+    return { ok: false, message: "missing batchId", queued: 0 };
   }
   const { workspace } = await getCurrentWorkspace();
   const batch = await db.batch.findFirst({
@@ -345,54 +352,62 @@ export async function regenerateApprovedInBatch(
     },
   });
   if (!batch) {
-    return {
-      ok: false,
-      message: "batch not found",
-      attempted: 0,
-      succeeded: 0,
-      failed: 0,
-    };
+    return { ok: false, message: "batch not found", queued: 0 };
   }
   const approved = batch.products;
   if (approved.length === 0) {
     return {
       ok: false,
       message: "No approved products to regenerate.",
-      attempted: 0,
-      succeeded: 0,
-      failed: 0,
+      queued: 0,
     };
   }
 
-  let succeeded = 0;
-  let failed = 0;
-  for (const p of approved) {
-    try {
-      const r = await generateAiPromptForProduct({
-        batchId: batch.id,
-        productId: p.id,
-        force: true,
-      });
-      if (r.ok) {
-        succeeded++;
-      } else {
-        failed++;
-      }
-    } catch {
-      failed++;
-    }
-  }
+  const bgBatchId = batch.id;
+  const bgIds = approved.map((p) => p.id);
+  console.log(
+    `[regen] queueing ${bgIds.length} product(s) for regeneration in batch=${bgBatchId}`,
+  );
 
-  revalidatePath("/prompts");
+  // Fire-and-forget the sequential regeneration. We deliberately
+  // stay sequential (not Promise.all) so TikHub / OpenAI /
+  // Anthropic / OpenRouter don't get slammed with N concurrent
+  // requests from one workspace — the same courtesy the cron
+  // account-iteration uses.
+  Promise.resolve().then(async () => {
+    let ok = 0;
+    let fail = 0;
+    for (const productId of bgIds) {
+      try {
+        const r = await generateAiPromptForProduct({
+          batchId: bgBatchId,
+          productId,
+          force: true,
+        });
+        if (r.ok) ok++;
+        else {
+          fail++;
+          console.error(
+            `[regen] not-ok product=${productId}: ${r.message}`,
+          );
+        }
+      } catch (err) {
+        fail++;
+        console.error(`[regen] threw product=${productId}:`, err);
+      }
+    }
+    console.log(
+      `[regen] batch=${bgBatchId} finished: ${ok}/${bgIds.length} OK, ${fail} failed`,
+    );
+  });
+
+  // Return immediately so the button responds in <1s and Cloudflare
+  // never sees a long-running request. Client polling picks up the
+  // hooks as they land per-product.
   return {
-    ok: succeeded > 0,
-    message:
-      succeeded === approved.length
-        ? `Regenerated ${succeeded} product${succeeded === 1 ? "" : "s"}.`
-        : `${succeeded}/${approved.length} regenerated · ${failed} failed.`,
-    attempted: approved.length,
-    succeeded,
-    failed,
+    ok: true,
+    message: `Queued ${approved.length} product${approved.length === 1 ? "" : "s"} — hooks will appear as they generate.`,
+    queued: approved.length,
   };
 }
 
