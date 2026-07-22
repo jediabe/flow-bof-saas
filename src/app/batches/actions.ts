@@ -66,6 +66,28 @@ function nullable(v: FormDataEntryValue | null): string | null {
 }
 
 /**
+ * revalidatePath() but silent when called during a Server Component
+ * render. Next.js 15 forbids revalidate calls during render — they
+ * throw with "used revalidatePath during render which is
+ * unsupported". Some helpers here (e.g. getOrCreateBatchReviewToken)
+ * are legitimately called from both server actions (where revalidate
+ * is required) AND from server-component data loaders (where it's
+ * disallowed but harmless to skip). This wrapper picks whichever
+ * behaviour the current context supports.
+ *
+ * When we can't revalidate here, no correctness is lost: the calling
+ * render will already return fresh data, and the next navigation to
+ * the affected route re-renders it via `dynamic = "force-dynamic"`.
+ */
+function revalidatePathSafe(path: string): void {
+  try {
+    revalidatePath(path);
+  } catch {
+    // Called from render context — skip.
+  }
+}
+
+/**
  * Trim the query string out of a URL for logging. Kalodata's image
  * URLs are public CDN today, but the source feed may switch to signed
  * URLs at any time; logging them verbatim into stdout makes those
@@ -656,7 +678,12 @@ export async function getOrCreateBatchReviewToken(
         where: { id: batch.id },
         data:  { reviewToken: token },
       });
-      revalidatePath(`/batches/${batchId}`);
+      // Silent revalidate — this helper is called from both
+      // server actions (e.g. importKalodataForPrompts, where
+      // revalidate is required) and from render-time data
+      // loaders (getBatchPromptsState via /prompts?batch=<id>,
+      // where revalidate throws). See revalidatePathSafe.
+      revalidatePathSafe(`/batches/${batchId}`);
       return { ok: true, token };
     } catch (err) {
       // Prisma unique-constraint violation — try again with a new
@@ -950,7 +977,11 @@ export async function getOrCreateBatchPostingToken(
         where: { id: batch.id },
         data:  { postingToken: token },
       });
-      revalidatePath(`/batches/${batchId}`);
+      // Silent revalidate — same reason as getOrCreateBatchReviewToken:
+      // /prompts calls this during render via getBatchPromptsState,
+      // which forbids revalidatePath. Action callers still get the
+      // revalidation they need.
+      revalidatePathSafe(`/batches/${batchId}`);
       return { ok: true, token };
     } catch (err) {
       const code = (err as { code?: string }).code;
