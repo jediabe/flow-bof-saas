@@ -545,31 +545,28 @@ function ProductPromptCard({ product }: { product: BatchPromptsProduct }) {
           {product.productName}
         </div>
 
-        {/* Status row */}
-        <div className="flex items-center gap-1.5 flex-wrap">
+        {/* Review-status chip + discount % badge — persistent
+            identity signals that don't depend on gen state. */}
+        <div className="flex items-center gap-1.5 flex-wrap mb-1.5">
           <StatusPill status={status} />
           {product.discountPercent != null && (
             <span className="text-[10px] font-mono text-accent-red border border-accent-red/40 bg-accent-red/[0.08] rounded-full px-1.5 py-0.5">
               −{product.discountPercent}%
             </span>
           )}
-          {cardTone === "ready" && (
-            <span className="text-[10px] text-accent">
-              {product.hookVariants.length} hooks
-            </span>
-          )}
-          {cardTone === "generating" && !product.aiPromptError && (
-            <span className="text-[10px] text-muted2 italic">generating…</span>
-          )}
-          {product.aiPromptError && (
-            <span
-              className="text-[10px] text-bad italic truncate"
-              title={product.aiPromptError}
-            >
-              gen failed
-            </span>
-          )}
         </div>
+
+        {/* One clear generation-state chip. Collapses the previous
+            three-chip mess (hooks / generating / gen failed) into a
+            single pill so a card is either RUNNING, READY, FAILED,
+            or shows nothing (rejected / needs-review — where gen
+            state isn't meaningful yet). */}
+        <GenerationStatePill
+          cardTone={cardTone}
+          hookCount={product.hookVariants.length}
+          aiPromptError={product.aiPromptError}
+          generatedAt={product.aiPromptGeneratedAt}
+        />
       </button>
 
       {open && (
@@ -591,6 +588,110 @@ function StatusPill({ status }: { status: string }) {
   const label =
     status === "needs_review" ? "needs review" : status.replace(/_/g, " ");
   return <StatusChip label={label} variant={tone} />;
+}
+
+/**
+ * Single generation-state chip per card. Rules:
+ *
+ *   READY  (hooks exist)          → green "✓ N hooks · Xm ago"
+ *                                    A stale aiPromptError from a
+ *                                    later failed regen attempt does
+ *                                    NOT flip this back — hooks are
+ *                                    functionally present. We surface
+ *                                    the stale-retry note as a small
+ *                                    muted tail for transparency.
+ *   FAILED (no hooks + error)     → red "gen failed" with error text
+ *                                    on hover.
+ *   RUNNING (approved, no hooks,  → pulsing blue "generating…"
+ *            no error)
+ *   IDLE   (rejected / needs_review, no gen state)
+ *                                 → renders nothing.
+ */
+function GenerationStatePill({
+  cardTone,
+  hookCount,
+  aiPromptError,
+  generatedAt,
+}: {
+  cardTone: "ready" | "generating" | "rejected" | "pending";
+  hookCount: number;
+  aiPromptError: string | null;
+  generatedAt: string | null;
+}) {
+  if (cardTone === "ready" && hookCount > 0) {
+    // Success wins over a stale error — hooks are present, so the
+    // last SUCCESSFUL generation is what's on disk. If a later retry
+    // also failed (aiPromptError set) we hint at it in the tail
+    // rather than replacing the ready state.
+    return (
+      <div className="flex items-center gap-1.5 text-[10px]">
+        <span className="inline-flex items-center gap-1 text-ok">
+          <span className="w-1.5 h-1.5 rounded-full bg-ok" />
+          {hookCount} hooks
+        </span>
+        {generatedAt && (
+          <span className="text-muted2">· {formatShortAgo(generatedAt)}</span>
+        )}
+        {aiPromptError && (
+          <span
+            className="text-muted2 italic truncate"
+            title={`Latest retry failed: ${aiPromptError}`}
+          >
+            · retry failed
+          </span>
+        )}
+      </div>
+    );
+  }
+  if (cardTone === "generating") {
+    if (aiPromptError) {
+      return (
+        <div
+          className="inline-flex items-center gap-1 text-[10px] text-bad"
+          title={aiPromptError}
+        >
+          <span className="w-1.5 h-1.5 rounded-full bg-bad" />
+          <span>gen failed</span>
+          <span className="text-muted2 italic truncate">
+            · {shortError(aiPromptError)}
+          </span>
+        </div>
+      );
+    }
+    return (
+      <div className="inline-flex items-center gap-1 text-[10px] text-accent">
+        <span className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse" />
+        <span className="italic">generating…</span>
+      </div>
+    );
+  }
+  // rejected / pending — no gen state chip.
+  return null;
+}
+
+/** "Xm ago" / "Xh ago" / "just now" — the same shape the batches
+ *  page uses for its timeAgo. Kept local so we don't drag in the
+ *  shared helper (would need to be re-exported client-side). */
+function formatShortAgo(iso: string): string {
+  const ms = Date.now() - new Date(iso).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return "";
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return "just now";
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
+}
+
+/** First short segment of an error string. LLM SDK errors are noisy
+ *  ("BadRequestError: 400 Bad Request: ..."); a card only needs the
+ *  head so the row doesn't wrap. Full text on hover via title. */
+function shortError(err: string): string {
+  const trimmed = err.trim();
+  const cutAt = Math.min(
+    trimmed.indexOf(":") + 1 || trimmed.length,
+    40,
+  );
+  return trimmed.slice(0, cutAt).trim() || "error";
 }
 
 /* --------------------------------------------------------------
