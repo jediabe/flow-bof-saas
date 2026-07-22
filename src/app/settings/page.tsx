@@ -75,12 +75,14 @@ export default async function SettingsPage() {
           API keys never leave this server — they are not sent to the
           local runner, and they are not embedded in any job payload.
           See{" "}
-          <Link
-            href="/docs/AI_PROVIDERS.md"
+          <a
+            href="https://github.com/jediabe/flow-bof-saas/blob/main/docs/AI_PROVIDERS.md"
+            target="_blank"
+            rel="noopener noreferrer"
             className="text-accent hover:underline"
           >
             docs/AI_PROVIDERS.md
-          </Link>{" "}
+          </a>{" "}
           for details.
         </p>
         <AiProviderSettingsForm initial={aiSettings} />
