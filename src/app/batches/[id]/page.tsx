@@ -504,6 +504,11 @@ export default async function BatchDetail({
             })),
           ipRiskStatus: projectIpStatus(p.ipRiskStatus),
           ipRiskOverride: p.ipRiskOverride,
+          // Chunking UX: products with a bound/auto FlowItem are
+          // treated as "already generated" and excluded from the
+          // eligible slice by default. Users can override with a
+          // checkbox to include them (for regen).
+          hasFlowItems: boundProductIds.has(p.id),
         }))}
         agentAssetBaseUrl={agentAssetBaseUrl}
         lastJob={null}

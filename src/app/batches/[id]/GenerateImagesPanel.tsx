@@ -56,6 +56,15 @@ export interface ImageGenProduct {
    */
   ipRiskStatus: "unchecked" | "low" | "medium" | "high" | "needs_manual_review";
   ipRiskOverride: boolean;
+  /**
+   * True when this product has at least one bound (or auto-bound)
+   * FlowItem row — i.e. Flow has already produced an image and the
+   * reconciliation loop matched it to this product. Used by the
+   * chunking UX to skip products from an earlier chunk on the next
+   * click, so a 30-product batch can be walked through in 10s
+   * without submitting the same 10 three times.
+   */
+  hasFlowItems: boolean;
 }
 
 export interface LastImageJobSummary {
@@ -102,12 +111,20 @@ export default function GenerateImagesPanel({
   const [agentId, setAgentId] = useState(agents[0]?.id ?? "");
   const [waitMode, setWaitMode] = useState<WaitMode>("submit_only");
   const [automationMode, setAutomationMode] = useState<AutomationMode>("balanced");
-  const [limit, setLimit] = useState<number>(30);
+  // Chunk size (was "limit"). Renamed because the semantics changed:
+  // it's now "products to send in THIS submission", and re-clicking
+  // Submit picks up the next unprocessed chunk instead of
+  // re-sending the same first N.
+  const [chunkSize, setChunkSize] = useState<number>(10);
   const [lastError, setLastError] = useState<string | null>(null);
   // Phase 1: default to approved-only generation. Checkbox below
   // lets the user bypass when they want to test prompts before
   // doing the phone-review pass.
   const [includeNotApproved, setIncludeNotApproved] = useState(false);
+  // Chunking UX: skip products that already have a bound FlowItem.
+  // Default ON so consecutive Submit clicks walk through a big
+  // batch in chunks. Users flip it OFF when they want to regenerate.
+  const [includeAlreadyGenerated, setIncludeAlreadyGenerated] = useState(false);
 
   // Phase-1 + Phase-9 eligibility:
   //   - has an imagePrompt
@@ -131,8 +148,28 @@ export default function GenerateImagesPanel({
         (p) =>
           hasUsableRefAndPrompt(p) &&
           (includeNotApproved || p.reviewStatus === "approved") &&
-          !isBlockedByIpRisk(p),
+          !isBlockedByIpRisk(p) &&
+          // Chunking: skip already-generated unless the operator
+          // explicitly opted in via the "Include already-generated"
+          // checkbox. This is what makes consecutive Submit clicks
+          // walk through a big batch instead of re-doing the same N.
+          (includeAlreadyGenerated || !p.hasFlowItems),
       ),
+    [products, includeNotApproved, includeAlreadyGenerated],
+  );
+  // Count of products currently held back BECAUSE they've already
+  // been generated. Surfaced as a chip so the operator can see why
+  // "N ready" is smaller than the approved count. Recomputed from
+  // the same predicate as eligible, minus the has-flow-items gate.
+  const alreadyGeneratedApproved = useMemo(
+    () =>
+      products.filter(
+        (p) =>
+          hasUsableRefAndPrompt(p) &&
+          (includeNotApproved || p.reviewStatus === "approved") &&
+          !isBlockedByIpRisk(p) &&
+          p.hasFlowItems,
+      ).length,
     [products, includeNotApproved],
   );
 
@@ -167,7 +204,7 @@ export default function GenerateImagesPanel({
 
   function submit() {
     setLastError(null);
-    const items = eligible.slice(0, limit).map((p) => {
+    const items = eligible.slice(0, chunkSize).map((p) => {
       // Phase 3 — multi-reference image set. Filter to entries that
       // resolve to either a URL or a path; cap at 3. The runner caps
       // too, but matching the cap here keeps the count in
@@ -233,7 +270,10 @@ export default function GenerateImagesPanel({
     });
     const payload = {
       items,
-      limit,
+      // Kept as `limit` for wire compatibility with the runner —
+      // renaming would require lock-step upgrade of the Python
+      // side. Semantically this is now "chunk size".
+      limit: chunkSize,
       wait_mode:        waitMode,
       automation_mode:  automationMode,
     };
@@ -287,6 +327,15 @@ export default function GenerateImagesPanel({
           label={`${approvedCount} approved`}
           variant={approvedCount > 0 ? "ok" : "muted"}
         />
+        {/* Chunking chip — visible only when there's actually
+            something to skip. Clicking on the checkbox below flips
+            these back into the eligible pool for regen. */}
+        {alreadyGeneratedApproved > 0 && (
+          <StatusChip
+            label={`${alreadyGeneratedApproved} already generated`}
+            variant={includeAlreadyGenerated ? "muted" : "ok"}
+          />
+        )}
         {needsReviewCount > 0 && (
           <StatusChip
             label={`${needsReviewCount} need review`}
@@ -328,6 +377,30 @@ export default function GenerateImagesPanel({
             {includeNotApproved
               ? `Off-default: also queuing ${heldByReviewCount} non-approved product(s) that have a prompt + reference.`
               : `Default: only approved products generate. ${heldByReviewCount} eligible product(s) are currently held by the review gate.`}
+          </span>
+        </span>
+      </label>
+
+      {/* Chunking override — flip on to regenerate.
+          Default OFF: consecutive clicks walk through fresh
+          products in chunks of `chunkSize`. */}
+      <label className="flex items-start gap-2 text-xs text-text cursor-pointer">
+        <input
+          type="checkbox"
+          className="mt-0.5"
+          checked={includeAlreadyGenerated}
+          onChange={(e) => setIncludeAlreadyGenerated(e.target.checked)}
+        />
+        <span>
+          <span className="font-medium">
+            Include products that already have generated images
+          </span>
+          <span className="block text-muted mt-0.5">
+            {includeAlreadyGenerated
+              ? `Regenerate mode: including ${alreadyGeneratedApproved} product(s) with existing Flow tiles. Fresh runs write new tiles alongside the old ones.`
+              : alreadyGeneratedApproved > 0
+                ? `Default: ${alreadyGeneratedApproved} product(s) with existing tiles are skipped. Click Submit repeatedly to walk through the batch in chunks of ${chunkSize}.`
+                : `Default: skip products that already have generated tiles. Nothing skipped yet — no products have been sent to Flow.`}
           </span>
         </span>
       </label>
@@ -392,17 +465,20 @@ export default function GenerateImagesPanel({
           </select>
         </label>
         <label className="block">
-          <span className="label">Limit</span>
+          <span className="label">Chunk size</span>
           <input
             type="number"
             className="field mt-1"
             min={1}
             max={100}
-            value={limit}
+            value={chunkSize}
             onChange={(e) =>
-              setLimit(Math.max(1, Math.min(100, Number(e.target.value) || 1)))
+              setChunkSize(Math.max(1, Math.min(100, Number(e.target.value) || 1)))
             }
           />
+          <span className="block text-[10px] text-muted mt-1">
+            Products per Submit. Click Submit again for the next chunk.
+          </span>
         </label>
       </div>
 
@@ -413,12 +489,20 @@ export default function GenerateImagesPanel({
           disabled={disabled}
           onClick={submit}
         >
-          {pending ? "Submitting…" : "Generate Images"}
+          {pending
+            ? "Submitting…"
+            : eligible.length === 0
+              ? "Generate Images"
+              : eligible.length <= chunkSize
+                ? `Generate ${eligible.length}`
+                : `Generate next ${chunkSize} of ${eligible.length}`}
         </button>
         <span className="text-[11px] text-muted">
           {eligible.length === 0
-            ? "Add a reference image and prompt to at least one product."
-            : `Will submit ${Math.min(eligible.length, limit)} of ${eligible.length} ready products.`}
+            ? alreadyGeneratedApproved > 0
+              ? `All ${alreadyGeneratedApproved} approved product(s) already generated. Tick "Include already-generated" to regenerate.`
+              : "Add a reference image and prompt to at least one product."
+            : `Will submit ${Math.min(eligible.length, chunkSize)} of ${eligible.length} ready. ${alreadyGeneratedApproved > 0 && !includeAlreadyGenerated ? `${alreadyGeneratedApproved} skipped as already generated.` : ""}`}
         </span>
       </div>
 
