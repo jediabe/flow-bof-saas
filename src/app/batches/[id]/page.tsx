@@ -144,6 +144,39 @@ export default async function BatchDetail({
     }
   }
 
+  // Recently-succeeded jobs whose FlowItems may not have reconciled
+  // yet. Reconciliation runs on every batch-page load (see
+  // ingestFlowItemsForBatch below) but there's a window between "job
+  // succeeded" and "tiles bound to products" during which products
+  // would appear neither in-flight nor generated — so they'd get
+  // re-dispatched on the next Submit. The 60-minute lookback covers
+  // that gap. Failed/cancelled jobs do NOT skip products — a failed
+  // run's products SHOULD be immediately available to retry.
+  const recentSuccessCutoff = new Date(Date.now() - 60 * 60 * 1000);
+  const recentSucceededJobs = await db.job.findMany({
+    where: {
+      workspaceId: workspace.id,
+      batchId: batch.id,
+      jobType: "generate_flow_images",
+      status: "succeeded",
+      createdAt: { gte: recentSuccessCutoff },
+    },
+    select: { id: true, payload: true },
+  });
+  const recentlyDispatchedProductIds = new Set<string>();
+  for (const j of recentSucceededJobs) {
+    try {
+      const p = j.payload ? JSON.parse(j.payload) : null;
+      const items = Array.isArray(p?.items) ? p.items : [];
+      for (const it of items) {
+        const pid = (it?.item_id as string | undefined)?.trim();
+        if (pid) recentlyDispatchedProductIds.add(pid);
+      }
+    } catch {
+      // ignore malformed payloads
+    }
+  }
+
   const activeJobsCount = await db.job.count({
     where: {
       workspaceId: workspace.id,
@@ -504,11 +537,22 @@ export default async function BatchDetail({
             })),
           ipRiskStatus: projectIpStatus(p.ipRiskStatus),
           ipRiskOverride: p.ipRiskOverride,
-          // Chunking UX: products with a bound/auto FlowItem are
-          // treated as "already generated" and excluded from the
-          // eligible slice by default. Users can override with a
-          // checkbox to include them (for regen).
-          hasFlowItems: boundProductIds.has(p.id),
+          // Chunking UX: a product is considered "already generated"
+          // when ANY of three signals are true —
+          //   1. It has a bound/auto FlowItem (the classic "done"
+          //      state, reconciliation confirmed).
+          //   2. It's in-flight — appears in the payload of a
+          //      generate_flow_images job that's still
+          //      queued/running.
+          //   3. It was in the payload of a generate_flow_images
+          //      job that succeeded in the last 60 min but whose
+          //      tiles may not have reconciled yet. Without this,
+          //      a fast "Submit ... Submit" tap re-dispatches
+          //      the same chunk because signal 1 lags reconciliation.
+          hasFlowItems:
+            boundProductIds.has(p.id) ||
+            inFlightProductIds.has(p.id) ||
+            recentlyDispatchedProductIds.has(p.id),
         }))}
         agentAssetBaseUrl={agentAssetBaseUrl}
         lastJob={null}
