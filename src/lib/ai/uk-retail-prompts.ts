@@ -242,18 +242,28 @@ Example: "Halara wide-leg joggers"
 ============================================================
 HASHTAGS — UK STYLE
 ============================================================
-TikTok caps a video at 5 hashtags. Return EXACTLY these 4 core
-UK hashtags, in this order:
+TikTok caps a video at 5 hashtags. Return EXACTLY these 5
+hashtags, in this exact order (order is meaningful — the
+operator swaps the LAST tag for a live campaign hashtag at
+post time when one is running):
 
   #tiktokshopuk
   #dealdrops
   #tiktokmademebuyit
+  #aigc
   #weekendsale
 
-The 5th hashtag slot is intentionally left empty in the JSON —
-it's reserved for the current live TikTok Shop campaign hashtag,
-which changes per campaign and is added by the operator at post
-time (the UI has an input for it). Never fabricate a fifth tag.
+#aigc is REQUIRED on every video for TikTok's AI-Generated
+Content disclosure — Flow-produced imagery is AI-generated and
+TikTok's community guidelines require the label. Never omit it,
+never move it out of position 4, never swap it for a campaign
+tag.
+
+The 5th tag (#weekendsale) is the campaign-swap slot — when a
+TikTok Shop campaign is running the operator replaces
+#weekendsale with the current campaign hashtag at post time.
+Never fabricate a campaign hashtag; leave #weekendsale as the
+default here.
 
 ============================================================
 OUTPUT FORMAT
@@ -278,19 +288,20 @@ nothing outside the JSON object. Use exactly these keys:
     // ...
   ],
   "caption": "<product name only, no trust tail, no hashtags>",
-  "hashtags": ["#tiktokshopuk", "#dealdrops", "#tiktokmademebuyit", "#weekendsale"],
+  "hashtags": ["#tiktokshopuk", "#dealdrops", "#tiktokmademebuyit", "#aigc", "#weekendsale"],
   "warnings": ["<any concerns: regulated product, missing info, etc.>"]
 }
 
 If you have no warnings, return an empty list for "warnings".
 Never include any text outside the JSON object. The image_prompt
 MUST be the single APEX UK sentence — not multiple paragraphs.
-The hashtags array MUST be exactly the four UK hashtags above,
-lowercase, no substitutions. hook_variants MUST contain at least
-30 entries when no discount % was supplied and 34 entries when
-one was. The caption MUST be the product name verbatim with no
-additions. NEVER include a £ price or any currency figure in
-any field.`;
+The hashtags array MUST be exactly the five UK hashtags above,
+in that exact order, lowercase, no substitutions — #aigc is
+mandatory for AI-generated content disclosure and can NEVER be
+omitted. hook_variants MUST contain at least 30 entries when no
+discount % was supplied and 34 entries when one was. The caption
+MUST be the product name verbatim with no additions. NEVER
+include a £ price or any currency figure in any field.`;
 
 /**
  * Format a product into the user-message body that goes with

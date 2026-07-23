@@ -788,7 +788,7 @@ function ProductHooksModal({
             <PromptRow
               label="Hashtag block"
               text={product.hashtags.join(" ")}
-              hint="Add your live TikTok Shop campaign tag as the 5th slot at post time."
+              hint="#aigc is required for AI-generated content disclosure. When a TikTok Shop campaign is running, swap #weekendsale for the current campaign hashtag at post time."
             />
           )}
 
