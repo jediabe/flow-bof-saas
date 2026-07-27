@@ -71,6 +71,15 @@ model Workspace {
   // operator is scouting/tracking. See ShopProduct at the
   // bottom of this file.
   shopProducts   ShopProduct[]
+  // Workspace-scoped API token for programmatic access from
+  // external scripts (currently: flow-bof-automation's
+  // scripts/fetch_tiktok_cookies.py posts freshly-captured
+  // cookies to /api/tiktok-accounts/add using this token as
+  // Bearer auth). Null when no token has been minted; unique
+  // constraint stops two workspaces from ever sharing one.
+  // Rotate freely — old token is invalidated the moment a new
+  // one is generated.
+  apiToken   String? @unique
 }
 
 // ---------------------------------------------------------------------------

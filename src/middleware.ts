@@ -55,7 +55,13 @@ function isAlwaysOpen(pathname: string): boolean {
     // The route handler at src/app/api/cron/[task]/route.ts does
     // its own constant-time bearer check; middleware just lets the
     // request through.
-    pathname.startsWith("/api/cron/")
+    pathname.startsWith("/api/cron/") ||
+    // Programmatic TikTok-account provisioning — hit by
+    // flow-bof-automation's scripts/fetch_tiktok_cookies.py with
+    // `Authorization: Bearer <workspace apiToken>`. Route handler
+    // at src/app/api/tiktok-accounts/add/route.ts does its own
+    // workspace lookup by token.
+    pathname.startsWith("/api/tiktok-accounts/")
   );
 }
 

@@ -4,11 +4,13 @@ import Panel from "@/components/ui/Panel";
 import EmptyState from "@/components/ui/EmptyState";
 import AiProviderSettingsForm from "./AiProviderSettings";
 import AiPromptOverrides from "./AiPromptOverrides";
+import WorkspaceApiTokenPanel from "./WorkspaceApiTokenPanel";
 import {
   getMaskedAiSettings,
   setIpRiskChecksEnabled,
   saveAntiBlockSettings,
   clearUnusualActivityCooldown,
+  getWorkspaceApiTokenStatus,
 } from "./actions";
 import { loadOrCreateSettings } from "@/lib/workspace-settings";
 import { UK_SYSTEM_PROMPT } from "@/lib/ai/uk-retail-prompts";
@@ -33,6 +35,7 @@ export default async function SettingsPage() {
   const aiSettings = await getMaskedAiSettings();
   const settingsRow = await loadOrCreateSettings(workspace.id);
   const ipRiskChecksEnabled = settingsRow.ipRiskChecksEnabled;
+  const apiTokenStatus = await getWorkspaceApiTokenStatus();
 
   // Cooldown derivation: how much longer until the gate releases?
   const cooldownMs = settingsRow.cooldownHours * 60 * 60 * 1000;
@@ -66,6 +69,10 @@ export default async function SettingsPage() {
           />
           <Row k="ID" v={<code className="id-mono">{workspace.id}</code>} />
         </dl>
+      </Panel>
+
+      <Panel title="Workspace API token">
+        <WorkspaceApiTokenPanel hasToken={apiTokenStatus.hasToken} />
       </Panel>
 
       <Panel title="AI Providers">

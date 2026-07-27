@@ -43,11 +43,37 @@ type ActionResultWithId = ActionResult & { accountId?: string };
  */
 export async function addTikTokAccount(formData: FormData): Promise<ActionResultWithId> {
   const { workspace } = await getCurrentWorkspace();
+  return await addTikTokAccountForWorkspace({
+    workspaceId: workspace.id,
+    label: String(formData.get("label") || ""),
+    region: String(formData.get("region") || "US"),
+    cookieRaw: String(formData.get("cookieRaw") || ""),
+    monthlyToolCostRaw: String(formData.get("monthlyToolCost") || "0"),
+  });
+}
 
-  const label = String(formData.get("label") || "").trim();
-  const region = String(formData.get("region") || "US").trim().toUpperCase();
-  const cookiePaste = String(formData.get("cookieRaw") || "");
-  const monthlyToolCostRaw = String(formData.get("monthlyToolCost") || "0").trim();
+/**
+ * Workspace-scoped add-account core. Extracted from
+ * addTikTokAccount so the /api/tiktok-accounts/add API endpoint
+ * (Bearer-auth'd, called by flow-bof-automation's cookie fetcher)
+ * can share the same parse + encrypt + insert path without
+ * duplicating validation or crypto.
+ *
+ * Assumes workspaceId is already trusted — caller must have
+ * authenticated the request via session cookie OR workspace API
+ * token. This helper never checks auth itself.
+ */
+export async function addTikTokAccountForWorkspace(input: {
+  workspaceId: string;
+  label: string;
+  region: string;
+  cookieRaw: string;
+  monthlyToolCostRaw?: string;
+}): Promise<ActionResultWithId> {
+  const label = input.label.trim();
+  const region = (input.region || "US").trim().toUpperCase();
+  const cookiePaste = input.cookieRaw;
+  const monthlyToolCostRaw = (input.monthlyToolCostRaw || "0").trim();
 
   if (!label) {
     return { ok: false, message: "Label is required." };
@@ -78,7 +104,7 @@ export async function addTikTokAccount(formData: FormData): Promise<ActionResult
 
   const row = await db.tikTokAccount.create({
     data: {
-      workspaceId: workspace.id,
+      workspaceId: input.workspaceId,
       label,
       region,
       cookieRaw: ciphertext,

@@ -206,3 +206,86 @@ export async function testAiProviderAction(): Promise<{
   const row = await loadOrCreateSettings(workspace.id);
   return await testProvider(toServerSettings(row));
 }
+
+/* ------------------------------------------------------------------
+ * Workspace API token — programmatic access from external scripts.
+ *
+ * Currently powers the flow-bof-automation cookie fetcher
+ * (scripts/fetch_tiktok_cookies.py) which POSTs freshly-captured
+ * TikTok Shop cookies to /api/tiktok-accounts/add. Any future
+ * workspace-scoped programmatic surface uses the same token.
+ *
+ * Rotate freely — generating a new token silently invalidates the
+ * previous one. There is NO way to display an old token; the raw
+ * string is returned exactly once on generate and never again
+ * (mirrors GitHub PAT / Vercel token UX).
+ * ---------------------------------------------------------------- */
+
+const API_TOKEN_BYTES = 32;
+
+/** Mint a fresh workspace API token and persist it. Returns the raw
+ *  string ONCE — caller must save it immediately, it will not be
+ *  recoverable from the server after this call. */
+export async function generateWorkspaceApiToken(): Promise<{
+  ok: boolean;
+  token?: string;
+  message?: string;
+}> {
+  const { workspace } = await getCurrentWorkspace();
+  // Retry a few times on the vanishingly unlikely unique-collision.
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const raw = await mintTokenString();
+    try {
+      await db.workspace.update({
+        where: { id: workspace.id },
+        data:  { apiToken: raw },
+      });
+      revalidatePath("/settings");
+      return { ok: true, token: raw };
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      if (code !== "P2002") throw err;
+      continue;
+    }
+  }
+  return {
+    ok: false,
+    message: "Could not allocate a unique token after 4 attempts. Try again.",
+  };
+}
+
+/** Nuke the current token without generating a new one. External
+ *  scripts using it stop working immediately. */
+export async function revokeWorkspaceApiToken(): Promise<{ ok: boolean }> {
+  const { workspace } = await getCurrentWorkspace();
+  await db.workspace.update({
+    where: { id: workspace.id },
+    data:  { apiToken: null },
+  });
+  revalidatePath("/settings");
+  return { ok: true };
+}
+
+/** Just tell the page whether a token is set, WITHOUT returning the
+ *  raw string. The generate/rotate flow shows the raw string; every
+ *  subsequent load just says "set" or "not set". */
+export async function getWorkspaceApiTokenStatus(): Promise<{
+  hasToken: boolean;
+}> {
+  const { workspace } = await getCurrentWorkspace();
+  const w = await db.workspace.findUnique({
+    where: { id: workspace.id },
+    select: { apiToken: true },
+  });
+  return { hasToken: !!w?.apiToken };
+}
+
+/** Node crypto → URL-safe base64 token. */
+async function mintTokenString(): Promise<string> {
+  const { randomBytes } = await import("node:crypto");
+  return randomBytes(API_TOKEN_BYTES)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}

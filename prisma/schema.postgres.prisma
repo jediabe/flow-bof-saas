@@ -76,6 +76,9 @@ model Workspace {
   // operator is scouting/tracking. See ShopProduct at the
   // bottom of this file.
   shopProducts   ShopProduct[]
+  // Workspace-scoped API token for programmatic access. See
+  // SQLite schema for full rationale.
+  apiToken       String? @unique
 }
 
 // ---------------------------------------------------------------------------
