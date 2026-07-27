@@ -77,6 +77,24 @@ const ENDPOINTS = {
   //   videos → their tagged products → per-pair stats
   videoAssociatedProducts: "/api/v1/tiktok/creator/get_video_associated_product_list",
   videoToProductStats:     "/api/v1/tiktok/creator/get_video_to_product_stats",
+
+  // ---------------------------------------------------------------
+  // Product Research — TikTok Shop marketplace endpoints. NO cookie
+  // required; auth is the workspace-global TIKHUB_API_KEY only.
+  // Used by the /research surface to discover + track products
+  // for future campaigns.
+  //
+  // shop/web/* is the current-generation series per TikHub docs
+  // (app/v3 shop endpoints are deprecated for Shop marketplace
+  // data). Only exception is the general search count below —
+  // which lives under app/v3 because it's a search endpoint,
+  // not a shop endpoint.
+  // ---------------------------------------------------------------
+  shopHotSelling:       "/api/v1/tiktok/shop/web/fetch_hot_selling_products_list",
+  shopProductDetail:    "/api/v1/tiktok/shop/web/fetch_product_detail_v3",
+  shopByCategory:       "/api/v1/tiktok/shop/web/fetch_products_by_category_id",
+  adsTopProducts:       "/api/v1/tiktok/ads/get_top_products",
+  generalSearch:        "/api/v1/tiktok/app/v3/fetch_general_search_result",
 } as const;
 
 /** TikHub's MM-DD-YYYY date string (overview, video endpoints). */
@@ -1938,3 +1956,276 @@ function normalizeStatus(s: string): string {
 /** Re-export the required cookie key list so callers don't need
  *  to import from two files. */
 export type { RequiredCookieKey };
+
+// ---------------------------------------------------------------------
+// Product Research — Shop marketplace endpoints
+// ---------------------------------------------------------------------
+//
+// Cookie-free variant of postTikHub. TikHub's Shop marketplace
+// endpoints don't require a per-account TikTok session cookie —
+// the workspace-global TIKHUB_API_KEY is the only auth. Kept
+// separate from postTikHub so the cookie-completeness check
+// doesn't false-positive on Shop callers who legitimately have
+// no cookie to pass.
+//
+// If TikHub tightens Shop auth to require a cookie in the future,
+// swap Shop callers to postTikHub and pass the workspace's first
+// active cookie (we'd need a small helper to pick it).
+async function postTikHubShop(
+  path: string,
+  body: Record<string, unknown>,
+): Promise<unknown> {
+  const apiKey = (process.env.TIKHUB_API_KEY || "").trim();
+  if (!apiKey) {
+    throw new TikHubError(
+      "AUTH_MISSING",
+      "TIKHUB_API_KEY is unset. Add it to .env and restart the server.",
+    );
+  }
+  const url = `${TIKHUB_BASE}${path}`;
+  let resp: Response;
+  try {
+    resp = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+      },
+      body: JSON.stringify({ proxy: null, ...body }),
+      // Shop endpoints are typically fast (<5s) but the hot
+      // products list can be paginated; keep the timeout generous
+      // to match the creator endpoints.
+      signal: AbortSignal.timeout(45_000),
+    });
+  } catch (err) {
+    const e = err as Error;
+    throw new TikHubError(
+      "NETWORK",
+      `TikHub fetch failed: ${e.name}: ${e.message.slice(0, 200)}`,
+      undefined,
+      { url: maskUrl(url) },
+    );
+  }
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new TikHubError(
+      "HTTP_ERROR",
+      `TikHub returned ${resp.status}: ${text.slice(0, 300)}`,
+      resp.status,
+      { url: maskUrl(url) },
+    );
+  }
+  let json: unknown;
+  try {
+    json = await resp.json();
+  } catch (err) {
+    const e = err as Error;
+    throw new TikHubError(
+      "PARSE",
+      `TikHub response not JSON: ${e.message.slice(0, 200)}`,
+    );
+  }
+  return json;
+}
+
+/** Shape returned to /research callers per Shop-endpoint row. */
+export interface ShopMarketProduct {
+  /** TikTok's product_id — join key across ShopProduct + TikTokProduct. */
+  productId: string;
+  title: string;
+  /** Raw TikTok CDN URL. Caller must download + persist before using —
+   *  these URLs expire. Undefined when the row lacks any image. */
+  imageUrlRemote: string | undefined;
+  price: number;
+  /** Commission rate as a percentage (e.g. 15 for 15%). Some endpoints
+   *  return a decimal (0.15); this shape always normalises to percentage. */
+  commissionRate: number;
+  soldCount: number;
+  category: string | undefined;
+}
+
+/** Pluck the array-shaped `data.products` (or common alternates) out of a
+ *  TikHub Shop response, coercing each row into ShopMarketProduct. Tolerant
+ *  of shape drift — Shop endpoints have shipped multiple response shapes. */
+function pluckShopProducts(raw: unknown): ShopMarketProduct[] {
+  if (!raw || typeof raw !== "object") return [];
+  const r = raw as Record<string, unknown>;
+  const data = (r.data ?? r) as Record<string, unknown>;
+  const list =
+    (Array.isArray(data.products) && data.products) ||
+    (Array.isArray(data.product_list) && data.product_list) ||
+    (Array.isArray(data.products_list) && data.products_list) ||
+    (Array.isArray(data.items) && data.items) ||
+    (Array.isArray((r as { products?: unknown }).products) && (r as { products: unknown[] }).products) ||
+    [];
+  const out: ShopMarketProduct[] = [];
+  for (const row of list as unknown[]) {
+    if (!row || typeof row !== "object") continue;
+    const p = row as Record<string, unknown>;
+    const productId = String(
+      p.product_id ?? p.id ?? p.productId ?? "",
+    ).trim();
+    if (!productId) continue;
+    const title = String(p.product_name ?? p.title ?? p.name ?? "").trim();
+    // Image url comes back on different keys per endpoint. cover_image
+    // sometimes is an object with a `thumb_url_list` array; sometimes
+    // it's a plain string. Handle both.
+    let imageUrlRemote: string | undefined;
+    const rawCover = p.cover_image ?? p.image ?? p.image_url ?? p.cover;
+    if (typeof rawCover === "string") {
+      imageUrlRemote = rawCover;
+    } else if (rawCover && typeof rawCover === "object") {
+      const c = rawCover as Record<string, unknown>;
+      const list = c.thumb_url_list ?? c.url_list ?? c.urls;
+      if (Array.isArray(list) && list.length > 0 && typeof list[0] === "string") {
+        imageUrlRemote = list[0] as string;
+      } else if (typeof c.url === "string") {
+        imageUrlRemote = c.url;
+      }
+    }
+    // Price is nested { amount, currency } on some endpoints, flat on
+    // others. Normalise to a plain number of the amount.
+    let price = 0;
+    const rawPrice = p.price ?? p.sale_price ?? p.original_price;
+    if (typeof rawPrice === "number") price = rawPrice;
+    else if (rawPrice && typeof rawPrice === "object") {
+      price = num((rawPrice as { amount?: unknown }).amount);
+    }
+    // Commission — often a percentage string like "15%" or a decimal 0.15.
+    // Normalise to the percentage integer (15).
+    let commissionRate = 0;
+    const rawComm = p.commission_rate ?? p.commission ?? p.commission_pct;
+    if (typeof rawComm === "number") {
+      commissionRate = rawComm <= 1 ? rawComm * 100 : rawComm;
+    } else if (typeof rawComm === "string") {
+      const cleaned = rawComm.replace("%", "").trim();
+      const n = Number(cleaned);
+      if (Number.isFinite(n)) {
+        commissionRate = n <= 1 ? n * 100 : n;
+      }
+    }
+    const soldCount = num(
+      p.sold_count ?? p.item_sold_cnt ?? p.sales_cnt ?? p.orders,
+    );
+    const category = typeof p.category === "string"
+      ? p.category
+      : typeof p.category_name === "string"
+        ? p.category_name
+        : undefined;
+    out.push({
+      productId,
+      title,
+      imageUrlRemote,
+      price,
+      commissionRate,
+      soldCount,
+      category,
+    });
+  }
+  return out;
+}
+
+/**
+ * fetch_hot_selling_products_list — top-selling TikTok Shop items right
+ * now. The primary discovery feed for /research's Hot tab.
+ */
+export async function getHotSellingProducts(input?: {
+  page?: number;
+  region?: string;
+}): Promise<ShopMarketProduct[]> {
+  const raw = await postTikHubShop(ENDPOINTS.shopHotSelling, {
+    page: input?.page ?? 1,
+    region: input?.region ?? "GB",
+  });
+  return pluckShopProducts(raw);
+}
+
+/**
+ * fetch_products_by_category_id — Shop products filtered by category.
+ * Useful for niche-scoped scans (Beauty, Home, etc.).
+ */
+export async function getShopProductsByCategory(input: {
+  categoryId: string;
+  page?: number;
+  region?: string;
+}): Promise<ShopMarketProduct[]> {
+  const raw = await postTikHubShop(ENDPOINTS.shopByCategory, {
+    category_id: input.categoryId,
+    page: input.page ?? 1,
+    region: input.region ?? "GB",
+  });
+  return pluckShopProducts(raw);
+}
+
+/**
+ * ads/get_top_products — Creative Center's trending signal. Products
+ * with high ad spend / creator adoption per TikTok's own ad tooling.
+ * Slightly different shape than Shop endpoints — same normaliser.
+ */
+export async function getTopAdsProducts(input?: {
+  region?: string;
+}): Promise<ShopMarketProduct[]> {
+  const raw = await postTikHubShop(ENDPOINTS.adsTopProducts, {
+    region: input?.region ?? "GB",
+  });
+  return pluckShopProducts(raw);
+}
+
+/**
+ * fetch_product_detail_v3 — full detail for one product. Returned by
+ * pluckShopProducts too but with more fields available (images may
+ * be an array, sold_count more accurate, etc.). Caller uses this on
+ * discovery to write the initial ShopProduct row.
+ */
+export async function getShopProductDetail(
+  productId: string,
+): Promise<ShopMarketProduct | null> {
+  const raw = await postTikHubShop(ENDPOINTS.shopProductDetail, {
+    product_id: productId,
+  });
+  if (!raw || typeof raw !== "object") return null;
+  // Detail endpoint returns a single product envelope, not a list.
+  // Wrap it so pluckShopProducts can handle it uniformly.
+  const r = raw as Record<string, unknown>;
+  const detail =
+    (r.data as Record<string, unknown> | undefined)?.product ??
+    (r.data as Record<string, unknown> | undefined) ??
+    r;
+  const wrapped = { data: { products: [detail] } };
+  const list = pluckShopProducts(wrapped);
+  return list[0] ?? null;
+}
+
+/**
+ * fetch_general_search_result — count of creator videos matching a
+ * product name. The "creator saturation" signal for BOF Score.
+ * Docs cap count at 30 per call; we ask for 30 and use the total-
+ * results field (when present) or fall back to the returned array
+ * length as a coarser floor.
+ */
+export async function getProductCreatorCount(
+  productName: string,
+): Promise<number> {
+  if (!productName || !productName.trim()) return 0;
+  const raw = await postTikHubShop(ENDPOINTS.generalSearch, {
+    keyword: productName.trim(),
+    count: 30,
+  });
+  if (!raw || typeof raw !== "object") return 0;
+  const r = raw as Record<string, unknown>;
+  const data = (r.data ?? r) as Record<string, unknown>;
+  // TikHub sometimes surfaces a total (has_more + cursor + total-ish
+  // fields), sometimes not. Try total → total_count → the actual
+  // array length as fallback.
+  const total = num(
+    data.total ?? data.total_count ?? data.result_count,
+  );
+  if (total > 0) return total;
+  const items =
+    (Array.isArray(data.data) && data.data) ||
+    (Array.isArray(data.videos) && data.videos) ||
+    (Array.isArray(data.results) && data.results) ||
+    [];
+  return items.length;
+}

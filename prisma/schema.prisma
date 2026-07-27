@@ -67,6 +67,10 @@ model Workspace {
   // BOF Dashboard — TikTok Shop accounts the operator has
   // connected. Scoped to workspace like everything else.
   tikTokAccounts TikTokAccount[]
+  // Product Research — marketplace-discovered products the
+  // operator is scouting/tracking. See ShopProduct at the
+  // bottom of this file.
+  shopProducts   ShopProduct[]
 }
 
 // ---------------------------------------------------------------------------
@@ -138,6 +142,15 @@ model WorkspaceSettings {
   // enough for the session score to decay, short enough that
   // legitimate workloads aren't stuck overnight.
   cooldownHours Int @default(4)
+
+  // Cap on how many ShopProduct rows in this workspace can carry
+  // isTracking=true concurrently. Guards the per-workspace TikHub
+  // bill against runaway Track clicks — every tracked product
+  // costs ~2 API calls/day (snapshot + creator refresh × 4). 25
+  // caps daily burn around ~$3-5/workspace at TikHub rates. The
+  // Track action rejects clicks that would exceed this and points
+  // the operator here.
+  shopResearchMaxTracked Int @default(25)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -764,6 +777,71 @@ model TikTokProductDaily {
   @@unique([accountId, externalId, date])
   @@index([accountId, date])
   @@index([accountId, externalId])
+}
+
+// ---------------------------------------------------------------------------
+// Product Research — TikTok Shop marketplace discovery + tracking.
+//
+// Distinct from `Product` (uploaded to /batches for content gen) and
+// `TikTokProduct` (this creator's own sales from Creator API). ShopProduct
+// is *marketplace research data* — a product the operator is scouting or
+// tracking as a candidate for future campaigns.
+//
+// Join key across all three: externalId is TikTok's `product_id`.
+//
+// Populated by the /research surface — Hot Products scan + Track button.
+// Snapshots capture daily sold_count / creator_count / price to feed the
+// 7d/14d growth calculations that drive BOF Score.
+// ---------------------------------------------------------------------------
+model ShopProduct {
+  id             String   @id @default(cuid())
+  workspaceId    String
+  workspace      Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  // TikTok's product_id. Same value that appears on TikTokProduct.externalId
+  // for products this creator has actually promoted — the join key for the
+  // "Posted Products" tab.
+  externalId     String
+  title          String
+  // Local /uploads/shop-products/<workspaceId>/<externalId>.jpg after CDN
+  // download. Never the raw TikTok CDN URL — those expire.
+  imageUrl       String?
+  price          Decimal  @default(0)
+  commissionRate Decimal  @default(0)
+  category       String?
+  // Boolean toggle from the Hot Products card. When true the product is
+  // included in the daily snapshot + creator-count refresh cron jobs.
+  // Workspace-scoped cap enforced at the action layer against
+  // WorkspaceSettings.shopResearchMaxTracked.
+  isTracking     Boolean  @default(false)
+  firstSeenAt    DateTime @default(now())
+  // Last time the discovery scan re-encountered this product. Rows that
+  // haven't been seen in weeks can be pruned as stale.
+  lastSeenAt     DateTime @default(now())
+
+  snapshots ShopProductSnapshot[]
+
+  @@unique([workspaceId, externalId])
+  @@index([workspaceId, isTracking])
+}
+
+model ShopProductSnapshot {
+  id           String   @id @default(cuid())
+  productId    String
+  product      ShopProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
+  // Calendar date the snapshot represents (UTC midnight). One snapshot per
+  // product per day. Late-arriving refresh calls upsert into the same row
+  // so we don't accumulate duplicates within a day.
+  date         DateTime
+  soldCount    Int      @default(0)
+  // Count of creator videos promoting this product per the general_search
+  // endpoint — the "creator saturation" signal that feeds BOF Score. Sweet
+  // spot per curriculum: 20-200.
+  creatorCount Int      @default(0)
+  // Price captured at snapshot time. Sometimes changes daily on flash sales.
+  price        Decimal  @default(0)
+  capturedAt   DateTime @default(now())
+
+  @@unique([productId, date])
 }
 
 model TikTokAccountPnl {
