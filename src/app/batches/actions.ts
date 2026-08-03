@@ -1090,6 +1090,62 @@ export async function setProductPostingStatusViaToken(input: {
   return { ok: true };
 }
 
+/**
+ * Style 1 — record which option the operator picked for Part 1, 2,
+ * or 3 on the mobile posting page. Called when they tap Copy on a
+ * specific option; server persists so the desktop /prompts modal
+ * can surface the pick and future sessions on the same product
+ * remember it.
+ *
+ * Anyone-with-URL auth via the batch's posting token, same model
+ * as setProductPostingStatusViaToken.
+ */
+export async function setChosenCopyPartViaToken(input: {
+  token: string;
+  productId: string;
+  /** "1" | "2" | "3" — which Part the pick belongs to. */
+  part: string;
+  /** The chosen option text verbatim, or null to clear. */
+  text: string | null;
+}): Promise<{ ok: boolean; message?: string }> {
+  const { token, productId, part, text } = input;
+  if (!token || !productId) {
+    return { ok: false, message: "missing parameters" };
+  }
+  if (part !== "1" && part !== "2" && part !== "3") {
+    return { ok: false, message: "invalid part" };
+  }
+  const batch = await db.batch.findUnique({
+    where: { postingToken: token },
+    select: { id: true },
+  });
+  if (!batch) {
+    return { ok: false, message: "invalid posting link" };
+  }
+  const product = await db.product.findFirst({
+    where: { id: productId, batchId: batch.id, deletedAt: null },
+    select: { id: true },
+  });
+  if (!product) {
+    return { ok: false, message: "product not found in batch" };
+  }
+  const cleaned =
+    typeof text === "string" && text.trim().length > 0 ? text : null;
+  const field =
+    part === "1"
+      ? "chosenCopyPart1"
+      : part === "2"
+        ? "chosenCopyPart2"
+        : "chosenCopyPart3";
+  await db.product.update({
+    where: { id: product.id },
+    data:  { [field]: cleaned },
+  });
+  revalidatePath(`/mobile-posting/${token}`);
+  revalidatePath(`/batches/${batch.id}`);
+  return { ok: true };
+}
+
 // ---------------------------------------------------------------------
 // Kalodata import
 // ---------------------------------------------------------------------

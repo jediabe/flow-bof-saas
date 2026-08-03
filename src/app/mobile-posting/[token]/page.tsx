@@ -1,25 +1,23 @@
 /**
- * Phase-5 mobile posting-assist page.
+ * Phase-5 mobile posting-assist page — reshaped around the Style 1
+ * (Store Discovery) video kit.
  *
  * Public route, token-authenticated via the [token] URL segment.
- * Phone-first interface that surfaces each product's hook /
- * caption / hashtags / productDescription with one-tap copy
- * buttons + a status toggle (needs_posting / posted / skipped) so
- * the user can power through manual TikTok uploads from their
- * phone without re-typing the AI-generated copy.
+ * Phone-first interface. Products with a Style 1 kit render as a
+ * top-to-bottom checklist (Flow agent script → voice → 3-part
+ * copy → hashtags → posting reminders). Legacy pre-Style-1
+ * products fall back to the old hook/caption/hashtags UI.
  *
- * Like /mobile-review/[token], no session cookie required —
- * middleware.ts whitelists /mobile-posting/* in isAlwaysOpen. The
- * page renders 404 for any unknown token to avoid leaking token
- * existence.
+ * No session cookie required — middleware.ts whitelists
+ * /mobile-posting/* in isAlwaysOpen. Renders 404 for any unknown
+ * token to avoid leaking token existence.
  *
  * Eligibility filter (which products show up):
- *   - reviewStatus = "approved"   (user already triaged the product)
+ *   - reviewStatus = "approved"   (user already triaged)
  *   - deletedAt   = null          (not soft-deleted)
- * That's it — we don't gate on video-generated status because the
- * user might want to start prepping their TikTok captions before
- * Flow's generation finishes. The user can also "skip" any product
- * that doesn't have a usable video yet.
+ * We do NOT gate on video-generated status — the operator might
+ * want to start prepping their TikTok captions before Flow's
+ * generation finishes. Skip any product without a usable video.
  */
 
 import { notFound } from "next/navigation";
@@ -27,6 +25,7 @@ import { db } from "@/lib/db";
 import { parseJson } from "@/lib/json-column";
 import MobilePostingClient, {
   type MobilePostingProduct,
+  type WorkspaceVoicesForPosting,
 } from "./MobilePostingClient";
 
 export const dynamic = "force-dynamic";
@@ -45,6 +44,7 @@ export default async function MobilePostingPage({
       id: true,
       name: true,
       market: true,
+      workspaceId: true,
       products: {
         where: {
           deletedAt:    null,
@@ -57,10 +57,6 @@ export default async function MobilePostingPage({
           referenceImageUrl: true,
           imageUrl: true,
           hook: true,
-          // New — full hook variant list so the mobile page can
-          // surface every option with its own copy button. Older
-          // products without variants fall back to the single
-          // `hook` field below.
           hookVariants: true,
           caption: true,
           hashtags: true,
@@ -68,9 +64,15 @@ export default async function MobilePostingPage({
           productLinkDescription: true,
           postingStatus: true,
           postingNotes: true,
+          // Style 1 additions — full kit + per-part picks +
+          // discount % so the checklist can show real numbers in
+          // its section labels.
+          discountPercent: true,
+          style1Kit: true,
+          chosenCopyPart1: true,
+          chosenCopyPart2: true,
+          chosenCopyPart3: true,
         },
-        // Land the user on the first needs_posting product so they
-        // power through unposted ones first.
         orderBy: [
           { postingStatus: "asc" },
           { createdAt: "asc" },
@@ -81,6 +83,26 @@ export default async function MobilePostingPage({
 
   if (!batch) notFound();
 
+  // Workspace voice settings — reminder-only. The Style 1
+  // checklist renders "paste script into voice: <label> (<id>)"
+  // for the market that matches this batch. Never sent to
+  // ElevenLabs; the operator generates audio manually.
+  const ws = await db.workspaceSettings.findUnique({
+    where: { workspaceId: batch.workspaceId },
+    select: {
+      elevenLabsVoiceIdUk: true,
+      elevenLabsVoiceLabelUk: true,
+      elevenLabsVoiceIdUs: true,
+      elevenLabsVoiceLabelUs: true,
+    },
+  });
+  const voices: WorkspaceVoicesForPosting = {
+    ukVoiceId:    ws?.elevenLabsVoiceIdUk    ?? null,
+    ukVoiceLabel: ws?.elevenLabsVoiceLabelUk ?? null,
+    usVoiceId:    ws?.elevenLabsVoiceIdUs    ?? null,
+    usVoiceLabel: ws?.elevenLabsVoiceLabelUs ?? null,
+  };
+
   const products: MobilePostingProduct[] = batch.products.map((p) => ({
     id:                p.id,
     productName:       p.productName,
@@ -88,8 +110,6 @@ export default async function MobilePostingPage({
     referenceImageUrl: p.referenceImageUrl,
     imageUrl:          p.imageUrl,
     hook:              p.hook,
-    // Defensive JSON parse — older rows have null hookVariants;
-    // newer rows store an array of {label, text, leverName?}.
     hookVariants:
       (parseJson(p.hookVariants) as Array<{
         label: string;
@@ -102,6 +122,12 @@ export default async function MobilePostingPage({
     productLinkDescription: p.productLinkDescription,
     postingStatus:     p.postingStatus as MobilePostingProduct["postingStatus"],
     postingNotes:      p.postingNotes,
+    discountPercent:   p.discountPercent ?? null,
+    // Raw JSON blob — client uses parseStyle1Kit to decode.
+    style1Kit:         p.style1Kit ?? null,
+    chosenCopyPart1:   p.chosenCopyPart1 ?? null,
+    chosenCopyPart2:   p.chosenCopyPart2 ?? null,
+    chosenCopyPart3:   p.chosenCopyPart3 ?? null,
   }));
 
   return (
@@ -110,6 +136,7 @@ export default async function MobilePostingPage({
       batchName={batch.name}
       batchMarket={batch.market}
       products={products}
+      voices={voices}
     />
   );
 }

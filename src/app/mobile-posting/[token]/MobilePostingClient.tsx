@@ -17,8 +17,16 @@
 
 import { useMemo, useState, useTransition } from "react";
 import { setProductPostingStatusViaToken } from "@/app/batches/actions";
+import Style1PostingChecklist from "./Style1PostingChecklist";
 
 export type PostingStatus = "needs_posting" | "posted" | "skipped";
+
+export interface WorkspaceVoicesForPosting {
+  ukVoiceId: string | null;
+  ukVoiceLabel: string | null;
+  usVoiceId: string | null;
+  usVoiceLabel: string | null;
+}
 
 export interface MobilePostingProduct {
   id: string;
@@ -27,10 +35,8 @@ export interface MobilePostingProduct {
   referenceImageUrl: string | null;
   imageUrl: string | null;
   hook: string | null;
-  /** All hook variants the AI generated for this product. UK = 5
-   *  or 6 templates (A1..B3); US = 7 levers. Empty for products
-   *  generated before the multi-hook prompts shipped — in that
-   *  case the UI falls back to the single `hook` field. */
+  /** Legacy hook variants list (7-family output). Empty for
+   *  Style 1 products — they use style1Kit.copy.partN instead. */
   hookVariants: Array<{
     label: string;
     text: string;
@@ -39,13 +45,17 @@ export interface MobilePostingProduct {
   caption: string | null;
   hashtags: string[];
   productDescription: string | null;
-  /** Short (<=30 char) text that displays as the link-sticker
-   *  label on the posted TikTok. The AI prompt is asked to
-   *  condense the product into this; falls back to null for
-   *  products generated before the field was added. */
+  /** Short (<=30 char) text for the TikTok link-sticker label. */
   productLinkDescription: string | null;
   postingStatus: PostingStatus;
   postingNotes: string | null;
+  /** Style 1 additions. All null for legacy pre-Style-1 rows;
+   *  those keep rendering via the legacy copy-block UI. */
+  discountPercent: number | null;
+  style1Kit: string | null;
+  chosenCopyPart1: string | null;
+  chosenCopyPart2: string | null;
+  chosenCopyPart3: string | null;
 }
 
 /** Hard limit for productLinkDescription. TikTok truncates the
@@ -73,11 +83,13 @@ export default function MobilePostingClient({
   batchName,
   batchMarket,
   products: initial,
+  voices,
 }: {
   token: string;
   batchName: string;
   batchMarket: string;
   products: MobilePostingProduct[];
+  voices: WorkspaceVoicesForPosting;
 }) {
   const [products, setProducts] = useState<MobilePostingProduct[]>(initial);
   const [index, setIndex] = useState<number>(() =>
@@ -238,77 +250,105 @@ export default function MobilePostingClient({
         </div>
       </div>
 
-      {/* Copy blocks */}
-      <section className="px-4 pt-5 space-y-3">
-        {/* Hook variants — one CopyBlock per variant so the user
-            can pick the framing they want for THIS post. Each
-            block shows the variant label (A1 / lever-1 / ...) so
-            the user can rotate variants across posts without
-            having to remember which one they used. Falls back to
-            the single hook field for older products that don't
-            have variants stored. */}
-        {current.hookVariants.length > 0 ? (
-          <div className="space-y-2.5">
-            <div className="text-[11px] text-zinc-400 uppercase tracking-wide">
-              Hook variants ({current.hookVariants.length}) — pick one per post
+      {/* Style 1 checklist takes over completely when the product
+          has a kit — the checklist covers everything the operator
+          needs (Flow script, voice, all 3 parts of copy,
+          hashtags, posting reminders). Legacy pre-Style-1 rows
+          fall through to the flat copy blocks below. */}
+      {current.style1Kit ? (
+        <Style1PostingChecklist
+          token={token}
+          batchMarket={batchMarket}
+          product={{
+            id:              current.id,
+            style1Kit:       current.style1Kit,
+            chosenCopyPart1: current.chosenCopyPart1,
+            chosenCopyPart2: current.chosenCopyPart2,
+            chosenCopyPart3: current.chosenCopyPart3,
+          }}
+          voices={voices}
+          onLocalChosenUpdate={(part, text) => {
+            // Optimistic local write so a re-render of the same
+            // card shows the pick as "chosen" immediately, without
+            // waiting for the server round-trip / page revalidate.
+            setProducts((prev) =>
+              prev.map((p) =>
+                p.id === current.id
+                  ? {
+                      ...p,
+                      chosenCopyPart1:
+                        part === "1" ? text : p.chosenCopyPart1,
+                      chosenCopyPart2:
+                        part === "2" ? text : p.chosenCopyPart2,
+                      chosenCopyPart3:
+                        part === "3" ? text : p.chosenCopyPart3,
+                    }
+                  : p,
+              ),
+            );
+          }}
+        />
+      ) : (
+        <section className="px-4 pt-5 space-y-3">
+          {/* Legacy path — flat copy blocks for pre-Style-1 rows. */}
+          {current.hookVariants.length > 0 ? (
+            <div className="space-y-2.5">
+              <div className="text-[11px] text-zinc-400 uppercase tracking-wide">
+                Hook variants ({current.hookVariants.length}) — pick one per post
+              </div>
+              {current.hookVariants.map((v, i) => (
+                <CopyBlock
+                  key={`${v.label}-${i}`}
+                  label={
+                    v.leverName
+                      ? `Hook · ${v.label} — ${v.leverName}`
+                      : `Hook · ${v.label}`
+                  }
+                  value={v.text}
+                  placeholder=""
+                  multiline
+                />
+              ))}
             </div>
-            {current.hookVariants.map((v, i) => (
-              <CopyBlock
-                key={`${v.label}-${i}`}
-                label={
-                  v.leverName
-                    ? `Hook · ${v.label} — ${v.leverName}`
-                    : `Hook · ${v.label}`
-                }
-                value={v.text}
-                placeholder=""
-                multiline
-              />
-            ))}
-          </div>
-        ) : (
+          ) : (
+            <CopyBlock
+              label="Hook"
+              value={current.hook}
+              placeholder="No hook generated yet. Run AI prompts on the desktop."
+              multiline
+            />
+          )}
           <CopyBlock
-            label="Hook"
-            value={current.hook}
-            placeholder="No hook generated yet. Run AI prompts on the desktop."
+            label="Caption"
+            value={current.caption}
+            placeholder="No caption yet."
+          />
+          <CopyBlock
+            label="Hashtags"
+            value={current.hashtags.length > 0 ? current.hashtags.join(" ") : null}
+            placeholder="No hashtags yet."
+          />
+          <CopyBlock
+            label="Product description"
+            value={current.productDescription}
+            placeholder="No description yet."
             multiline
           />
-        )}
-        <CopyBlock
-          label="Caption"
-          value={current.caption}
-          placeholder="No caption yet."
-        />
-        <CopyBlock
-          label="Hashtags"
-          value={current.hashtags.length > 0 ? current.hashtags.join(" ") : null}
-          placeholder="No hashtags yet."
-        />
-        <CopyBlock
-          label="Product description"
-          value={current.productDescription}
-          placeholder="No description yet."
-          multiline
-        />
-        {/* Link-sticker overlay text. TikTok truncates the visible
-            label, so the AI prompt is asked to condense the
-            product into <=30 chars. We surface the live count + a
-            warning if the stored value exceeds the limit (older
-            data or a manual edit that drifted). */}
-        <CopyBlock
-          label={`Product link description (${
-            current.productLinkDescription?.length ?? 0
-          }/${PRODUCT_LINK_DESC_MAX})`}
-          value={current.productLinkDescription}
-          placeholder={`Up to ${PRODUCT_LINK_DESC_MAX} chars — TikTok link-sticker overlay. Re-run AI prompts to fill.`}
-          warning={
-            current.productLinkDescription &&
-            current.productLinkDescription.length > PRODUCT_LINK_DESC_MAX
-              ? `Over ${PRODUCT_LINK_DESC_MAX} chars — TikTok will truncate.`
-              : null
-          }
-        />
-      </section>
+          <CopyBlock
+            label={`Product link description (${
+              current.productLinkDescription?.length ?? 0
+            }/${PRODUCT_LINK_DESC_MAX})`}
+            value={current.productLinkDescription}
+            placeholder={`Up to ${PRODUCT_LINK_DESC_MAX} chars — TikTok link-sticker overlay. Re-run AI prompts to fill.`}
+            warning={
+              current.productLinkDescription &&
+              current.productLinkDescription.length > PRODUCT_LINK_DESC_MAX
+                ? `Over ${PRODUCT_LINK_DESC_MAX} chars — TikTok will truncate.`
+                : null
+            }
+          />
+        </section>
+      )}
 
       {/* Status pill row */}
       <section className="px-4 pt-6 grid grid-cols-3 gap-2">
