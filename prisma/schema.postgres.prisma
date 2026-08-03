@@ -256,6 +256,15 @@ model Product {
   // Short (<=30 char) overlay label for the TikTok link sticker.
   // Null until the AI prompt is re-run with this field requested.
   productLinkDescription String?
+  // Style 1 kit — see SQLite schema for the JSON shape. Stored as
+  // a JSON string; parsed via parseJson<Style1Kit>. Replaces the
+  // old 30+-hook UK output entirely; hookVariants stops being
+  // written but stays in the schema for back-compat with any
+  // pre-Style-1 rows that still have data.
+  style1Kit              String?
+  chosenCopyPart1        String?
+  chosenCopyPart2        String?
+  chosenCopyPart3        String?
   // Mobile-review workflow status. Defaults to "needs_review" for
   // every newly imported row so the user explicitly approves before
   // burning generations on it. Values:

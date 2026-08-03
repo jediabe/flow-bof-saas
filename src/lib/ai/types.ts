@@ -136,6 +136,17 @@ export interface AiPromptOutput {
    * workflow can keep producing prompts without it for now.
    */
   productDescription?: string;
+  /**
+   * Style 1 kit (Store Discovery) — the full JSON payload the
+   * UK copy bot produces. Contains 4 Flow prompts + 3-part copy
+   * with 5 options each + hashtags + product short name +
+   * discount % + market. See src/lib/ai/style1.ts for the type.
+   *
+   * Stored raw on Product.style1Kit as a JSON string. Populated
+   * for UK workflow responses; undefined for US or manual
+   * fallbacks that don't emit the Style 1 shape yet.
+   */
+  style1KitJson?: string;
   // Echoed-through fields, mostly used for debugging the provider's
   // reasoning. The SaaS doesn't render these but stores them on the
   // AI envelope for traceability.

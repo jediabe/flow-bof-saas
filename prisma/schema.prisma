@@ -292,6 +292,28 @@ model Product {
   // copy block. Null until the AI prompt has been re-run for this
   // product after the field was introduced.
   productLinkDescription  String?
+  // Style 1 (Store Discovery) — full generator kit for one product.
+  // JSON blob shape (see src/lib/ai/style1.ts for the TS type):
+  //   {
+  //     scene1: { imagePrompt, motionPrompt, retailerName },
+  //     scene2: { imagePrompt, motionPrompt, setting },
+  //     copy:   { part1Options: [5], part2Options: [5], part3Options: [5] },
+  //     hashtags: [5], productShortName, discountPercent, market
+  //   }
+  // Stored as JSON string; parsed via parseJson<Style1Kit>. Replaces
+  // the old 30+-hook UK output entirely — the hookVariants column
+  // stays but stops being written by the new prompt.
+  style1Kit               String?
+  // The specific option the operator picked on the mobile-posting
+  // page for each of the three copy parts. Set as the operator
+  // walks through the checklist (tapping Copy on an option). null
+  // when they haven't picked yet. Persisted so a returning session
+  // remembers which line was used, and so we can later analyse
+  // which options actually get chosen (feedback for tuning the
+  // Style 1 prompt).
+  chosenCopyPart1         String?
+  chosenCopyPart2         String?
+  chosenCopyPart3         String?
   // Mobile-review workflow status. Defaults to "needs_review" for
   // every newly imported row so the user explicitly approves before
   // burning generations on it. Transition values:

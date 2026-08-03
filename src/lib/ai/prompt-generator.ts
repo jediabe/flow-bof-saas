@@ -156,6 +156,25 @@ export function normaliseAiOutput(
   }
   const r = data as Record<string, unknown>;
 
+  // Detect Style 1 (Store Discovery) response shape. UK generations
+  // now return the full video kit under scene1/scene2/copy instead
+  // of the old flat image_prompt + hook_variants. When the shape
+  // matches we take the Style 1 fast path; otherwise fall through
+  // to the legacy US / manual normalisation below.
+  const looksLikeStyle1 =
+    !!r.scene1 &&
+    !!r.scene2 &&
+    !!r.copy &&
+    typeof r.scene1 === "object" &&
+    typeof r.scene2 === "object" &&
+    typeof r.copy === "object";
+
+  if (looksLikeStyle1) {
+    return normaliseStyle1Output(r, input);
+  }
+
+  // ---- Legacy path (US, manual fallback, older UK responses) ----
+
   // The LLM uses snake_case per the system prompt; tolerate camelCase
   // too in case a stricter provider auto-renames.
   const imagePrompt = asString(r.image_prompt ?? r.imagePrompt);
@@ -214,6 +233,79 @@ export function normaliseAiOutput(
       ? r.warnings.map((w) => String(w ?? "")).filter(Boolean)
       : undefined,
   };
+}
+
+/**
+ * Style 1 (Store Discovery) response normaliser. Called by
+ * normaliseAiOutput when the raw payload matches the Style 1
+ * shape. Populates:
+ *
+ *  - `style1KitJson` : the raw kit stringified for storage on
+ *                       Product.style1Kit.
+ *  - `imagePrompt`   : scene1.imagePrompt, so any legacy consumer
+ *                       reading imagePrompt still gets a valid
+ *                       store-shelf prompt.
+ *  - `videoPrompt`   : scene1.motionPrompt, similarly.
+ *  - `hook`          : copy.part1Options[0] for back-compat.
+ *  - `caption`       : productShortName.
+ *  - `hashtags`      : kit hashtags verbatim.
+ *  - `retailerName`  : scene1.retailerName so the batches flow
+ *                       (if still used) can show the store name.
+ */
+function normaliseStyle1Output(
+  r: Record<string, unknown>,
+  input: ProductPromptInput,
+): AiPromptOutput {
+  const scene1 = (r.scene1 as Record<string, unknown>) || {};
+  const scene2 = (r.scene2 as Record<string, unknown>) || {};
+  const copy = (r.copy as Record<string, unknown>) || {};
+
+  const scene1ImagePrompt = asString(scene1.imagePrompt ?? scene1.image_prompt);
+  const scene1MotionPrompt = asString(scene1.motionPrompt ?? scene1.motion_prompt);
+  const retailerName =
+    asString(scene1.retailerName ?? scene1.retailer_name) ||
+    input.retailerName ||
+    "UK retail store";
+
+  if (!scene1ImagePrompt) {
+    throw new Error("Style 1 response missing scene1.imagePrompt");
+  }
+
+  const part1 = coerceStringArray(copy.part1Options ?? copy.part1_options);
+  const hashtags = coerceHashtags(r.hashtags);
+
+  // Serialize the raw kit for storage. We re-JSON to strip any
+  // fields we didn't ask for and to normalise casing.
+  const style1KitJson = JSON.stringify(r);
+
+  return {
+    retailerName,
+    imagePrompt: scene1ImagePrompt,
+    videoPrompt: scene1MotionPrompt || undefined,
+    // Back-compat: the "chosen" hook a legacy consumer might read.
+    // Style 1's real picker lives on the mobile-posting page.
+    hook: part1[0] || undefined,
+    caption: asString(r.productShortName ?? r.product_short_name) || undefined,
+    hashtags,
+    style1KitJson,
+    productName:
+      asString(r.productShortName ?? r.product_short_name) ||
+      input.productName,
+    category: input.category || undefined,
+    warnings: Array.isArray(r.warnings)
+      ? r.warnings.map((w) => String(w ?? "")).filter(Boolean)
+      : undefined,
+  };
+}
+
+/** Coerce a value into a trimmed string array, dropping non-strings
+ *  and empties. Used for Style 1 part1/2/3 option arrays. */
+function coerceStringArray(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  return v
+    .filter((x): x is string => typeof x === "string")
+    .map((x) => x.trim())
+    .filter((x) => x.length > 0);
 }
 
 /**

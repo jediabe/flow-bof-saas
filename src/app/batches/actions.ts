@@ -1680,6 +1680,19 @@ export async function generateAiPromptForProduct(input: {
           ? encodeJson(output.hashtags)
           : null,
         productDescription:  output.productDescription ?? null,
+        // Style 1 kit — the full store-discovery video kit (4 Flow
+        // prompts + 3-part copy × 5 options + hashtags + short
+        // name). Populated for UK generations that returned the
+        // Style 1 shape; null on US / manual / legacy responses.
+        // Persisted so /prompts + mobile-posting can render it
+        // without another LLM round-trip.
+        style1Kit:           output.style1KitJson ?? null,
+        // Wipe any prior "chosen" picks whenever the kit is
+        // regenerated — the options changed, the old picks no
+        // longer point at valid content.
+        chosenCopyPart1:     null,
+        chosenCopyPart2:     null,
+        chosenCopyPart3:     null,
         aiPromptError:       null,
         aiPromptGeneratedAt: new Date(),
       },
