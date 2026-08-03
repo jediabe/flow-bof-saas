@@ -140,19 +140,42 @@ the exact discount % from the input. "20% off voucher"
 everywhere. NEVER "voucher", "the voucher", "on sale", or "the
 deal" without the number. NO exceptions.
 
-TIMING — Both spoken reads MUST fill their 8-second scene:
-  Part 1 (spoken):  22-26 words per option (~8s)
-  Part 2 (spoken):  18-22 words per option (~8s)
-Do NOT write short 3-4 second lines — they must run the whole
-scene.
+TIMING RULE — HARD CONSTRAINT, NOT ADVICE
+════════════════════════════════════════════════════════════
+Both spoken reads MUST fill their FULL 8-second scene. An
+ElevenLabs voice at natural pace reads:
+
+  22-26 words in ~8 seconds  →  Part 1 target
+  18-22 words in ~8 seconds  →  Part 2 target
+
+Every Part 1 option MUST be 22-26 words. Every Part 2 option
+MUST be 18-22 words. Placeholders like [NEEDS DISCOUNT %] count
+as ONE word (they'll be replaced by "20%" — one word — when the
+discount is filled in).
+
+BEFORE returning the JSON:
+  1. Count the words in every Part 1 option. If ANY is under
+     22 words or over 26, REWRITE it — do not return it. Expand
+     short options by adding an urgency clause ("and it is
+     going FAST", "before the sale ends tonight", "and it's
+     selling out already"). Trim long options by shortening
+     the FOMO line.
+  2. Count the words in every Part 2 option. If ANY is under
+     18 or over 22, REWRITE it. Adjust the benefit clause
+     length — the deal + CTA sentence is roughly fixed at
+     11-12 words ("There's a 20% off voucher live — tap the
+     orange basket now").
+  3. Do NOT return options that fail these ranges. This is
+     the single most important quality bar.
 
 ────────────────────────────────────────────────────────────
 PART 1 — On-screen text + ElevenLabs spoken (Scene 1)
 ────────────────────────────────────────────────────────────
 5 options. Each option:
-  - Fills a FULL 8-second Scene 1 read (22-26 words).
-  - Two short sentences: hook line, then one short urgency /
-    FOMO line.
+  - Fills a FULL 8-second Scene 1 read (22-26 words — count).
+  - Two short sentences: hook line, then one urgency / FOMO
+    line (BOTH sentences are required — a single-sentence
+    hook will not hit the word count).
   - Written like a real person texting.
   - Names the product (short name — see PRODUCT NAME below).
   - Contains the exact discount ("20% off voucher").
@@ -160,23 +183,45 @@ PART 1 — On-screen text + ElevenLabs spoken (Scene 1)
     drops the emoji before pasting into ElevenLabs).
 
 Across the 5 options MIX these three shapes, at least one of
-each:
-  APOLOGY:              "I'm so sorry to everyone that bought
-                         the [PRODUCT] before…"
-  EVERYONE'S GRABBING:  "WAIT… the [PRODUCT] is finally 20% off"
-  THIS-IS-YOUR-SIGN:    "This is your sign — the [PRODUCT] just
-                         dropped to 20% off"
+each. EACH shape can absolutely hit 22-26 words when you
+extend with FOMO / urgency / specifics — see examples below.
+
+APOLOGY (22-26 word example):
+  "I'm so sorry to everyone that bought the Ninja Air Fryer
+   before this… there's a 20% off voucher live right now and
+   it is going FAST 🔥"
+  (26 words — hook sentence + FOMO sentence, both required)
+
+EVERYONE'S GRABBING / WAIT (22-26 word example):
+  "WAIT… the Ninja Air Fryer just dropped to 20% off with a
+   voucher live right now… it's SELLING out and you need this
+   before it's gone"
+  (26 words — DON'T write "WAIT… the [product] is 20% off!"
+   alone; that's 8 words and clips to 2 seconds)
+
+THIS-IS-YOUR-SIGN (22-26 word example):
+  "This is your sign to finally grab the Ninja Air Fryer…
+   there's a 20% off voucher live and everyone is grabbing it
+   before it disappears"
+  (25 words — the "before it disappears" tail is what gets you
+   to the word count)
+
+If a shape feels naturally short, ADD to the FOMO half — never
+truncate to a single sentence.
 
 ────────────────────────────────────────────────────────────
 PART 2 — Voiceover only, Scene 2
 ────────────────────────────────────────────────────────────
 5 options. Each option:
-  - Fills a FULL 8-second Scene 2 read (18-22 words).
+  - Fills a FULL 8-second Scene 2 read (18-22 words — count).
   - Two beats in order:
-    (1) one experiential benefit in first person ("Chips come
-        out crispy every time now… and I barely wash up"),
-    (2) the deal + call to action ("There's a 20% off voucher
-        live — tap the orange basket now").
+    (1) one experiential benefit in first person (5-9 words),
+    (2) the deal + call to action (11-13 words), roughly
+        fixed at: "There's a 20% off voucher live — tap the
+        orange basket now" or similar.
+  - The benefit clause is where you tune length. If total is
+    under 18 words, expand the benefit ("…and I honestly
+    barely wash up anymore"). If over 22, trim it.
   - UK says "tap the orange basket". US says "tap the orange
     cart". This template is UK — use "orange basket".
   - Use "…" for natural pauses. Put ONE word in CAPS for
@@ -188,6 +233,10 @@ PART 2 — Voiceover only, Scene 2
     all-caps except the ONE emphasis word.
   - Never clinical or absolute claims ("cures", "guaranteed",
     "removes wrinkles").
+
+Part 2 example (21 words):
+  "Chips come out crispy every time now… and I barely wash up.
+   There's a 20% off voucher live — tap the orange basket now."
 
 ────────────────────────────────────────────────────────────
 PART 3 — On-screen sale text only, Scene 2
@@ -266,9 +315,9 @@ OUTPUT FORMAT — STRICT JSON, NO MARKDOWN, NO COMMENTARY
     "setting": "<the room you picked>"
   },
   "copy": {
-    "part1Options": ["<option 1>", "<option 2>", "<option 3>", "<option 4>", "<option 5>"],
-    "part2Options": ["<option 1>", "<option 2>", "<option 3>", "<option 4>", "<option 5>"],
-    "part3Options": ["<option 1>", "<option 2>", "<option 3>", "<option 4>", "<option 5>"]
+    "part1Options": ["<22-26 words each>", "<22-26 words>", "<22-26 words>", "<22-26 words>", "<22-26 words>"],
+    "part2Options": ["<18-22 words each>", "<18-22 words>", "<18-22 words>", "<18-22 words>", "<18-22 words>"],
+    "part3Options": ["<<=10 words each>", "<<=10 words>", "<<=10 words>", "<<=10 words>", "<<=10 words>"]
   },
   "hashtags": ["#tiktokshopuk", "#dealdrops", "#tiktokmademebuyit", "#aigc", "#weekendsale"],
   "productShortName": "<short sayable product name>",
@@ -280,6 +329,21 @@ OUTPUT FORMAT — STRICT JSON, NO MARKDOWN, NO COMMENTARY
 Return ONLY the JSON object. No prose before or after. No
 markdown code fences. Exactly 5 options per copy part. Exactly
 5 hashtags in the exact order above.
+
+FINAL SELF-CHECK before you return the JSON — do all of these:
+  1. Count every Part 1 option's words. All must be 22-26.
+     If any is under 22, ADD an urgency clause and recount.
+  2. Count every Part 2 option's words. All must be 18-22.
+     If any is under 18, expand the benefit clause.
+  3. Every option in Part 1, 2, AND 3 contains the discount
+     number (or the [NEEDS DISCOUNT %] placeholder if none
+     provided).
+  4. Every Part 1 option is TWO sentences (hook + urgency).
+     A one-sentence option is automatically too short.
+  5. hashtags array is exactly the 5 UK tags in the exact
+     specified order.
+
+If any check fails, fix it before returning.
 
 WORKED EXAMPLE — if the input is:
   Product Name: Ninja Dual Zone Air Fryer
