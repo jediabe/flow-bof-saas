@@ -30,17 +30,19 @@ interface NavItem {
 const PRIMARY: NavItem[] = [
   { href: "/dashboard", label: "Hub",              icon: "▦" },
   { href: "/analytics", label: "Shop Analytics",   icon: "$" },
-  // /prompts is the new hook & caption generation surface —
-  // wired in phase 5 of the APEX revamp. Nav entry lands first
-  // so returning users see the new route immediately.
+  // /prompts is the Style 1 video-kit surface — Kalodata import,
+  // mobile review + posting handoff, per-product Flow agent
+  // scripts + copy options.
   { href: "/prompts",   label: "Hooks & Prompts",  icon: "✎" },
 ];
 
-const TOOLS: NavItem[] = [
-  { href: "/batches",   label: "Image Gen",        icon: "▤" },
-  { href: "/agents",    label: "Runner Setup",     icon: "◆" },
-  { href: "/jobs",      label: "Jobs",             icon: "≡" },
-];
+// The old TOOLS group (Image Gen / Runner Setup / Jobs) was
+// removed with the Style 1 pivot — that pipeline drove Google
+// Flow via the local Python runner and no longer maps to how
+// the operator produces videos (Flow agent chat in-browser +
+// CapCut on phone). The routes still work as URLs for anyone
+// who bookmarked them; they're just no longer surfaced in nav.
+const TOOLS: NavItem[] = [];
 
 export default async function Nav() {
   const user = await getCurrentUser({ optional: true });
@@ -67,7 +69,9 @@ export default async function Nav() {
 
       <nav className="flex-1 overflow-y-auto px-3 pt-2 pb-4 flex flex-col gap-4">
         <NavGroup items={PRIMARY} />
-        <NavGroup label="Tools" items={TOOLS} subdued />
+        {TOOLS.length > 0 && (
+          <NavGroup label="Tools" items={TOOLS} subdued />
+        )}
       </nav>
 
       <div className="px-3 pb-3">

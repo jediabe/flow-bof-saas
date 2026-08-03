@@ -18,12 +18,15 @@ import { friendlyJobType } from "@/lib/job-types";
  *   2. Primary tiles — three cards, one per top-level surface
  *              (Shop Analytics, Hooks & Prompts, Mobile Posting).
  *              Each shows a headline number + short prompt.
- *   3. Tools row — subdued cards for the image-gen pipeline
- *              (batches, runner, jobs). Kept visible for operators
- *              who still want it; visually demoted so it doesn't
- *              compete with the primary surfaces.
- *   4. Recent activity — small table below the fold. Same content
- *              as before, just repositioned.
+ *   3. Recent activity — small table below the fold. Held on to
+ *              during the Style 1 wind-down so operators still
+ *              see runner-era jobs if any remain in-flight.
+ *
+ * The old "Tools row" (Image Gen / Runner Setup / Jobs) was
+ * removed with the Style 1 pivot — that pipeline drove Google
+ * Flow via the local Python runner and no longer maps to how
+ * videos get made (Flow agent chat in-browser + CapCut on phone).
+ * The routes still work as URLs for anyone bookmarking them.
  *
  * All data reads are best-effort — an empty database renders the
  * hub cleanly with prompts to add first-run content.
@@ -64,13 +67,16 @@ export default async function HubPage() {
   const now = new Date();
   const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
 
+  // activeBatch + agent used to feed the "02 Tools" row (Image
+  // Gen / Runner Setup / Jobs) which was removed with the Style 1
+  // pivot. Those queries are gone; recentJobs stays because the
+  // "Recent activity" panel below still shows the last 5 jobs
+  // (useful for debugging runner-era batches during the wind-down).
   const [
     accountsCount,
     revenue7d,
     productsCount,
-    activeBatch,
     recentJobs,
-    agent,
   ] = await Promise.all([
     db.tikTokAccount.count({ where: { workspaceId: workspace.id } }),
     db.tikTokAccountRevenue.findMany({
@@ -83,11 +89,6 @@ export default async function HubPage() {
     db.tikTokProduct.count({
       where: { account: { workspaceId: workspace.id } },
     }),
-    db.batch.findFirst({
-      where: { workspaceId: workspace.id },
-      orderBy: { updatedAt: "desc" },
-      include: { _count: { select: { products: true, jobs: true } } },
-    }),
     db.job.findMany({
       where: { workspaceId: workspace.id },
       orderBy: { createdAt: "desc" },
@@ -99,11 +100,6 @@ export default async function HubPage() {
         createdAt: true,
         batch: { select: { name: true } },
       },
-    }),
-    db.agent.findFirst({
-      where: { workspaceId: workspace.id },
-      orderBy: { createdAt: "asc" },
-      select: { name: true, status: true, lastSeenAt: true },
     }),
   ]);
 
@@ -186,74 +182,9 @@ export default async function HubPage() {
           <HubTile
             variant="blue"
             title="Mobile Posting"
-            body="From a batch page, scan the QR to post from your phone. Review products, prompts, and hooks on the go."
-            cta={activeBatch ? "Open active batch" : "Create a batch"}
-            href={activeBatch ? `/batches/${activeBatch.id}` : "/batches"}
-          />
-        </div>
-      </section>
-
-      {/* Tools row — image gen + supporting pieces ----------------- */}
-      <section>
-        <div className="flex items-center gap-3 mb-4">
-          <span className="chip-num chip-num-blue">02</span>
-          <h2 className="text-xs uppercase tracking-[0.16em] text-muted font-medium">
-            Tools
-          </h2>
-          <span className="text-[11px] text-muted2">
-            Image-gen automation is still hooked up to your uploaded products.
-          </span>
-        </div>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <ToolTile
-            title="Image Gen"
-            body={
-              activeBatch
-                ? `${activeBatch.name} · ${activeBatch._count.products} products`
-                : "Batches drive product uploads through the image → favorite → video pipeline."
-            }
-            cta={activeBatch ? "Open batch" : "New batch"}
-            href={activeBatch ? `/batches/${activeBatch.id}` : "/batches"}
-            chips={
-              activeBatch
-                ? [
-                    { label: activeBatch.status, variant: "muted" as const },
-                    {
-                      label: `${activeBatch._count.jobs} jobs`,
-                      variant: "muted" as const,
-                    },
-                  ]
-                : undefined
-            }
-          />
-          <ToolTile
-            title="Runner Setup"
-            body={
-              agent
-                ? `${agent.name} · last seen ${timeAgo(agent.lastSeenAt)}`
-                : "Register your local runner so image gen can drive Flow."
-            }
-            cta={agent ? "Manage runner" : "Register runner"}
-            href="/agents"
-            chips={
-              agent
-                ? [
-                    {
-                      label: agent.status,
-                      variant:
-                        agent.status === "online"
-                          ? ("ok" as const)
-                          : ("muted" as const),
-                    },
-                  ]
-                : undefined
-            }
-          />
-          <ToolTile
-            title="Jobs"
-            body="Every runner job — scans, generations, uploads — logged with status and duration."
-            cta="Browse jobs"
-            href="/jobs"
+            body="Import a Kalodata batch on Hooks & Prompts, review products on your phone, and post from the mobile posting checklist — Flow script, voice, copy, hashtags in one flow."
+            cta="Open Hooks & Prompts"
+            href="/prompts"
           />
         </div>
       </section>
@@ -346,43 +277,4 @@ function HubTile({
   );
 }
 
-/**
- * Smaller "Tools" tile — same shape as HubTile but muted. No
- * accent left-border; uses the plain panel primitive.
- */
-function ToolTile({
-  title,
-  body,
-  cta,
-  href,
-  chips,
-}: {
-  title: string;
-  body: string;
-  cta: string;
-  href: string;
-  chips?: Array<{ label: string; variant: "ok" | "warn" | "bad" | "muted" }>;
-}) {
-  return (
-    <Link
-      href={href}
-      className="panel p-4 flex flex-col gap-2 min-h-[140px] hover:border-border-strong transition-colors group"
-    >
-      <div className="text-sm font-semibold tracking-tight text-text">
-        {title}
-      </div>
-      {chips && chips.length > 0 && (
-        <div className="flex flex-wrap gap-1.5">
-          {chips.map((c, i) => (
-            <StatusChip key={i} label={c.label} variant={c.variant} />
-          ))}
-        </div>
-      )}
-      <p className="text-[13px] text-muted leading-relaxed flex-1">{body}</p>
-      <div className="text-[12px] font-medium text-muted group-hover:text-text transition-colors">
-        {cta} →
-      </div>
-    </Link>
-  );
-}
 
