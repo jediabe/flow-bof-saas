@@ -289,3 +289,69 @@ async function mintTokenString(): Promise<string> {
     .replace(/\//g, "_")
     .replace(/=+$/, "");
 }
+
+/* ------------------------------------------------------------------
+ * ElevenLabs voice references (Style 1)
+ *
+ * The operator does a one-time voice-design step in ElevenLabs
+ * (see the "Create Your Custom AI Voice" section of the Loom
+ * Library PDF) and pastes the resulting voice ID + a friendly
+ * label here. No ElevenLabs API integration — the settings are
+ * pure UX plumbing so the mobile-posting page can render "paste
+ * the script into voice: <label> (<id>)" per market.
+ *
+ * Empty-string save clears the field (Prisma nulls it). Trimmed
+ * to strip accidental whitespace when copy-pasting from
+ * ElevenLabs.
+ * ---------------------------------------------------------------- */
+
+export interface WorkspaceVoiceSettings {
+  ukVoiceId: string | null;
+  ukVoiceLabel: string | null;
+  usVoiceId: string | null;
+  usVoiceLabel: string | null;
+}
+
+export async function getWorkspaceVoiceSettings(): Promise<WorkspaceVoiceSettings> {
+  const { workspace } = await getCurrentWorkspace();
+  const row = await loadOrCreateSettings(workspace.id);
+  return {
+    ukVoiceId:    row.elevenLabsVoiceIdUk    ?? null,
+    ukVoiceLabel: row.elevenLabsVoiceLabelUk ?? null,
+    usVoiceId:    row.elevenLabsVoiceIdUs    ?? null,
+    usVoiceLabel: row.elevenLabsVoiceLabelUs ?? null,
+  };
+}
+
+/**
+ * Save the per-market voice ID + friendly label. Both are trimmed;
+ * empty strings clear the corresponding field. Never validates the
+ * ID against ElevenLabs — the operator is source-of-truth for what
+ * their real voice ID is, and we deliberately don't hit their API.
+ */
+export async function saveWorkspaceVoiceSettings(
+  formData: FormData,
+): Promise<{ ok: boolean; message: string }> {
+  const { workspace } = await getCurrentWorkspace();
+  const norm = (v: FormDataEntryValue | null): string | null => {
+    const s = String(v ?? "").trim();
+    return s.length > 0 ? s : null;
+  };
+  const ukId    = norm(formData.get("ukVoiceId"));
+  const ukLabel = norm(formData.get("ukVoiceLabel"));
+  const usId    = norm(formData.get("usVoiceId"));
+  const usLabel = norm(formData.get("usVoiceLabel"));
+
+  await loadOrCreateSettings(workspace.id);
+  await db.workspaceSettings.update({
+    where: { workspaceId: workspace.id },
+    data: {
+      elevenLabsVoiceIdUk:    ukId,
+      elevenLabsVoiceLabelUk: ukLabel,
+      elevenLabsVoiceIdUs:    usId,
+      elevenLabsVoiceLabelUs: usLabel,
+    },
+  });
+  revalidatePath("/settings");
+  return { ok: true, message: "Voice settings saved." };
+}

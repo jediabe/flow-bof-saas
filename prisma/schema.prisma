@@ -161,6 +161,26 @@ model WorkspaceSettings {
   // the operator here.
   shopResearchMaxTracked Int @default(25)
 
+  // Style 1 (Store Discovery) — ElevenLabs voice references.
+  // The operator does a one-time voice-design step in ElevenLabs
+  // (per the Loom Library PDF) and pastes the resulting voice ID
+  // + a friendly label here. The mobile-posting page reads these
+  // and reminds the operator which voice to paste the Part 1 +
+  // Part 2 script into. NO ELEVENLABS API INTEGRATION — this is
+  // pure UX plumbing; the operator still generates audio via the
+  // ElevenLabs web UI.
+  //   *Id     — the voice_id from ElevenLabs (opaque string,
+  //             ~20 chars). Persisted as-is.
+  //   *Label  — the operator's own friendly name for the voice
+  //             (e.g. "Alicia"). Shown alongside the ID in the
+  //             mobile posting reminder.
+  // Separate UK + US pairs because the SOP mandates a market-
+  // matched accent — one voice for the UK shop, one for US.
+  elevenLabsVoiceIdUk    String?
+  elevenLabsVoiceLabelUk String?
+  elevenLabsVoiceIdUs    String?
+  elevenLabsVoiceLabelUs String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }

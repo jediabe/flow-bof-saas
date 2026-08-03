@@ -5,12 +5,14 @@ import EmptyState from "@/components/ui/EmptyState";
 import AiProviderSettingsForm from "./AiProviderSettings";
 import AiPromptOverrides from "./AiPromptOverrides";
 import WorkspaceApiTokenPanel from "./WorkspaceApiTokenPanel";
+import WorkspaceVoicePanel from "./WorkspaceVoicePanel";
 import {
   getMaskedAiSettings,
   setIpRiskChecksEnabled,
   saveAntiBlockSettings,
   clearUnusualActivityCooldown,
   getWorkspaceApiTokenStatus,
+  getWorkspaceVoiceSettings,
 } from "./actions";
 import { loadOrCreateSettings } from "@/lib/workspace-settings";
 import { UK_SYSTEM_PROMPT } from "@/lib/ai/uk-retail-prompts";
@@ -36,6 +38,7 @@ export default async function SettingsPage() {
   const settingsRow = await loadOrCreateSettings(workspace.id);
   const ipRiskChecksEnabled = settingsRow.ipRiskChecksEnabled;
   const apiTokenStatus = await getWorkspaceApiTokenStatus();
+  const voiceSettings = await getWorkspaceVoiceSettings();
 
   // Cooldown derivation: how much longer until the gate releases?
   const cooldownMs = settingsRow.cooldownHours * 60 * 60 * 1000;
@@ -73,6 +76,10 @@ export default async function SettingsPage() {
 
       <Panel title="Workspace API token">
         <WorkspaceApiTokenPanel hasToken={apiTokenStatus.hasToken} />
+      </Panel>
+
+      <Panel title="Voice setup (ElevenLabs)">
+        <WorkspaceVoicePanel initial={voiceSettings} />
       </Panel>
 
       <Panel title="AI Providers">

@@ -138,6 +138,14 @@ model WorkspaceSettings {
   // rationale.
   shopResearchMaxTracked Int @default(25)
 
+  // Style 1 — ElevenLabs voice references (per-market). See SQLite
+  // schema for full rationale. Pure UX plumbing; no ElevenLabs API
+  // integration.
+  elevenLabsVoiceIdUk    String?
+  elevenLabsVoiceLabelUk String?
+  elevenLabsVoiceIdUs    String?
+  elevenLabsVoiceLabelUs String?
+
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 }
