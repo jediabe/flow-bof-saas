@@ -14,6 +14,11 @@ import {
   type BatchPromptsProduct,
   type RecentBatchSummary,
 } from "./actions";
+import {
+  parseStyle1Kit,
+  buildFlowAgentPrompt,
+  type Style1Kit,
+} from "@/lib/ai/style1";
 
 /**
  * /prompts hub — redesigned around a product-card grid + mobile
@@ -44,24 +49,6 @@ import {
  */
 
 const POLL_INTERVAL_MS = 4000;
-
-const FAMILY_ORDER = [
-  { prefix: "SORRY",     title: "I'm So Sorry"    },
-  { prefix: "WAIT",      title: "Wait…"           },
-  { prefix: "POV",       title: "POV"             },
-  { prefix: "CURIOSITY", title: "Curiosity"       },
-  { prefix: "SCARCITY",  title: "Scarcity & Urgency" },
-  { prefix: "DEAL",      title: "Deal & Discount" },
-  { prefix: "SOCIAL",    title: "Social Proof"    },
-] as const;
-
-function familyOf(label: string): string {
-  const up = label.toUpperCase();
-  for (const f of FAMILY_ORDER) {
-    if (up.startsWith(f.prefix)) return f.title;
-  }
-  return "Other";
-}
 
 export default function PromptsHubClient({
   initialState,
@@ -479,7 +466,12 @@ function ActiveBatchView({ state }: { state: BatchPromptsState }) {
 function ProductPromptCard({ product }: { product: BatchPromptsProduct }) {
   const [open, setOpen] = useState(false);
 
-  const hasHooks = product.hookVariants.length > 0 || !!product.hook;
+  // Ready = has a Style 1 kit OR (legacy) has the flat hook fields.
+  // parseStyle1Kit is deliberately not called here (a JSON.parse per
+  // card per poll would be wasteful); presence of the raw string is
+  // enough to know generation succeeded.
+  const hasHooks =
+    !!product.style1Kit || product.hookVariants.length > 0 || !!product.hook;
   const status = product.reviewStatus;
 
   // Card visual treatment mirrors the batches product cards but
@@ -556,21 +548,20 @@ function ProductPromptCard({ product }: { product: BatchPromptsProduct }) {
           )}
         </div>
 
-        {/* One clear generation-state chip. Collapses the previous
-            three-chip mess (hooks / generating / gen failed) into a
-            single pill so a card is either RUNNING, READY, FAILED,
-            or shows nothing (rejected / needs-review — where gen
-            state isn't meaningful yet). */}
+        {/* One clear generation-state chip. Style 1 kit takes
+            precedence for the "N hooks" count (15 total across
+            three parts when generation ran cleanly); legacy hook
+            variants only for pre-Style-1 rows. */}
         <GenerationStatePill
           cardTone={cardTone}
-          hookCount={product.hookVariants.length}
+          hookCount={style1HookCount(product) ?? product.hookVariants.length}
           aiPromptError={product.aiPromptError}
           generatedAt={product.aiPromptGeneratedAt}
         />
       </button>
 
       {open && (
-        <ProductHooksModal product={product} onClose={() => setOpen(false)} />
+        <ProductKitModal product={product} onClose={() => setOpen(false)} />
       )}
     </>
   );
@@ -698,7 +689,26 @@ function shortError(err: string): string {
  * Product hooks modal
  * ------------------------------------------------------------ */
 
-function ProductHooksModal({
+/** Count how many copy options a Style 1 kit contains (5 per part
+ *  when generation ran cleanly, so 15 total). Returns null when the
+ *  kit is missing / malformed so the caller can fall back to the
+ *  legacy hookVariants count. */
+function style1HookCount(p: BatchPromptsProduct): number | null {
+  const kit = parseStyle1Kit(p.style1Kit);
+  if (!kit) return null;
+  return (
+    kit.copy.part1Options.length +
+    kit.copy.part2Options.length +
+    kit.copy.part3Options.length
+  );
+}
+
+/**
+ * Product kit modal — Style 1's full video kit as the primary
+ * shape. Legacy 7-family products (no style1Kit) render a
+ * "regenerate to get the Style 1 kit" empty state.
+ */
+function ProductKitModal({
   product,
   onClose,
 }: {
@@ -714,16 +724,10 @@ function ProductHooksModal({
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  const grouped = useMemo(() => {
-    const g = new Map<string, Array<{ label: string; text: string }>>();
-    for (const v of product.hookVariants) {
-      const family = familyOf(v.label);
-      const arr = g.get(family) ?? [];
-      arr.push(v);
-      g.set(family, arr);
-    }
-    return g;
-  }, [product.hookVariants]);
+  const kit = useMemo(
+    () => parseStyle1Kit(product.style1Kit),
+    [product.style1Kit],
+  );
 
   return (
     <div
@@ -735,6 +739,7 @@ function ProductHooksModal({
         className="panel max-w-3xl w-full my-8 relative"
         onClick={(e) => e.stopPropagation()}
       >
+        {/* Header — product identity + close */}
         <div className="p-5 border-b border-border flex items-start gap-4">
           <div className="w-16 h-16 rounded-xl overflow-hidden border border-border bg-panel2 flex-shrink-0">
             {product.referenceImageUrl ? (
@@ -755,7 +760,7 @@ function ProductHooksModal({
           </div>
           <div className="flex-1 min-w-0">
             <div className="text-sm font-semibold text-text">
-              {product.productName}
+              {kit?.productShortName || product.productName}
             </div>
             <div className="text-[11px] text-muted mt-1 flex items-center gap-2 flex-wrap">
               {product.discountPercent != null && (
@@ -763,8 +768,15 @@ function ProductHooksModal({
                   −{product.discountPercent}%
                 </span>
               )}
-              {product.category && <span>{product.category}</span>}
-              <span>{product.hookVariants.length} hooks</span>
+              {kit?.scene1.retailerName && (
+                <span>{kit.scene1.retailerName}</span>
+              )}
+              {kit?.scene2.setting && (
+                <span>· {kit.scene2.setting}</span>
+              )}
+              {product.category && !kit && (
+                <span>{product.category}</span>
+              )}
             </div>
           </div>
           <button
@@ -777,40 +789,200 @@ function ProductHooksModal({
           </button>
         </div>
 
+        {/* Body */}
         <div className="p-5 space-y-5">
-          {product.imagePrompt && (
-            <PromptRow label="Image prompt" text={product.imagePrompt} />
+          {kit ? (
+            <Style1KitContents kit={kit} product={product} />
+          ) : (
+            <LegacyProductContents product={product} />
           )}
-          {product.caption && (
-            <PromptRow label="Caption" text={product.caption} />
-          )}
-          {product.hashtags.length > 0 && (
-            <PromptRow
-              label="Hashtag block"
-              text={product.hashtags.join(" ")}
-              hint="#aigc is required for AI-generated content disclosure. When a TikTok Shop campaign is running, swap #weekendsale for the current campaign hashtag at post time."
-            />
-          )}
-
-          <div className="space-y-4">
-            {FAMILY_ORDER.map(({ prefix, title }) => {
-              const items = grouped.get(title);
-              if (!items || items.length === 0) return null;
-              return (
-                <div key={prefix}>
-                  <div className="text-[11px] uppercase tracking-[0.14em] text-muted2 mb-2">
-                    {title}
-                  </div>
-                  <div className="space-y-1.5">
-                    {items.map((v) => (
-                      <HookRow key={v.label} label={v.label} text={v.text} />
-                    ))}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Style 1 kit renderer — the primary layout for freshly-generated
+ * products. Leads with the composed Flow agent prompt (one paste,
+ * both scenes end-to-end), then the individual scene prompts, then
+ * caption + hashtags + Part 1/2/3 options.
+ */
+function Style1KitContents({
+  kit,
+  product,
+}: {
+  kit: Style1Kit;
+  product: BatchPromptsProduct;
+}) {
+  const agentPrompt = useMemo(() => buildFlowAgentPrompt(kit), [kit]);
+  return (
+    <>
+      {/* Primary CTA — the full Flow agent script */}
+      <div className="card-accent-blue p-4 space-y-3">
+        <div className="flex items-baseline justify-between gap-2">
+          <div className="text-[11px] uppercase tracking-[0.14em] text-accent">
+            Flow agent script (both scenes)
+          </div>
+          <CopyButton text={agentPrompt} />
+        </div>
+        <p className="text-[11px] text-muted leading-relaxed">
+          Paste this into Google Flow&apos;s agent chat with the product
+          image uploaded as reference. Two-stage: generates 4 image
+          variations first, waits for you to pick one store + one home,
+          then animates both into 8-second clips. Preferred over the
+          one-prompt-at-a-time flow below.
+        </p>
+        <pre className="text-[11px] leading-relaxed text-text bg-bg/60 border border-border rounded-xl px-3 py-2 whitespace-pre-wrap max-h-64 overflow-y-auto">
+          {agentPrompt}
+        </pre>
+      </div>
+
+      {/* Fallback — individual scene prompts one at a time */}
+      <details className="panel p-4">
+        <summary className="cursor-pointer text-sm font-medium text-text">
+          Or use Flow one prompt at a time
+        </summary>
+        <div className="mt-4 space-y-4">
+          <PromptRow
+            label="Scene 1 · image (store display)"
+            text={kit.scene1.imagePrompt}
+          />
+          <PromptRow
+            label="Scene 1 · motion"
+            text={kit.scene1.motionPrompt}
+          />
+          <PromptRow
+            label="Scene 2 · image (product at home)"
+            text={kit.scene2.imagePrompt}
+          />
+          <PromptRow
+            label="Scene 2 · motion"
+            text={kit.scene2.motionPrompt}
+          />
+        </div>
+      </details>
+
+      {/* Hashtag block */}
+      {kit.hashtags.length > 0 && (
+        <PromptRow
+          label="Hashtag block"
+          text={kit.hashtags.join(" ")}
+          hint="#aigc required for AI-generated content disclosure. Swap #weekendsale for a live campaign hashtag at post time."
+        />
+      )}
+
+      {/* Copy options — 5 per part */}
+      <CopyOptionsBlock
+        label={`Part 1 · on-screen hook + ElevenLabs (Scene 1, ~8s each)`}
+        hint="Read out loud AND displayed on screen over Scene 1. Pick one on mobile posting."
+        options={kit.copy.part1Options}
+        chosen={product.chosenCopyPart1}
+      />
+      <CopyOptionsBlock
+        label={`Part 2 · voiceover (Scene 2, ~8s each)`}
+        hint="Spoken only. Pasted into ElevenLabs after Part 1 to make one 16s file."
+        options={kit.copy.part2Options}
+        chosen={product.chosenCopyPart2}
+      />
+      <CopyOptionsBlock
+        label={`Part 3 · on-screen sale text (Scene 2, ≤10 words)`}
+        hint="Shown on screen over Scene 2 for the whole clip. Not read aloud."
+        options={kit.copy.part3Options}
+        chosen={product.chosenCopyPart3}
+      />
+    </>
+  );
+}
+
+/**
+ * Legacy pre-Style-1 product renderer — flat imagePrompt +
+ * caption + hashtags + hookVariants. Kept so old rows still
+ * display something useful; user can Regenerate to get the
+ * new Style 1 kit.
+ */
+function LegacyProductContents({
+  product,
+}: {
+  product: BatchPromptsProduct;
+}) {
+  return (
+    <>
+      <div className="card-accent-red p-3 text-[12px] text-muted">
+        This product was generated before Style 1. Regenerate the
+        batch on the desktop to get the full Style 1 kit (Flow agent
+        script, 3-part copy with 5 options each).
+      </div>
+      {product.imagePrompt && (
+        <PromptRow label="Image prompt" text={product.imagePrompt} />
+      )}
+      {product.caption && (
+        <PromptRow label="Caption" text={product.caption} />
+      )}
+      {product.hashtags.length > 0 && (
+        <PromptRow
+          label="Hashtag block"
+          text={product.hashtags.join(" ")}
+        />
+      )}
+      {product.hookVariants.length > 0 && (
+        <div className="space-y-1.5">
+          <div className="label">Legacy hooks</div>
+          {product.hookVariants.map((v) => (
+            <HookRow key={v.label} label={v.label} text={v.text} />
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+/** Block for one Part's 5 options with per-option copy buttons.
+ *  Highlights the chosen option (persisted picks from the mobile
+ *  posting page). */
+function CopyOptionsBlock({
+  label,
+  hint,
+  options,
+  chosen,
+}: {
+  label: string;
+  hint?: string;
+  options: string[];
+  chosen: string | null;
+}) {
+  if (options.length === 0) return null;
+  return (
+    <div className="field-row">
+      <span className="label">{label}</span>
+      {hint && <div className="text-[11px] text-muted2 mb-1">{hint}</div>}
+      <div className="space-y-1.5">
+        {options.map((text, i) => {
+          const isChosen = chosen === text;
+          return (
+            <div
+              key={i}
+              className={`flex items-start gap-2 group px-3 py-2 rounded-xl border ${
+                isChosen
+                  ? "border-ok/50 bg-ok/[0.05]"
+                  : "border-border bg-bg/60"
+              }`}
+            >
+              <span className="text-[10px] font-mono text-muted2 min-w-[24px] pt-1">
+                {i + 1}
+              </span>
+              <div className="flex-1 text-sm text-text leading-relaxed">
+                {text}
+                {isChosen && (
+                  <span className="ml-2 text-[10px] text-ok">✓ picked on mobile</span>
+                )}
+              </div>
+              <div className="opacity-0 group-hover:opacity-100 transition-opacity">
+                <CopyButton text={text} small />
+              </div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );

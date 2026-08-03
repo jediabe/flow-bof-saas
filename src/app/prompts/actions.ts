@@ -557,6 +557,15 @@ export interface BatchPromptsProduct {
   hookVariants: Array<{ label: string; text: string }>;
   aiPromptGeneratedAt: string | null;
   aiPromptError: string | null;
+  /** Style 1 full video kit JSON string (parsed via parseStyle1Kit
+   *  on the client). Null when generation hasn't run under the
+   *  Style 1 prompt yet (legacy 7-family products). */
+  style1Kit: string | null;
+  /** Operator's picked option per copy part, set on the mobile
+   *  posting page. null when they haven't picked yet. */
+  chosenCopyPart1: string | null;
+  chosenCopyPart2: string | null;
+  chosenCopyPart3: string | null;
 }
 
 export interface BatchPromptsCounts {
@@ -631,6 +640,10 @@ export async function getBatchPromptsState(
           hookVariants: true,
           aiPromptGeneratedAt: true,
           aiPromptError: true,
+          style1Kit: true,
+          chosenCopyPart1: true,
+          chosenCopyPart2: true,
+          chosenCopyPart3: true,
         },
       },
     },
@@ -689,6 +702,10 @@ export async function getBatchPromptsState(
         ? p.aiPromptGeneratedAt.toISOString()
         : null,
       aiPromptError: p.aiPromptError ?? null,
+      style1Kit: p.style1Kit ?? null,
+      chosenCopyPart1: p.chosenCopyPart1 ?? null,
+      chosenCopyPart2: p.chosenCopyPart2 ?? null,
+      chosenCopyPart3: p.chosenCopyPart3 ?? null,
     };
   });
 
@@ -704,7 +721,13 @@ export async function getBatchPromptsState(
     if (p.reviewStatus in counts) {
       (counts as unknown as Record<string, number>)[p.reviewStatus]++;
     }
-    if (p.hookVariants.length > 0 || p.hook) counts.hasHooks++;
+    // A product is "ready" (counts toward hasHooks) when either the
+    // Style 1 kit is populated OR the legacy hook fields are — both
+    // shapes mean generation succeeded and the mobile-posting page
+    // has something to render.
+    if (p.style1Kit || p.hookVariants.length > 0 || p.hook) {
+      counts.hasHooks++;
+    }
   }
 
   // Mint / retrieve both tokens. Failures are non-fatal — the UI
