@@ -99,14 +99,6 @@ off coupon is written as "20% off coupon" everywhere. NEVER
 "coupon", "the coupon", "on sale", or "the deal" on their own —
 the % number goes in every line, no exceptions.
 
-If the listing has TWO discounts (a % off on the product AND a
-separate coupon), put BOTH in every line, every time.
-
-If discountPercent is null / not provided, populate every options
-array with placeholders like "[NEEDS DISCOUNT % — regenerate with a
-number]" and add a warning to the warnings array. Do NOT invent a
-number, do NOT default to plain "coupon".
-
 TIMING RULES (hard):
   Part 1 = 22-26 words per option. Fills the full 8-second Scene 1
            read at natural pace.
@@ -136,7 +128,8 @@ before returning.
 │     before this X% off coupon disappears…"
 │
 │ Every option names the product AND states the exact discount.
-│ No currency prices. Max one emoji per option.
+│ Max one emoji per option (the operator drops the emoji before
+│ pasting into ElevenLabs).
 │
 └─
 ┌─ PART 2 — VOICEOVER (Scene 2, spoken only)
@@ -162,10 +155,42 @@ before returning.
 │
 │ Example: "20% off coupon LIVE — tap the cart, don't miss it."
 │
-│ Shown on screen for the whole Scene 2. Deliberately DIFFERENT
-│ wording from the Part 2 voiceover.
+│ Shown on screen for the whole Scene 2. Max one emoji.
+│ Deliberately DIFFERENT wording from the Part 2 voiceover.
 │
 └─
+
+═══════════════════════════════════════
+DISCOUNT RULES (all apply to Part 1, Part 2, AND Part 3)
+═══════════════════════════════════════
+- A claimable coupon is written WITH its number: "20% off coupon
+  — claim it". Never "coupon — claim it" on its own.
+- If the listing has TWO discounts (a % off on the product AND a
+  separate coupon — e.g. "20% off plus a 10% coupon"), put BOTH
+  in every line, every time.
+- Pull the exact % straight from the input — never write "[X]",
+  "[X]%", or any placeholder into the copy, and never guess or
+  invent a number.
+- Only say "sale" if it's an actual sale price (not a coupon).
+  Calling a coupon a sale feels like a bait-and-switch when the
+  viewer lands on full price.
+- No £/$ prices anywhere. Percent-off only.
+- Benefits stay experiential (what you saw and felt) — never
+  clinical or absolute claims ("cures", "guaranteed", "removes
+  scars").
+
+MISSING-DISCOUNT BRANCH (SaaS-specific — deviates from the plain
+course prompt because we return strict JSON and can't ASK the
+operator conversationally):
+- If discountPercent is null / not provided in the input, do NOT
+  invent a number and do NOT default to plain "coupon".
+- Instead, populate every options array with the exact placeholder
+  "[NEEDS DISCOUNT % — regenerate with a number]" AND add the
+  warning "No discount % provided — copy is unusable until you set
+  one on the mobile-review page and regenerate." to the warnings
+  array. The UI surfaces this as an ASK signal to the operator.
+- This is the only case where [X]-style placeholders are allowed —
+  everywhere else, "[X]" or "[X]%" in the copy is a violation.
 
 hashtags:
   Return EXACTLY these five, in this order, verbatim:
