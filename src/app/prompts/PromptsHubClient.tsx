@@ -16,7 +16,8 @@ import {
 } from "./actions";
 import {
   parseStyle1Kit,
-  buildFlowAgentPrompt,
+  buildGoogleFlowToolInput,
+  buildElevenLabsScript,
   type Style1Kit,
 } from "@/lib/ai/style1";
 
@@ -760,7 +761,7 @@ function ProductKitModal({
           </div>
           <div className="flex-1 min-w-0">
             <div className="text-sm font-semibold text-text">
-              {kit?.productShortName || product.productName}
+              {kit?.productName || product.productName}
             </div>
             <div className="text-[11px] text-muted mt-1 flex items-center gap-2 flex-wrap">
               {product.discountPercent != null && (
@@ -768,12 +769,8 @@ function ProductKitModal({
                   −{product.discountPercent}%
                 </span>
               )}
-              {kit?.scene1.retailerName && (
-                <span>{kit.scene1.retailerName}</span>
-              )}
-              {kit?.scene2.setting && (
-                <span>· {kit.scene2.setting}</span>
-              )}
+              {kit?.market && <span>{kit.market}</span>}
+              {kit?.category && <span>· {kit.category}</span>}
               {product.category && !kit && (
                 <span>{product.category}</span>
               )}
@@ -803,10 +800,20 @@ function ProductKitModal({
 }
 
 /**
- * Style 1 kit renderer — the primary layout for freshly-generated
- * products. Leads with the composed Flow agent prompt (one paste,
- * both scenes end-to-end), then the individual scene prompts, then
- * caption + hashtags + Part 1/2/3 options.
+ * Style 1 kit renderer — post-pivot (2026-08).
+ *
+ * The kit no longer contains Flow scene prompts (those come from
+ * the operator's external Google Flow tool now). This modal
+ * surfaces, in order:
+ *   1. Google Flow tool input — the three-line block the operator
+ *      pastes into their tool to produce the Flow scenes.
+ *   2. Part 1 / Part 2 / Part 3 copy options (5 each, tap-to-pick
+ *      persists via the mobile posting page).
+ *   3. ElevenLabs script — Part 1 + Part 2 back-to-back, composed
+ *      from the operator's picks (or option 1 fallback).
+ *   4. Hashtag block.
+ *   5. Product description (TikTok caption lead-in).
+ *   6. Any LLM warnings.
  */
 function Style1KitContents({
   kit,
@@ -815,82 +822,107 @@ function Style1KitContents({
   kit: Style1Kit;
   product: BatchPromptsProduct;
 }) {
-  const agentPrompt = useMemo(() => buildFlowAgentPrompt(kit), [kit]);
+  const flowInput = useMemo(() => buildGoogleFlowToolInput(kit), [kit]);
+  const elevenLabsScript = useMemo(
+    () =>
+      buildElevenLabsScript(
+        kit,
+        product.chosenCopyPart1,
+        product.chosenCopyPart2,
+      ),
+    [kit, product.chosenCopyPart1, product.chosenCopyPart2],
+  );
+
   return (
     <>
-      {/* Primary CTA — the full Flow agent script */}
+      {/* 1. Google Flow tool input */}
       <div className="card-accent-blue p-4 space-y-3">
         <div className="flex items-baseline justify-between gap-2">
           <div className="text-[11px] uppercase tracking-[0.14em] text-accent">
-            Flow agent script (both scenes)
+            Google Flow tool input
           </div>
-          <CopyButton text={agentPrompt} />
+          <CopyButton text={flowInput} />
         </div>
         <p className="text-[11px] text-muted leading-relaxed">
-          Paste this into Google Flow&apos;s agent chat with the product
-          image uploaded as reference. Two-stage: generates 4 image
-          variations first, waits for you to pick one store + one home,
-          then animates both into 8-second clips. Preferred over the
-          one-prompt-at-a-time flow below.
+          Paste these three lines into your external Google Flow tool.
+          It handles the Flow scene generation.
         </p>
-        <pre className="text-[11px] leading-relaxed text-text bg-bg/60 border border-border rounded-xl px-3 py-2 whitespace-pre-wrap max-h-64 overflow-y-auto">
-          {agentPrompt}
+        <pre className="text-[12px] leading-relaxed text-text bg-bg/60 border border-border rounded-xl px-3 py-2 whitespace-pre-wrap font-mono">
+          {flowInput}
         </pre>
       </div>
 
-      {/* Fallback — individual scene prompts one at a time */}
-      <details className="panel p-4">
-        <summary className="cursor-pointer text-sm font-medium text-text">
-          Or use Flow one prompt at a time
-        </summary>
-        <div className="mt-4 space-y-4">
-          <PromptRow
-            label="Scene 1 · image (store display)"
-            text={kit.scene1.imagePrompt}
-          />
-          <PromptRow
-            label="Scene 1 · motion"
-            text={kit.scene1.motionPrompt}
-          />
-          <PromptRow
-            label="Scene 2 · image (product at home)"
-            text={kit.scene2.imagePrompt}
-          />
-          <PromptRow
-            label="Scene 2 · motion"
-            text={kit.scene2.motionPrompt}
-          />
-        </div>
-      </details>
-
-      {/* Hashtag block */}
-      {kit.hashtags.length > 0 && (
-        <PromptRow
-          label="Hashtag block"
-          text={kit.hashtags.join(" ")}
-          hint="#aigc required for AI-generated content disclosure. Swap #weekendsale for a live campaign hashtag at post time."
-        />
-      )}
-
-      {/* Copy options — 5 per part */}
+      {/* 2. Copy options — 5 per part */}
       <CopyOptionsBlock
-        label={`Part 1 · on-screen hook + ElevenLabs (Scene 1, ~8s each)`}
-        hint="Read out loud AND displayed on screen over Scene 1. Pick one on mobile posting."
+        label="Part 1 · hook (on-screen Scene 1 + spoken)"
+        hint="Displayed on Scene 1 AND read by ElevenLabs across the full ~8s. Pick one on mobile posting."
         options={kit.copy.part1Options}
         chosen={product.chosenCopyPart1}
       />
       <CopyOptionsBlock
-        label={`Part 2 · voiceover (Scene 2, ~8s each)`}
-        hint="Spoken only. Pasted into ElevenLabs after Part 1 to make one 16s file."
+        label="Part 2 · voiceover (spoken over Scene 2)"
+        hint="Spoken only, ~8s. Pasted into ElevenLabs after Part 1 to make one 16s voice file."
         options={kit.copy.part2Options}
         chosen={product.chosenCopyPart2}
       />
       <CopyOptionsBlock
-        label={`Part 3 · on-screen sale text (Scene 2, ≤10 words)`}
-        hint="Shown on screen over Scene 2 for the whole clip. Not read aloud."
+        label="Part 3 · on-screen sale text (Scene 2, ≤10 words)"
+        hint="Shown on Scene 2 for the whole clip. Not read aloud."
         options={kit.copy.part3Options}
         chosen={product.chosenCopyPart3}
       />
+
+      {/* 3. ElevenLabs script — composed from picks */}
+      {elevenLabsScript && (
+        <div className="card-accent-blue p-4 space-y-3">
+          <div className="flex items-baseline justify-between gap-2">
+            <div className="text-[11px] uppercase tracking-[0.14em] text-accent">
+              ElevenLabs script (Part 1 + Part 2)
+            </div>
+            <CopyButton text={elevenLabsScript} />
+          </div>
+          <p className="text-[11px] text-muted leading-relaxed">
+            Paste into your saved voice (Stability ~40%). Uses your
+            picks when set, otherwise falls back to option 1 of each
+            Part. Blank line between = the CapCut cut.
+          </p>
+          <pre className="text-[12px] leading-relaxed text-text bg-bg/60 border border-border rounded-xl px-3 py-2 whitespace-pre-wrap">
+            {elevenLabsScript}
+          </pre>
+        </div>
+      )}
+
+      {/* 4. Hashtag block */}
+      {kit.hashtags.length > 0 && (
+        <PromptRow
+          label="Hashtag block"
+          text={kit.hashtags.join(" ")}
+          hint="#AIGC required for AI-generated content disclosure. Swap #weekendsale for a live campaign hashtag at post time."
+        />
+      )}
+
+      {/* 5. Product description (TikTok caption lead-in) */}
+      {kit.productDescription && (
+        <PromptRow
+          label="Product description (TikTok caption)"
+          text={kit.productDescription}
+          hint="One-line lead-in for the TikTok caption, above the hashtag block."
+        />
+      )}
+
+      {/* 6. LLM warnings */}
+      {kit.warnings.length > 0 && (
+        <div className="card-accent-red p-3 space-y-1">
+          <div className="text-[10px] uppercase tracking-[0.14em] text-accent-red">
+            Warnings
+          </div>
+          <ul className="text-[11px] text-muted leading-relaxed list-disc list-inside">
+            {kit.warnings.map((w, i) => (
+              <li key={i}>{w}</li>
+            ))}
+          </ul>
+        </div>
+      )}
     </>
   );
 }

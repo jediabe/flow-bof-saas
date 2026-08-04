@@ -1,86 +1,83 @@
 /**
  * Style 1 — Store Discovery — shared types + parser.
  *
- * The full video kit produced by the AI copy bot for one product.
- * Stored as a JSON string on Product.style1Kit; parsed via
- * parseStyle1Kit for consumers (desktop /prompts, mobile posting).
+ * The video kit produced by the AI copy bot for one product. Stored
+ * as a JSON string on Product.style1Kit; parsed via parseStyle1Kit
+ * for consumers (desktop /prompts, mobile posting).
  *
- * Every field is set by the LLM in a single generation call —
- * there is NO fan-out chain, no separate calls for image prompt vs.
- * copy vs. hashtags. One JSON round-trip per approved product.
+ * SHAPE PIVOT (2026-08): the kit no longer contains Flow scene
+ * prompts (imagePrompt / motionPrompt / retailerName / setting).
+ * The user built an external "Google Flow tool" that generates
+ * Flow prompts from three plain fields — productName + market +
+ * category — so all we do here is extract those three cleanly and
+ * hand them off. The Flow scenes are entirely out-of-band now.
+ *
+ * The copy generator half (Part 1/2/3 options + hashtags + product
+ * description) still runs in the same LLM call and drives what the
+ * mobile posting page shows.
  *
  * See uk-retail-prompts.ts for the system-prompt spec that produces
  * this shape.
  */
 
-export interface Style1Scene {
-  /** Prompt to paste into Google Flow's image tool. */
-  imagePrompt: string;
-  /** Prompt to paste into Google Flow's motion tool AFTER the image
-   *  has been generated. */
-  motionPrompt: string;
-}
-
-export interface Style1Scene1 extends Style1Scene {
-  /** The retailer whose store shelf Scene 1 uses. e.g. "Boots",
-   *  "Sephora UK", "Currys". LLM picks from the SOP's retailer
-   *  library based on product category. Falls back to a generic
-   *  "UK retail store" when nothing fits. */
-  retailerName: string;
-}
-
-export interface Style1Scene2 extends Style1Scene {
-  /** Household room Scene 2 places the product in. Niche-driven:
-   *  skincare→bathroom, kitchen→kitchen, storage→bedroom, tools→
-   *  garage, etc. */
-  setting: string;
-}
-
 export interface Style1Kit {
-  /** Store-shelf discovery scene. ~8s in the final video. */
-  scene1: Style1Scene1;
-  /** Product-at-home proof scene. ~8s in the final video. */
-  scene2: Style1Scene2;
+  /** Short, sayable product name for the Google Flow tool AND the
+   *  voice/on-screen copy. e.g. "Ninja CREAMi Deluxe", not the
+   *  full listing title. */
+  productName: string;
+
+  /** "UK" | "US". Drives basket vs. cart wording. */
+  market: "UK" | "US";
+
+  /** One of: Beauty/Skincare, Kitchen/Food, Home/Storage,
+   *  Tools/Outdoor, Tech, Pets. Drives the room setting the
+   *  external Google Flow tool picks for Scene 2. */
+  category: string;
 
   copy: {
     /** 5 options for Part 1 — on-screen text over Scene 1 AND
-     *  spoken by ElevenLabs. 22-26 words each (~8s read).
-     *  Mix of the three approved shapes: apology / WAIT / this-is-
-     *  your-sign. Every option includes the exact discount %. */
+     *  spoken by ElevenLabs. 22-26 words each (~8s read). Mix of
+     *  apology / WAIT / this-is-your-sign shapes. Every option
+     *  includes the exact discount %. */
     part1Options: string[];
     /** 5 options for Part 2 — voiceover for Scene 2, spoken only.
-     *  18-22 words each (~8s read). Two beats: experiential
-     *  benefit → deal + CTA. UK says "orange basket"; US says
-     *  "orange cart". */
+     *  18-22 words each (~8s read). Experiential benefit → deal +
+     *  CTA. UK "orange basket"; US "orange cart". */
     part2Options: string[];
     /** 5 options for Part 3 — on-screen sale text over Scene 2,
      *  shown only. ≤10 words each. Deal + urgency + CTA. */
     part3Options: string[];
   };
 
-  /** Exact 5-tag UK block (or US equivalent) including #aigc. */
+  /** 5-tag hashtag block including #AIGC. Exact SOP set:
+   *  #tiktokshopuk #dealdrops #tiktokmademebuyit #weekendsale #AIGC
+   *  (US market swaps #tiktokshopuk for #tiktokshopus). */
   hashtags: string[];
 
-  /** Short, sayable product name used across all copy. e.g.
-   *  "Ninja CREAMi Deluxe", not the full listing title. */
-  productShortName: string;
+  /** Short TikTok-caption-ready product description. One line,
+   *  no marketing fluff — the operator pastes it as the caption
+   *  lead-in above the hashtags. */
+  productDescription: string;
 
-  /** Discount % the copy is built around. Copied verbatim from the
-   *  input; null when no discount was supplied. */
+  /** Discount % the copy is built around. Copied verbatim from
+   *  the input; null when no discount was supplied. */
   discountPercent: number | null;
 
-  /** "UK" | "US". Drives basket vs. cart wording + which
-   *  retailer library the LLM pulled from. */
-  market: "UK" | "US";
+  /** LLM-surfaced warnings — missing discount %, ambiguous
+   *  market, etc. Rendered on /prompts as an amber notice. */
+  warnings: string[];
 }
 
 /**
  * Parse a JSON-string Style1Kit into the typed shape. Returns null
- * on malformed input rather than throwing so consumers can render a
- * "regenerate" affordance instead of blowing up the page.
+ * on malformed input rather than throwing so consumers can render
+ * a "regenerate" affordance instead of blowing up the page.
  *
- * Tolerant on missing fields — an older row where the LLM returned
- * a partial payload still parses; missing arrays default to empty.
+ * Tolerant on missing fields. Also handles legacy kits from the
+ * pre-pivot shape (scene1/scene2/productShortName) by degrading
+ * to null so callers show the "regenerate" nudge — legacy kits
+ * lack the productName + category fields the new UI expects and
+ * would render nonsense if we tried to coerce them.
  */
 export function parseStyle1Kit(raw: string | null | undefined): Style1Kit | null {
   if (!raw) return null;
@@ -92,51 +89,39 @@ export function parseStyle1Kit(raw: string | null | undefined): Style1Kit | null
   }
   if (!parsed || typeof parsed !== "object") return null;
   const r = parsed as Record<string, unknown>;
-  const scene1 = coerceScene1(r.scene1);
-  const scene2 = coerceScene2(r.scene2);
+
+  // Legacy pre-pivot shape had scene1/scene2 at the top level and
+  // called the name field productShortName. Reject so /prompts
+  // shows the "regenerate to get the new shape" nudge.
+  if ("scene1" in r || "scene2" in r) return null;
+
+  const productName = typeof r.productName === "string" ? r.productName.trim() : "";
+  const category = typeof r.category === "string" ? r.category.trim() : "";
+  const productDescription =
+    typeof r.productDescription === "string" ? r.productDescription.trim() : "";
   const copy = coerceCopy(r.copy);
   const hashtags = coerceStringArray(r.hashtags);
-  const productShortName = typeof r.productShortName === "string"
-    ? r.productShortName
-    : "";
+  const warnings = coerceStringArray(r.warnings);
   const discountPercent =
     typeof r.discountPercent === "number" && Number.isFinite(r.discountPercent)
       ? Math.round(r.discountPercent)
       : null;
   const market: "UK" | "US" = r.market === "US" ? "US" : "UK";
 
-  // Minimum shape check — need at least both scenes' image prompts
-  // and at least one option per copy part for the page to render
-  // anything useful. If those are missing the kit is unusable.
-  if (!scene1.imagePrompt || !scene2.imagePrompt) return null;
+  // Minimum shape check — a name + at least one Part 1 option is
+  // enough for the mobile posting page to render something useful.
+  if (!productName) return null;
   if (copy.part1Options.length === 0) return null;
 
   return {
-    scene1,
-    scene2,
+    productName,
+    market,
+    category,
     copy,
     hashtags,
-    productShortName,
+    productDescription,
     discountPercent,
-    market,
-  };
-}
-
-function coerceScene1(v: unknown): Style1Scene1 {
-  const o = (v && typeof v === "object" ? v : {}) as Record<string, unknown>;
-  return {
-    imagePrompt: typeof o.imagePrompt === "string" ? o.imagePrompt : "",
-    motionPrompt: typeof o.motionPrompt === "string" ? o.motionPrompt : "",
-    retailerName: typeof o.retailerName === "string" ? o.retailerName : "",
-  };
-}
-
-function coerceScene2(v: unknown): Style1Scene2 {
-  const o = (v && typeof v === "object" ? v : {}) as Record<string, unknown>;
-  return {
-    imagePrompt: typeof o.imagePrompt === "string" ? o.imagePrompt : "",
-    motionPrompt: typeof o.motionPrompt === "string" ? o.motionPrompt : "",
-    setting: typeof o.setting === "string" ? o.setting : "",
+    warnings,
   };
 }
 
@@ -158,62 +143,42 @@ function coerceStringArray(v: unknown): string[] {
 }
 
 /**
- * Compose the "Flow agent prompt" — a single paste-into-Flow-agent
- * conversation that produces both scenes end-to-end with a
- * pick-best-of-2 checkpoint in the middle.
+ * Compose the exact block the operator pastes into their external
+ * Google Flow tool. Three plain lines — the format the tool
+ * expects. Deterministic (no LLM call).
  *
- * The wrapper is deterministic (no LLM call). It bakes in:
- *   - The universal preface (upload ref image, Veo 3.1 Lite,
- *     9:16, 1 output).
- *   - The LLM-picked scene prompts (already have product noun
- *     + retailer + setting substituted).
- *   - The 2-stage stop-and-wait structure so the operator picks
- *     one store variation + one home variation before any video
- *     generates.
- *   - The Stage 2 motion prompts, verbatim from the Style 1 SOP.
- *   - Explicit "no speech / no music / no text overlays / no
- *     faces" constraints so the operator doesn't have to remember
- *     them each time.
- *
- * Used by /prompts + /mobile-posting as the PRIMARY copy-paste
- * artefact — one button copies this whole thing and drops the
- * operator into Flow's agent chat. The 4 individual prompts in
- * the kit remain available as a "one prompt at a time" fallback.
+ *   Product Name: <productName>
+ *   Market: <UK|US>
+ *   Category: <one of the enum>
  */
-export function buildFlowAgentPrompt(kit: Style1Kit): string {
-  return `Before pasting: upload the Kalodata product image as the reference. Settings — Veo 3.1 Lite · 9:16 · 1 output (no faces, no speech in these clips, so there's no reason to pay Omni Flash rates).
+export function buildGoogleFlowToolInput(kit: Style1Kit): string {
+  return `Product Name: ${kit.productName}\nMarket: ${kit.market}\nCategory: ${kit.category}`;
+}
 
-We are making one TikTok "store discovery" video. Work in TWO STAGES and stop between them.
-
-Use the referenced product image as the exact product reference for everything. The product must stay identical and true to size in every image and every clip — no warping of the product or its label, no invented text, no redrawn branding.
-
-In every image and clip: no price tags, no watermarks, no shoppers, no people's faces. Hands and forearms only.
-
-═══════════════════════════════════════
-STAGE 1 — DO THIS NOW
-═══════════════════════════════════════
-Create 4 still images, 9:16 vertical, one output each. Two variations of each scene so I can pick the cleaner one.
-
-IMAGES 1 and 2 — two variations of:
-${kit.scene1.imagePrompt}
-
-IMAGES 3 and 4 — two variations of:
-${kit.scene2.imagePrompt}
-
-THEN STOP. Show me all four and wait. Do not generate any video until I reply with the two image numbers I want.
-
-═══════════════════════════════════════
-STAGE 2 — ONLY AFTER I REPLY
-═══════════════════════════════════════
-I will reply with two numbers, e.g. "1 and 3". The first is the store scene, the second is the home scene. Animate each chosen image into an 8-second vertical 9:16 clip with Veo 3.1 Lite, one output each, using the image as the FIRST FRAME.
-
-STORE CLIP —
-${kit.scene1.motionPrompt}
-
-HOME CLIP —
-${kit.scene2.motionPrompt}
-
-NO SPEECH, no voices, no music in either clip — the voiceover is added later in CapCut. Quiet ambient sound only: soft shop background for the store clip, quiet room tone for the home clip.
-
-No text on screen in either clip.`;
+/**
+ * Compose the ElevenLabs script the operator pastes into their
+ * saved voice. Part 1 + Part 2 back-to-back = ~16s voice file
+ * that plays across BOTH scenes (Part 1 over Scene 1, Part 2 over
+ * Scene 2) — this is the coach's confirmed reading of the SOP,
+ * overriding Step 6's "Scene 2 only" phrasing.
+ *
+ * Falls back to option 1 of each part when the operator hasn't
+ * picked a specific option yet — the script is always something
+ * the operator can paste, even mid-triage.
+ *
+ * Adds a blank line between Part 1 and Part 2 so ElevenLabs
+ * treats them as separate reads with a natural beat between —
+ * matches how the CapCut cut lands.
+ */
+export function buildElevenLabsScript(
+  kit: Style1Kit,
+  chosenPart1: string | null,
+  chosenPart2: string | null,
+): string {
+  const part1 = chosenPart1 || kit.copy.part1Options[0] || "";
+  const part2 = chosenPart2 || kit.copy.part2Options[0] || "";
+  if (!part1 && !part2) return "";
+  if (!part2) return part1;
+  if (!part1) return part2;
+  return `${part1}\n\n${part2}`;
 }
