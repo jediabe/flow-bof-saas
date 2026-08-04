@@ -30,6 +30,10 @@ interface NavItem {
 const PRIMARY: NavItem[] = [
   { href: "/dashboard", label: "Hub",              icon: "▦" },
   { href: "/analytics", label: "Shop Analytics",   icon: "$" },
+  // /discover is the TikHub-powered product discovery MVP —
+  // Hot / Top Ads / By Category feeds → bulk-import as Style 1
+  // batch → drops straight into mobile review.
+  { href: "/discover",  label: "Discover",         icon: "◎" },
   // /prompts is the Style 1 video-kit surface — Kalodata import,
   // mobile review + posting handoff, per-product Flow agent
   // scripts + copy options.
