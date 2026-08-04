@@ -355,3 +355,55 @@ export async function saveWorkspaceVoiceSettings(
   revalidatePath("/settings");
   return { ok: true, message: "Voice settings saved." };
 }
+
+/* ------------------------------------------------------------------
+ * CapCut template URL (Style 1)
+ *
+ * Store the operator's shared CapCut template link that pre-bakes
+ * all the styling (music, hook text style, sale text style, caption
+ * preset, timing). The mobile posting page renders it as a big
+ * "Open CapCut template" button per product so assembly drops to
+ * fill-in-the-blanks.
+ *
+ * Pure UX plumbing — no CapCut API integration. The operator
+ * maintains the template in their own CapCut account and updates
+ * the URL here if they rebuild the template.
+ * ---------------------------------------------------------------- */
+
+export async function getWorkspaceCapCutTemplateUrl(): Promise<{
+  url: string | null;
+}> {
+  const { workspace } = await getCurrentWorkspace();
+  const row = await loadOrCreateSettings(workspace.id);
+  return { url: row.capCutTemplateUrl ?? null };
+}
+
+export async function saveWorkspaceCapCutTemplateUrl(
+  formData: FormData,
+): Promise<{ ok: boolean; message: string }> {
+  const { workspace } = await getCurrentWorkspace();
+  const raw = String(formData.get("capCutTemplateUrl") ?? "").trim();
+  // Basic URL sanity — reject non-http(s) so we don't render a
+  // <a href> pointing at a javascript: or file: URI. Empty string
+  // clears the field.
+  let toSave: string | null = null;
+  if (raw.length > 0) {
+    if (!/^https?:\/\//i.test(raw)) {
+      return {
+        ok: false,
+        message: "Template URL must start with https:// (or http://).",
+      };
+    }
+    toSave = raw;
+  }
+  await loadOrCreateSettings(workspace.id);
+  await db.workspaceSettings.update({
+    where: { workspaceId: workspace.id },
+    data:  { capCutTemplateUrl: toSave },
+  });
+  revalidatePath("/settings");
+  return {
+    ok: true,
+    message: toSave ? "CapCut template URL saved." : "CapCut template URL cleared.",
+  };
+}

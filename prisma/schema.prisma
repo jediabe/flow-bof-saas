@@ -181,6 +181,15 @@ model WorkspaceSettings {
   elevenLabsVoiceIdUs    String?
   elevenLabsVoiceLabelUs String?
 
+  // Style 1 — CapCut template share URL. The operator builds the
+  // template once (all styling: music, hook text style, sale text
+  // style, caption preset, timing) then pastes the shareable link
+  // here. Mobile posting checklist renders it as a big "Open
+  // CapCut template" button per product so assembly drops from
+  // "start from scratch" to "fill 3 slots + type 2 text lines".
+  // Null when unset — mobile posting shows a Settings nudge.
+  capCutTemplateUrl String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }

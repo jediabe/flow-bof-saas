@@ -26,6 +26,10 @@ export interface WorkspaceVoicesForPosting {
   ukVoiceLabel: string | null;
   usVoiceId: string | null;
   usVoiceLabel: string | null;
+  /** Shared CapCut template URL — surfaced as "Open CapCut
+   *  template" button in the Style 1 checklist. Null = nudge to
+   *  configure on /settings. */
+  capCutTemplateUrl: string | null;
 }
 
 export interface MobilePostingProduct {

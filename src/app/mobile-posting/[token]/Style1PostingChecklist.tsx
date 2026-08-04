@@ -36,6 +36,7 @@ export interface Style1ChecklistWorkspaceVoices {
   ukVoiceLabel: string | null;
   usVoiceId: string | null;
   usVoiceLabel: string | null;
+  capCutTemplateUrl: string | null;
 }
 
 export interface Style1ChecklistProduct {
@@ -189,8 +190,71 @@ export default function Style1PostingChecklist({
         />
       </ChecklistCard>
 
-      {/* 4. Hashtags */}
-      <ChecklistCard title="4 · Hashtags" accent="blue">
+      {/* 4. CapCut assembly */}
+      <ChecklistCard title="4 · Assemble in CapCut" accent="blue">
+        {voices.capCutTemplateUrl ? (
+          <>
+            <a
+              href={voices.capCutTemplateUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="block w-full text-center text-sm py-3 rounded-xl bg-blue-600 active:bg-blue-700 text-white font-medium"
+            >
+              Open CapCut template
+            </a>
+            <p className="text-[11px] text-zinc-400 leading-relaxed mt-2">
+              Opens the shared template in CapCut (mobile or desktop —
+              whichever device you tap this on). Drop your files into
+              the marked slots + type the two text lines below.
+            </p>
+          </>
+        ) : (
+          <div className="rounded-xl border border-orange-500/40 bg-orange-500/10 p-3 text-[11px] text-orange-300 leading-relaxed">
+            No CapCut template configured. Set one up on the desktop
+            at <span className="font-medium">Settings → CapCut template</span> so
+            future posts open with one tap.
+          </div>
+        )}
+        <div className="mt-3 text-[11px] uppercase tracking-wide text-zinc-500">
+          Fill these slots
+        </div>
+        <ul className="text-[11px] text-zinc-400 leading-relaxed space-y-1.5">
+          <li>
+            <span className="text-zinc-200 font-medium">Scene 1 clip</span>{" "}
+            &rarr; the store walk-up you downloaded from Flow
+          </li>
+          <li>
+            <span className="text-zinc-200 font-medium">Scene 2 clip</span>{" "}
+            &rarr; the product-at-home clip you downloaded from Flow
+          </li>
+          <li>
+            <span className="text-zinc-200 font-medium">Voice</span>{" "}
+            &rarr; the ElevenLabs MP3 you generated in Step 2
+          </li>
+        </ul>
+        <div className="mt-3 text-[11px] uppercase tracking-wide text-zinc-500">
+          Type these into the text slots
+        </div>
+        <div className="space-y-2">
+          <ChosenTextReminder
+            slotLabel="Scene 1 text slot (hook)"
+            chosen={product.chosenCopyPart1}
+            fallbackHint="Use the Part 1 hook you picked above"
+          />
+          <ChosenTextReminder
+            slotLabel="Scene 2 text slot (sale text)"
+            chosen={product.chosenCopyPart3}
+            fallbackHint="Use the Part 3 sale text you picked above"
+          />
+        </div>
+        <p className="text-[11px] text-zinc-500 leading-relaxed mt-3">
+          Turn ON auto-captions on the voice track (small, low on screen)
+          before you export. Export 9:16, no transitions.
+        </p>
+      </ChecklistCard>
+
+      {/* 5. Hashtags */}
+      <ChecklistCard title="5 · Hashtags" accent="blue">
         <CopyPill
           label="Copy hashtag block"
           value={kit.hashtags.join(" ")}
@@ -202,8 +266,8 @@ export default function Style1PostingChecklist({
         </p>
       </ChecklistCard>
 
-      {/* 5. Post-time reminders */}
-      <ChecklistCard title="5 · Post on TikTok" accent="red">
+      {/* 6. Post-time reminders */}
+      <ChecklistCard title="6 · Post on TikTok" accent="red">
         <ul className="text-[11px] text-zinc-400 leading-relaxed space-y-1.5 list-disc list-inside">
           <li>
             Turn ON the{" "}
@@ -220,6 +284,78 @@ export default function Style1PostingChecklist({
         </ul>
       </ChecklistCard>
     </section>
+  );
+}
+
+/** CapCut fill-in-blanks reminder — shows the operator's picked
+ *  Part 1 / Part 3 text inline (with a copy button) so they can
+ *  drop it straight into the template's text slot. Falls back to
+ *  a "look above" hint when they haven't picked yet. */
+function ChosenTextReminder({
+  slotLabel,
+  chosen,
+  fallbackHint,
+}: {
+  slotLabel: string;
+  chosen: string | null;
+  fallbackHint: string;
+}) {
+  if (!chosen) {
+    return (
+      <div className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2">
+        <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-0.5">
+          {slotLabel}
+        </div>
+        <div className="text-[11px] text-zinc-500 italic">{fallbackHint}</div>
+      </div>
+    );
+  }
+  return (
+    <div className="rounded-xl border border-green-500/40 bg-green-500/5 px-3 py-2">
+      <div className="flex items-baseline justify-between gap-2 mb-1">
+        <div className="text-[10px] uppercase tracking-wide text-green-400">
+          {slotLabel}
+        </div>
+        <InlineCopyChip value={chosen} />
+      </div>
+      <div className="text-[12px] text-zinc-100 leading-relaxed">{chosen}</div>
+    </div>
+  );
+}
+
+/** Small copy chip for inline use inside the CapCut reminder rows. */
+function InlineCopyChip({ value }: { value: string }) {
+  const [copied, setCopied] = useState(false);
+  function copy() {
+    (async () => {
+      try {
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(value);
+        } else {
+          const ta = document.createElement("textarea");
+          ta.value = value;
+          ta.style.position = "fixed";
+          ta.style.opacity = "0";
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand("copy");
+          document.body.removeChild(ta);
+        }
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+      } catch {
+        // ignore
+      }
+    })();
+  }
+  return (
+    <button
+      type="button"
+      onClick={copy}
+      className="text-[10px] text-green-400 hover:underline"
+    >
+      {copied ? "✓ copied" : "copy"}
+    </button>
   );
 }
 

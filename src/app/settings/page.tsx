@@ -6,6 +6,7 @@ import AiProviderSettingsForm from "./AiProviderSettings";
 import AiPromptOverrides from "./AiPromptOverrides";
 import WorkspaceApiTokenPanel from "./WorkspaceApiTokenPanel";
 import WorkspaceVoicePanel from "./WorkspaceVoicePanel";
+import WorkspaceCapCutPanel from "./WorkspaceCapCutPanel";
 import {
   getMaskedAiSettings,
   setIpRiskChecksEnabled,
@@ -13,6 +14,7 @@ import {
   clearUnusualActivityCooldown,
   getWorkspaceApiTokenStatus,
   getWorkspaceVoiceSettings,
+  getWorkspaceCapCutTemplateUrl,
 } from "./actions";
 import { loadOrCreateSettings } from "@/lib/workspace-settings";
 import { UK_SYSTEM_PROMPT } from "@/lib/ai/uk-retail-prompts";
@@ -39,6 +41,7 @@ export default async function SettingsPage() {
   const ipRiskChecksEnabled = settingsRow.ipRiskChecksEnabled;
   const apiTokenStatus = await getWorkspaceApiTokenStatus();
   const voiceSettings = await getWorkspaceVoiceSettings();
+  const capCutSettings = await getWorkspaceCapCutTemplateUrl();
 
   // Cooldown derivation: how much longer until the gate releases?
   const cooldownMs = settingsRow.cooldownHours * 60 * 60 * 1000;
@@ -80,6 +83,10 @@ export default async function SettingsPage() {
 
       <Panel title="Voice setup (ElevenLabs)">
         <WorkspaceVoicePanel initial={voiceSettings} />
+      </Panel>
+
+      <Panel title="CapCut template">
+        <WorkspaceCapCutPanel initialUrl={capCutSettings.url} />
       </Panel>
 
       <Panel title="AI Providers">

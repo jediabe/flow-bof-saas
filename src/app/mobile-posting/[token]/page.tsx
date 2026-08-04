@@ -83,10 +83,12 @@ export default async function MobilePostingPage({
 
   if (!batch) notFound();
 
-  // Workspace voice settings — reminder-only. The Style 1
-  // checklist renders "paste script into voice: <label> (<id>)"
-  // for the market that matches this batch. Never sent to
-  // ElevenLabs; the operator generates audio manually.
+  // Workspace external-tool references — reminder-only. The
+  // Style 1 checklist renders these where relevant:
+  //   voice IDs/labels    → "paste script into voice: <label>"
+  //   CapCut template URL → "Open CapCut template" button
+  // Never used to hit any external API; the operator generates
+  // audio + edits video themselves.
   const ws = await db.workspaceSettings.findUnique({
     where: { workspaceId: batch.workspaceId },
     select: {
@@ -94,6 +96,7 @@ export default async function MobilePostingPage({
       elevenLabsVoiceLabelUk: true,
       elevenLabsVoiceIdUs: true,
       elevenLabsVoiceLabelUs: true,
+      capCutTemplateUrl: true,
     },
   });
   const voices: WorkspaceVoicesForPosting = {
@@ -101,6 +104,7 @@ export default async function MobilePostingPage({
     ukVoiceLabel: ws?.elevenLabsVoiceLabelUk ?? null,
     usVoiceId:    ws?.elevenLabsVoiceIdUs    ?? null,
     usVoiceLabel: ws?.elevenLabsVoiceLabelUs ?? null,
+    capCutTemplateUrl: ws?.capCutTemplateUrl ?? null,
   };
 
   const products: MobilePostingProduct[] = batch.products.map((p) => ({

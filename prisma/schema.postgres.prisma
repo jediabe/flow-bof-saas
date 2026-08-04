@@ -146,6 +146,9 @@ model WorkspaceSettings {
   elevenLabsVoiceIdUs    String?
   elevenLabsVoiceLabelUs String?
 
+  // Style 1 CapCut template URL. See SQLite schema for rationale.
+  capCutTemplateUrl String?
+
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 }
