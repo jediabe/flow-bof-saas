@@ -2029,6 +2029,73 @@ async function postTikHubShop(
   return json;
 }
 
+/**
+ * GET-flavored TikHub Shop caller for the public discovery
+ * endpoints. Same auth + error shape as postTikHubShop, but
+ * query-string params instead of JSON body — TikHub's shop
+ * discovery routes (hot selling, by category, top ads, product
+ * detail) return 405 on POST.
+ *
+ * Values are coerced to strings; nulls / undefineds are skipped.
+ */
+async function getTikHubShop(
+  path: string,
+  params: Record<string, string | number | undefined | null>,
+): Promise<unknown> {
+  const apiKey = (process.env.TIKHUB_API_KEY || "").trim();
+  if (!apiKey) {
+    throw new TikHubError(
+      "AUTH_MISSING",
+      "TIKHUB_API_KEY is unset. Add it to .env and restart the server.",
+    );
+  }
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v === undefined || v === null) continue;
+    qs.set(k, String(v));
+  }
+  const url = `${TIKHUB_BASE}${path}${qs.toString() ? `?${qs.toString()}` : ""}`;
+  let resp: Response;
+  try {
+    resp = await fetch(url, {
+      method: "GET",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Accept": "application/json",
+      },
+      signal: AbortSignal.timeout(45_000),
+    });
+  } catch (err) {
+    const e = err as Error;
+    throw new TikHubError(
+      "NETWORK",
+      `TikHub fetch failed: ${e.name}: ${e.message.slice(0, 200)}`,
+      undefined,
+      { url: maskUrl(url) },
+    );
+  }
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new TikHubError(
+      "HTTP_ERROR",
+      `TikHub returned ${resp.status}: ${text.slice(0, 300)}`,
+      resp.status,
+      { url: maskUrl(url) },
+    );
+  }
+  let json: unknown;
+  try {
+    json = await resp.json();
+  } catch (err) {
+    const e = err as Error;
+    throw new TikHubError(
+      "PARSE",
+      `TikHub response not JSON: ${e.message.slice(0, 200)}`,
+    );
+  }
+  return json;
+}
+
 /** Shape returned to /research callers per Shop-endpoint row. */
 export interface ShopMarketProduct {
   /** TikTok's product_id — join key across ShopProduct + TikTokProduct. */
@@ -2134,7 +2201,7 @@ export async function getHotSellingProducts(input?: {
   page?: number;
   region?: string;
 }): Promise<ShopMarketProduct[]> {
-  const raw = await postTikHubShop(ENDPOINTS.shopHotSelling, {
+  const raw = await getTikHubShop(ENDPOINTS.shopHotSelling, {
     page: input?.page ?? 1,
     region: input?.region ?? "GB",
   });
@@ -2150,7 +2217,7 @@ export async function getShopProductsByCategory(input: {
   page?: number;
   region?: string;
 }): Promise<ShopMarketProduct[]> {
-  const raw = await postTikHubShop(ENDPOINTS.shopByCategory, {
+  const raw = await getTikHubShop(ENDPOINTS.shopByCategory, {
     category_id: input.categoryId,
     page: input.page ?? 1,
     region: input.region ?? "GB",
@@ -2166,7 +2233,7 @@ export async function getShopProductsByCategory(input: {
 export async function getTopAdsProducts(input?: {
   region?: string;
 }): Promise<ShopMarketProduct[]> {
-  const raw = await postTikHubShop(ENDPOINTS.adsTopProducts, {
+  const raw = await getTikHubShop(ENDPOINTS.adsTopProducts, {
     region: input?.region ?? "GB",
   });
   return pluckShopProducts(raw);
@@ -2181,7 +2248,7 @@ export async function getTopAdsProducts(input?: {
 export async function getShopProductDetail(
   productId: string,
 ): Promise<ShopMarketProduct | null> {
-  const raw = await postTikHubShop(ENDPOINTS.shopProductDetail, {
+  const raw = await getTikHubShop(ENDPOINTS.shopProductDetail, {
     product_id: productId,
   });
   if (!raw || typeof raw !== "object") return null;
