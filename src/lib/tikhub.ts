@@ -2737,6 +2737,56 @@ function pluckImageUrls(d: Record<string, unknown>): string[] {
   return found.slice(0, 12);
 }
 
+/** Object keys we consume specially and MUST NOT re-visit during
+ *  the object-values recursion below. If we did re-visit them
+ *  we'd pick up every mirror URL individually (they all look like
+ *  image URLs on their own) — that's the "each image showing up
+ *  twice" bug operators reported.
+ */
+const IMAGE_MIRROR_LIST_KEYS = new Set([
+  "url_list",
+  "urlList",
+  "thumb_url_list",
+  "thumbUrlList",
+  "uri_list",
+]);
+
+/** Object keys that reliably contain "not the main product photo"
+ *  content — marketing infographics, UI config, shipping data,
+ *  A/B buckets. Skipping their subtrees during the image walk
+ *  keeps the 12-slot gallery focused on the actual product
+ *  carousel photos the operator wants for Google Flow paste.
+ *
+ *  `description` is the big one: it's a stringified JSON array of
+ *  typed content items (image | text | spacer) and TikTok sellers
+ *  routinely put 5-10 marketing infographic panels there. Those
+ *  images are useful for the description text extraction, but
+ *  they crowd out `product_model.images[]` (the real carousel)
+ *  when the walker visits keys in insertion order.
+ *
+ *  If we later decide description infographics ARE useful, easy
+ *  to remove one key from this set.
+ */
+const IMAGE_WALK_SKIP_KEYS = new Set([
+  // Marketing description blob — feature callouts, benefit
+  // graphics, "how it works" panels. Picked up separately by
+  // pluckSourceDescription for its text content; skipped here so
+  // it doesn't hoard gallery slots.
+  "description",
+  // Everything below: known-noise structural keys that never
+  // contain product photos operators would want in a gallery.
+  "logistic_model",   // shipping metadata
+  "page_config",      // UI component config (fe_config, ab_test)
+  "fe_config",        // frontend config
+  "ab_test",          // A/B buckets
+  "call_app",         // deep-link config
+  "banners",          // marketing banners
+  "popups",           // popup config
+  "wrappers",         // wrapper metadata
+  "safety_model",     // legal warnings
+  "shop_performance", // shop metadata
+]);
+
 function collectImageUrls(
   v: unknown,
   push: (u: string) => void,
@@ -2749,11 +2799,11 @@ function collectImageUrls(
   if (v === null || v === undefined) return;
   if (typeof v === "string") {
     if (looksLikeImageUrl(v)) push(v);
-    // TikTok Shop's product-detail response encodes some
-    // structured content (notably `description`) as a JSON
-    // string. Try to parse strings that look like JSON and
-    // recurse into the parsed shape so images buried inside
-    // {"type":"image","image":{"url_list":[...]}} get picked up.
+    // Some fields encode structured content as stringified JSON.
+    // Description USED to fall through here but it's now in the
+    // skip set (see IMAGE_WALK_SKIP_KEYS) so this branch is only
+    // exercised for other JSON-shaped strings TikHub might
+    // occasionally return.
     else if (looksLikeJsonPayload(v)) {
       try {
         const parsed = JSON.parse(v);
@@ -2775,16 +2825,14 @@ function collectImageUrls(
     const singleUrl = firstString(o.url, o.URL, o.image_url, o.imageUrl);
     if (singleUrl && looksLikeImageUrl(singleUrl)) push(singleUrl);
     // url_list / thumb_url_list / uri_list are TikTok's mirror
-    // arrays — same image at different CDN edges. Take only the
-    // first URL per list so the gallery doesn't fill with dupes.
-    const mirrorLists = [
-      o.url_list,
-      o.urlList,
-      o.thumb_url_list,
-      o.thumbUrlList,
-      o.uri_list,
-    ];
-    for (const list of mirrorLists) {
+    // arrays — same image at different CDN edges. Take ONLY the
+    // first URL per list, then explicitly skip these keys during
+    // the values-recursion below. Prior versions of this code
+    // took the first URL AND then recursed into the array again
+    // via Object.values, picking up every additional mirror as
+    // its own gallery entry.
+    for (const key of IMAGE_MIRROR_LIST_KEYS) {
+      const list = o[key];
       if (Array.isArray(list)) {
         for (const u of list) {
           if (typeof u === "string" && looksLikeImageUrl(u)) {
@@ -2794,10 +2842,14 @@ function collectImageUrls(
         }
       }
     }
-    // Then recurse into everything so we catch nested {images: [...]}
-    // and {sku: [{image: {url_list: [...]}}]} shapes.
-    for (const val of Object.values(o)) {
-      collectImageUrls(val, push, depth + 1);
+    // Recurse into remaining keys — skip:
+    //   - mirror list keys (already processed; skipping avoids
+    //     re-picking-up the second mirror)
+    //   - noise keys (description marketing, UI config, etc.)
+    for (const key of Object.keys(o)) {
+      if (IMAGE_MIRROR_LIST_KEYS.has(key)) continue;
+      if (IMAGE_WALK_SKIP_KEYS.has(key)) continue;
+      collectImageUrls(o[key], push, depth + 1);
     }
   }
 }
