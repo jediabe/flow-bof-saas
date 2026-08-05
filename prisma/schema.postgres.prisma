@@ -298,6 +298,11 @@ model Product {
   // TikHub source data — see SQLite schema for details.
   sourceImages       String?
   sourceDescription  String?
+  // Enrichment status. See SQLite schema for full docs.
+  //   null           = never attempted OR last attempt succeeded
+  //   <human string> = last attempt failed; UI shows red banner
+  enrichmentError       String?
+  enrichmentAttemptedAt DateTime?
   // Phase-5 mobile posting workflow status. Independent of
   // reviewStatus — defaults to "needs_posting" until the user
   // marks it posted via the mobile posting QR page.

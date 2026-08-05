@@ -1192,6 +1192,8 @@ function ProductAssets({ product }: { product: BatchPromptsProduct }) {
   const primary = product.referenceImageUrl || product.imageUrl;
   const gallery = product.sourceImages;
   const desc = product.sourceDescription;
+  const err = product.enrichmentError;
+  const attemptedAt = product.enrichmentAttemptedAt;
   // Absolute URL for the primary image so "Copy URL" gives the
   // operator a paste-able link. Uses window.location.origin when
   // referenceImageUrl is app-relative (typical — /uploads/...);
@@ -1203,13 +1205,28 @@ function ProductAssets({ product }: { product: BatchPromptsProduct }) {
     return window.location.origin + primary;
   }, [primary]);
 
-  if (!primary && gallery.length === 0 && !desc) return null;
+  // Render nothing only if we truly have zero to show — assets,
+  // description, AND error banner all empty.
+  if (!primary && gallery.length === 0 && !desc && !err) return null;
 
   return (
     <div className="panel p-4 space-y-3">
       <div className="text-[11px] uppercase tracking-[0.14em] text-muted">
         Product assets
       </div>
+      {err && (
+        <div className="rounded-xl border border-bad/40 bg-bad/10 p-3 text-[12px] text-bad leading-relaxed">
+          <div className="font-semibold mb-0.5">
+            TikHub enrichment failed
+          </div>
+          <div className="text-text">{err}</div>
+          {attemptedAt && (
+            <div className="text-[10px] text-muted2 mt-1">
+              Last attempted {new Date(attemptedAt).toLocaleString()}
+            </div>
+          )}
+        </div>
+      )}
       {primary && (
         <div className="flex items-start gap-4">
           {/* eslint-disable-next-line @next/next/no-img-element */}

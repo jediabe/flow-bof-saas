@@ -111,17 +111,31 @@ export async function enrichProductFromTikHub(input: {
   if (!row) return "no-op";
 
   const productIdOnTikTok = extractTikTokProductId(row.tiktokUrl);
-  if (!productIdOnTikTok) return "no-product-id";
+  if (!productIdOnTikTok) {
+    await recordAttempt(
+      row.id,
+      row.tiktokUrl
+        ? `No TikTok Shop product ID found in URL "${row.tiktokUrl.slice(0, 80)}"`
+        : "No TikTok Shop URL on this row",
+    );
+    return "no-product-id";
+  }
 
+  const region = input.region ?? "GB";
   let detail;
   try {
     detail = await getShopProductDetailEnriched(productIdOnTikTok, {
-      region: input.region,
+      region,
     });
   } catch (err) {
+    const raw = (err as Error).message || "unknown error";
     console.error(
       `[tikhub-enrichment] fetch failed for product=${input.productId} tiktok_product=${productIdOnTikTok}:`,
       err,
+    );
+    await recordAttempt(
+      row.id,
+      `TikHub API error (region ${region}): ${raw.slice(0, 180)}`,
     );
     return "api-failed";
   }
@@ -131,7 +145,13 @@ export async function enrichProductFromTikHub(input: {
   // issue), and (b) TikHub returned exists=false meaning the
   // product isn't in the queried region. Case (b) is the
   // ~always-culprit here so we bias the diagnostic toward it.
-  if (!detail) return "not-found";
+  if (!detail) {
+    await recordAttempt(
+      row.id,
+      `Not found in TikHub catalog (region ${region}) — product may be delisted, or the batch region doesn't match this product's actual shop region. Product ID: ${productIdOnTikTok}`,
+    );
+    return "not-found";
+  }
 
   // Build the update payload. Source-* fields ALWAYS overwrite
   // (they're fresh TikHub data, not operator picks). Discount
@@ -235,7 +255,47 @@ export async function enrichProductFromTikHub(input: {
     }
   }
 
+  // Success — clear any prior enrichmentError, stamp the attempt.
+  await recordAttempt(row.id, null);
+
   return didWrite ? "updated" : "no-op";
+}
+
+/** Update Product.enrichmentAttemptedAt + enrichmentError in one
+ *  write. Pass null for the error to clear it on success; pass a
+ *  human-readable string on failure. Failures here are swallowed
+ *  (logged only) so that a missing column on an un-migrated
+ *  deployment doesn't break the enrichment result the caller
+ *  wanted to return. */
+async function recordAttempt(
+  productId: string,
+  error: string | null,
+): Promise<void> {
+  try {
+    await db.product.update({
+      where: { id: productId },
+      data: {
+        enrichmentError:       error,
+        enrichmentAttemptedAt: new Date(),
+      },
+    });
+  } catch (err) {
+    const msg = (err as Error).message || "";
+    // Un-migrated deployment (schema hasn't been prisma-db-push'd
+    // since the fields were added) — swallow silently.
+    if (
+      msg.includes("enrichmentError") ||
+      msg.includes("enrichmentAttemptedAt") ||
+      msg.includes("Unknown arg") ||
+      msg.includes("no such column")
+    ) {
+      return;
+    }
+    console.warn(
+      `[tikhub-enrichment] recordAttempt failed for product=${productId}:`,
+      err,
+    );
+  }
 }
 
 /**

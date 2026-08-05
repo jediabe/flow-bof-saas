@@ -751,6 +751,15 @@ export interface BatchPromptsProduct {
    *  ≤2000 chars). Reference material for the operator; not fed
    *  to the LLM. Null when unavailable. */
   sourceDescription: string | null;
+  /** Last enrichment error message, if the most recent TikHub
+   *  attempt for this product failed. Null when the last attempt
+   *  succeeded or nothing has been tried yet. UI surfaces this
+   *  as a red banner in the modal so operators can see per-
+   *  product failures without SSHing for docker logs. */
+  enrichmentError: string | null;
+  /** Timestamp of the last enrichment attempt (ISO string), or
+   *  null if nothing has been attempted yet. */
+  enrichmentAttemptedAt: string | null;
 }
 
 export interface BatchPromptsCounts {
@@ -848,6 +857,8 @@ export async function getBatchPromptsState(
           chosenCopyPart3: true,
           sourceImages: true,
           sourceDescription: true,
+          enrichmentError: true,
+          enrichmentAttemptedAt: true,
         },
       },
     },
@@ -912,6 +923,10 @@ export async function getBatchPromptsState(
       chosenCopyPart3: p.chosenCopyPart3 ?? null,
       sourceImages: parseSourceImages(p.sourceImages),
       sourceDescription: p.sourceDescription ?? null,
+      enrichmentError: p.enrichmentError ?? null,
+      enrichmentAttemptedAt: p.enrichmentAttemptedAt
+        ? p.enrichmentAttemptedAt.toISOString()
+        : null,
     };
   });
 

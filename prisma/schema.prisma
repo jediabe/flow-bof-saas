@@ -377,6 +377,21 @@ model Product {
   //   the listing, capped at 2000 chars. Null when unavailable.
   sourceImages            String?
   sourceDescription       String?
+  // Enrichment status — populated by tikhub-enrichment.ts every
+  // time it attempts a call for this product.
+  //   null           = never attempted OR last attempt fully
+  //                     succeeded and had nothing to log
+  //   <human string> = last attempt failed in some way. Surfaced
+  //                     inline on the /prompts modal as a red
+  //                     banner so operators can see what went
+  //                     wrong without SSHing for docker logs.
+  //     e.g. "not-found in region GB — product may be delisted"
+  //          "TikHub API error: returned 400"
+  //          "no TikTok Shop URL in this row"
+  enrichmentError         String?
+  // Timestamp of the last enrichment attempt (successful or not).
+  // Lets the UI say "attempted 3 min ago" alongside the error.
+  enrichmentAttemptedAt   DateTime?
   // Phase-5 mobile posting workflow status. Independent of
   // reviewStatus — a product can be "approved" for generation AND
   // separately "posted" after the user has uploaded its video to
