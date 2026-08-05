@@ -968,6 +968,33 @@ export async function reEnrichBatchFromTikHub(input: {
     if (report.failedApi > 0) parts.push(`${report.failedApi} API failure(s)`);
     if (report.failedNoProductId > 0)
       parts.push(`${report.failedNoProductId} without a TikTok product URL`);
+
+    // Kick off Style 1 copy regeneration for products whose kit
+    // is now stale (discount changed) or missing entirely. Fixes
+    // the "[NEEDS DISCOUNT %]" placeholder problem when a product
+    // was generated pre-enrichment and now has a discount to
+    // paint into the copy. Fire-and-forget — the /prompts UI
+    // will refresh in place as each kit lands.
+    try {
+      const { triggerStyle1GenerationIfDiscountReady } = await import(
+        "@/lib/tikhub-enrichment"
+      );
+      const genReport = await triggerStyle1GenerationIfDiscountReady({
+        batchId: batch.id,
+        workspaceId: workspace.id,
+      });
+      if (genReport.queued > 0) {
+        parts.push(
+          `Style 1 copy re-generation queued for ${genReport.queued} product(s)`,
+        );
+      }
+    } catch (err) {
+      console.error(
+        `[re-enrich] auto-gen queue threw for batch=${batch.id}:`,
+        err,
+      );
+    }
+
     return { ok: true, message: parts.join(" · ") + "." };
   } catch (err) {
     return {

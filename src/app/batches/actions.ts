@@ -1350,6 +1350,32 @@ export async function importKalodataXlsx(
           `${enrichReport.failedNoProductId} row(s) had no TikTok Shop URL`,
         );
       }
+
+      // Kick off Style 1 copy gen for products where enrichment
+      // gave us a discount %. Fire-and-forget in the background
+      // so the operator lands on /prompts with copy already
+      // generating (or done) instead of empty placeholders that
+      // only get filled in after mobile-review approval.
+      try {
+        const { triggerStyle1GenerationIfDiscountReady } = await import(
+          "@/lib/tikhub-enrichment"
+        );
+        const genReport = await triggerStyle1GenerationIfDiscountReady({
+          batchId: batch.id,
+          workspaceId: workspace.id,
+        });
+        if (genReport.queued > 0) {
+          parts.push(
+            `Style 1 copy queued for ${genReport.queued} product(s) in the background`,
+          );
+        }
+      } catch (err) {
+        console.error(
+          `[kalodata] auto-gen queue threw for batch=${batch.id}:`,
+          err,
+        );
+      }
+
       enrichmentSummary = parts.length > 0 ? ` ${parts.join(". ")}.` : "";
     } catch (err) {
       console.error(

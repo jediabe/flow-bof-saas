@@ -288,3 +288,107 @@ export async function enrichBatchFromTikHub(input: {
   );
   return report;
 }
+
+/**
+ * Post-enrichment Style 1 auto-generation.
+ *
+ * The operator asked for discount percentages to be "populated
+ * BEFORE approvals" — i.e. ready copy waiting on mobile review,
+ * not empty placeholders that only get filled in after tap-to-
+ * approve. This helper closes that gap.
+ *
+ * Walks every product in the batch with a discountPercent set,
+ * checks whether its current style1Kit reflects that discount,
+ * and fires generateAiPromptForProduct in the background for
+ * anything mismatched. Idempotent — a product with a kit that
+ * already contains the right discount is skipped.
+ *
+ * Kicks off a fire-and-forget loop so the caller (import or
+ * re-enrich) can return quickly. Individual gen failures are
+ * logged but don't abort the batch.
+ *
+ * The client sees kits appear as they finish. The existing
+ * /prompts poll (or a page refresh) picks them up.
+ *
+ * Not-yet-implemented follow-up: mobile posting page needs a
+ * discount % override input that re-fires this helper when the
+ * operator notices the enriched value is stale. Right now the
+ * only override paths are mobile-review (blocking approval) and
+ * /prompts Regenerate button (batch-wide).
+ */
+export async function triggerStyle1GenerationIfDiscountReady(input: {
+  batchId: string;
+  workspaceId: string;
+}): Promise<{ queued: number }> {
+  const products = await db.product.findMany({
+    where: {
+      batchId: input.batchId,
+      deletedAt: null,
+      discountPercent: { not: null },
+    },
+    select: { id: true, style1Kit: true, discountPercent: true },
+  });
+  // Filter to products whose current kit doesn't reflect the
+  // current discount value:
+  //   - no kit at all → needs gen
+  //   - kit exists but stored discount != current → needs regen
+  //   - kit exists and matches → skip
+  const needsGen = products.filter((p) => {
+    if (!p.style1Kit) return true;
+    try {
+      const kit = JSON.parse(p.style1Kit) as { discountPercent?: number | null };
+      return (kit.discountPercent ?? null) !== (p.discountPercent ?? null);
+    } catch {
+      // Malformed kit → safest to regen.
+      return true;
+    }
+  });
+  if (needsGen.length === 0) {
+    return { queued: 0 };
+  }
+
+  console.log(
+    `[tikhub-enrichment] queueing style1 gen for ${needsGen.length}/${products.length} products in batch=${input.batchId}`,
+  );
+
+  // Fire-and-forget loop. Same pattern the post-approve
+  // generation uses: Promise.resolve().then(...) yields one
+  // microtask then runs the loop to completion in the
+  // background. Node in docker keeps it alive until it finishes.
+  const bgBatchId = input.batchId;
+  const bgProductIds = needsGen.map((p) => p.id);
+  Promise.resolve().then(async () => {
+    const { generateAiPromptForProduct } = await import(
+      "@/app/batches/actions"
+    );
+    let ok = 0;
+    let fail = 0;
+    for (const productId of bgProductIds) {
+      try {
+        const r = await generateAiPromptForProduct({
+          batchId: bgBatchId,
+          productId,
+          force: true,
+        });
+        if (r.ok) ok += 1;
+        else {
+          fail += 1;
+          console.error(
+            `[tikhub-enrichment.gen] not-ok product=${productId}: ${r.message}`,
+          );
+        }
+      } catch (err) {
+        fail += 1;
+        console.error(
+          `[tikhub-enrichment.gen] threw product=${productId}:`,
+          err,
+        );
+      }
+    }
+    console.log(
+      `[tikhub-enrichment.gen] batch=${bgBatchId} done: ${ok}/${bgProductIds.length} OK, ${fail} failed`,
+    );
+  });
+
+  return { queued: needsGen.length };
+}
