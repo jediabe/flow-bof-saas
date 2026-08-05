@@ -364,6 +364,19 @@ model Product {
   // "sale". Null = fall back to voucher/coupon per market. The
   // LLM copy generator picks the exact wording from this field.
   discountType            String?
+  // TikHub enrichment cache — populated on Kalodata import from
+  // fetch_product_detail_v3. Both fields are SOURCE data, not
+  // generated artifacts. The /prompts modal surfaces them so the
+  // operator can copy image URLs into Google Flow and reference
+  // the description for sanity-check + LLM context.
+  //
+  // sourceImages: JSON-encoded array of publicly-accessible TikTok
+  //   CDN image URLs (up to 8). Includes primary + gallery. Null
+  //   or empty when TikHub returned no images.
+  // sourceDescription: HTML-stripped product description text from
+  //   the listing, capped at 2000 chars. Null when unavailable.
+  sourceImages            String?
+  sourceDescription       String?
   // Phase-5 mobile posting workflow status. Independent of
   // reviewStatus — a product can be "approved" for generation AND
   // separately "posted" after the user has uploaded its video to

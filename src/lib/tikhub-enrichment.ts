@@ -1,22 +1,16 @@
 /**
  * Kalodata-import auto-enrichment via TikHub.
  *
- * When the operator uploads a Kalodata XLSX, each row already gives
- * us a productName + tiktokUrl + imgUrl + category. This module
- * takes the tiktokUrl, extracts the product id, calls TikHub's
- * fetch_product_detail_v3, and pushes the returned discount %,
- * discount type, commission rate, and (if better) image URL onto
- * the Product row.
+ * Runs SYNCHRONOUSLY as part of the Kalodata import — the operator
+ * hits Upload and lands on a fully-populated /prompts a couple of
+ * seconds later, with discount %, discount type, source images,
+ * and source description already on every product row.
  *
- * Effect: the operator's mobile review is a tap-to-approve for
- * every product where TikHub returned discount data, instead of
- * having to look up the % on each TikTok Shop page manually.
- *
- * Runs strictly in the background — the Kalodata import returns
- * immediately after creating the Product rows; enrichment fires
- * as a fire-and-forget loop. Individual TikHub failures never
- * roll back the Product row; we just leave the discount fields
- * null so the operator falls back to manual entry.
+ * Concurrency-capped parallel loop: up to CONCURRENCY products
+ * enriching at once so a 30-row Kalodata sheet finishes in ~10s
+ * instead of 30+ sequential seconds. Individual TikHub failures
+ * never roll back the Product row; we just leave the enrichment
+ * fields empty so the operator falls back to manual entry.
  */
 
 import { db } from "@/lib/db";
@@ -26,6 +20,11 @@ import {
 } from "@/lib/tikhub";
 import { downloadProductImage } from "@/lib/kalodata";
 import { upsertProductImage } from "@/lib/product-images";
+
+/** How many TikHub calls to run in parallel. Empirically 5 gives
+ *  ~5x speedup without tripping rate limits on a typical
+ *  workspace's TIKHUB_API_KEY tier. Lower if we start seeing 429s. */
+const CONCURRENCY = 5;
 
 export interface EnrichmentReport {
   attempted: number;
@@ -43,10 +42,14 @@ export interface EnrichmentReport {
  *
  * Never overwrites operator-provided data: if the row already has
  * a discountPercent (e.g. an operator has already reviewed it),
- * we leave that untouched. Same for discountType. Image is only
- * downloaded when the row still has no local referenceImageUrl.
+ * we leave that untouched. Same for discountType.
  *
- * Returns "no-product-id" | "api-failed" | "updated" | "no-op".
+ * Also populates the source-* fields (sourceImages,
+ * sourceDescription) which are pure reference data — the operator
+ * copies image URLs into Google Flow and reads the description
+ * for context.
+ *
+ * Returns which branch was taken so the batch loop can aggregate.
  */
 export async function enrichProductFromTikHub(input: {
   productId: string;
@@ -82,16 +85,26 @@ export async function enrichProductFromTikHub(input: {
   }
   if (!detail) return "api-failed";
 
-  // Only write fields the row doesn't already have — operator wins.
+  // Build the update payload. Source-* fields ALWAYS overwrite
+  // (they're fresh TikHub data, not operator picks). Discount
+  // fields ONLY overwrite when the row has no operator input yet.
   const updateData: {
     discountPercent?: number | null;
     discountType?: string | null;
+    sourceImages?: string | null;
+    sourceDescription?: string | null;
   } = {};
   if (row.discountPercent == null && detail.discountPercent != null) {
     updateData.discountPercent = detail.discountPercent;
   }
   if (!row.discountType && detail.discountType) {
     updateData.discountType = detail.discountType;
+  }
+  if (detail.additionalImages.length > 0) {
+    updateData.sourceImages = JSON.stringify(detail.additionalImages);
+  }
+  if (detail.sourceDescription) {
+    updateData.sourceDescription = detail.sourceDescription;
   }
 
   let didWrite = false;
@@ -103,19 +116,24 @@ export async function enrichProductFromTikHub(input: {
       });
       didWrite = true;
     } catch (err) {
-      // discountType column might be missing on an un-migrated
-      // deployment — fall back to updating just discountPercent.
+      // Any of the new columns might be missing on an un-migrated
+      // deployment. Fall back to updating just the fields we're
+      // confident have existed for a while (discountPercent shipped
+      // long before source-*).
       const msg = (err as Error).message || "";
-      if (msg.includes("discountType") || msg.includes("Unknown arg `discountType`")) {
+      const looksLikeMissingColumn =
+        msg.includes("discountType") ||
+        msg.includes("sourceImages") ||
+        msg.includes("sourceDescription") ||
+        msg.includes("Unknown arg") ||
+        msg.includes("no such column");
+      if (looksLikeMissingColumn && updateData.discountPercent != null) {
         try {
-          const { discountPercent } = updateData;
-          if (discountPercent != null) {
-            await db.product.update({
-              where: { id: row.id },
-              data:  { discountPercent },
-            });
-            didWrite = true;
-          }
+          await db.product.update({
+            where: { id: row.id },
+            data:  { discountPercent: updateData.discountPercent },
+          });
+          didWrite = true;
         } catch (err2) {
           console.error(
             `[tikhub-enrichment] update fallback failed for product=${input.productId}:`,
@@ -132,9 +150,8 @@ export async function enrichProductFromTikHub(input: {
   }
 
   // If TikHub returned a better image and we don't yet have a local
-  // reference image, download + attach it. Skips silently on any
-  // failure — the row can still be reviewed with the original
-  // Kalodata image (or none).
+  // reference image (Kalodata's failed), download + attach it.
+  // Skips silently on any failure.
   if (!row.referenceImageUrl && detail.imageUrlRemote) {
     try {
       const dl = await downloadProductImage({
@@ -162,9 +179,13 @@ export async function enrichProductFromTikHub(input: {
 }
 
 /**
- * Enrich every product in a batch. Sequential to keep TikHub load
- * reasonable — a 30-product batch takes ~30-60s. Runs strictly in
- * the background from the Kalodata import path.
+ * Enrich every product in a batch. Concurrency-capped parallel
+ * loop — up to CONCURRENCY products enriching at once so a 30-row
+ * sheet finishes in ~10s instead of 30+ sequential seconds.
+ *
+ * Called SYNCHRONOUSLY from importKalodataXlsx (awaited). The
+ * import response includes the aggregate report so the caller can
+ * message success/partial-success cleanly.
  */
 export async function enrichBatchFromTikHub(input: {
   batchId: string;
@@ -181,28 +202,45 @@ export async function enrichBatchFromTikHub(input: {
     failedApi: 0,
     updated: 0,
   };
-  for (const r of rows) {
-    const result = await enrichProductFromTikHub({
-      productId: r.id,
-      workspaceId: input.workspaceId,
-      batchId: input.batchId,
-    });
-    switch (result) {
-      case "updated":
-        report.succeeded += 1;
-        report.updated += 1;
-        break;
-      case "no-op":
-        report.succeeded += 1;
-        break;
-      case "no-product-id":
-        report.failedNoProductId += 1;
-        break;
-      case "api-failed":
-        report.failedApi += 1;
-        break;
+
+  // Simple concurrency-limited queue: worker functions each pull
+  // ids off a shared cursor until the queue is empty. Preserves
+  // ordering only within a worker; overall order is best-effort.
+  let cursor = 0;
+  async function worker() {
+    while (true) {
+      const i = cursor;
+      cursor += 1;
+      if (i >= rows.length) return;
+      const r = rows[i];
+      const result = await enrichProductFromTikHub({
+        productId: r.id,
+        workspaceId: input.workspaceId,
+        batchId: input.batchId,
+      });
+      switch (result) {
+        case "updated":
+          report.succeeded += 1;
+          report.updated += 1;
+          break;
+        case "no-op":
+          report.succeeded += 1;
+          break;
+        case "no-product-id":
+          report.failedNoProductId += 1;
+          break;
+        case "api-failed":
+          report.failedApi += 1;
+          break;
+      }
     }
   }
+
+  const workerCount = Math.min(CONCURRENCY, rows.length);
+  await Promise.all(
+    Array.from({ length: workerCount }, () => worker()),
+  );
+
   console.log(
     `[tikhub-enrichment] batch=${input.batchId} done: ${report.updated}/${report.attempted} updated · ${report.failedApi} api-failed · ${report.failedNoProductId} missing product id`,
   );

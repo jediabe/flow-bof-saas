@@ -856,6 +856,12 @@ function Style1KitContents({
 
   return (
     <>
+      {/* 0. Product images + description — primary reference for
+          Google Flow. Big main image, quick-copy image URL,
+          gallery strip below (from TikHub), collapsible source
+          description underneath. */}
+      <ProductAssets product={product} />
+
       {/* 1. Google Flow tool input */}
       <div className="card-accent-blue p-4 space-y-3">
         <div className="flex items-baseline justify-between gap-2">
@@ -1001,6 +1007,127 @@ function LegacyProductContents({
         </div>
       )}
     </>
+  );
+}
+
+/** Product assets block — primary reference image (big) with a
+ *  quick-copy image URL button, TikHub gallery strip below, and
+ *  a collapsible source description reveal. Renders on top of
+ *  the modal so it's the first thing the operator sees; the
+ *  image is what they need for Google Flow paste. */
+function ProductAssets({ product }: { product: BatchPromptsProduct }) {
+  const primary = product.referenceImageUrl || product.imageUrl;
+  const gallery = product.sourceImages;
+  const desc = product.sourceDescription;
+  // Absolute URL for the primary image so "Copy URL" gives the
+  // operator a paste-able link. Uses window.location.origin when
+  // referenceImageUrl is app-relative (typical — /uploads/...);
+  // TikHub CDN URLs already come absolute.
+  const primaryAbs = useMemo(() => {
+    if (!primary) return "";
+    if (/^https?:\/\//i.test(primary)) return primary;
+    if (typeof window === "undefined") return primary;
+    return window.location.origin + primary;
+  }, [primary]);
+
+  if (!primary && gallery.length === 0 && !desc) return null;
+
+  return (
+    <div className="panel p-4 space-y-3">
+      <div className="text-[11px] uppercase tracking-[0.14em] text-muted">
+        Product assets
+      </div>
+      {primary && (
+        <div className="flex items-start gap-4">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={primary}
+            alt={product.productName}
+            className="w-40 h-40 rounded-xl object-cover border border-border bg-panel2 flex-shrink-0"
+          />
+          <div className="flex-1 min-w-0 space-y-2">
+            <p className="text-[11px] text-muted leading-relaxed">
+              Reference image for Google Flow. Right-click →
+              Save image, or use the buttons below.
+            </p>
+            <div className="flex gap-2 flex-wrap">
+              <CopyButton text={primaryAbs} label="Copy image URL" />
+              <a
+                href={primary}
+                download={`${product.productName.replace(/[^\w-]+/g, "_")}.jpg`}
+                className="text-[11px] px-3 py-1.5 rounded-lg border border-border hover:border-border-strong hover:bg-panel2 text-muted hover:text-text transition-colors inline-flex items-center gap-1"
+              >
+                Download image
+              </a>
+            </div>
+          </div>
+        </div>
+      )}
+      {gallery.length > 0 && (
+        <div className="space-y-1.5">
+          <div className="text-[10px] uppercase tracking-[0.14em] text-muted2">
+            From TikHub · {gallery.length} image{gallery.length === 1 ? "" : "s"}
+          </div>
+          <div className="flex gap-2 overflow-x-auto pb-1">
+            {gallery.map((url, i) => (
+              <GalleryThumb key={i} url={url} index={i + 1} />
+            ))}
+          </div>
+        </div>
+      )}
+      {desc && (
+        <details className="pt-1">
+          <summary className="cursor-pointer text-[11px] text-muted hover:text-text">
+            Source description ({desc.length} chars)
+          </summary>
+          <p className="mt-2 text-[12px] text-muted leading-relaxed max-h-48 overflow-y-auto whitespace-pre-wrap">
+            {desc}
+          </p>
+        </details>
+      )}
+    </div>
+  );
+}
+
+/** One thumbnail in the TikHub gallery strip. Click copies the
+ *  URL to the clipboard AND opens the image in a new tab so the
+ *  operator can save it. */
+function GalleryThumb({ url, index }: { url: string; index: number }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <a
+      href={url}
+      target="_blank"
+      rel="noopener noreferrer"
+      onClick={() => {
+        (async () => {
+          try {
+            if (navigator.clipboard && window.isSecureContext) {
+              await navigator.clipboard.writeText(url);
+            }
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1500);
+          } catch {
+            // ignore
+          }
+        })();
+      }}
+      className="relative flex-shrink-0 w-16 h-16 rounded-lg overflow-hidden border border-border bg-panel2 hover:border-border-strong"
+      title={`Copy URL + open image ${index}`}
+    >
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={url}
+        alt={`Image ${index}`}
+        className="w-full h-full object-cover"
+        referrerPolicy="no-referrer"
+      />
+      {copied && (
+        <div className="absolute inset-0 bg-ok/40 flex items-center justify-center text-[10px] text-white font-medium">
+          copied
+        </div>
+      )}
+    </a>
   );
 }
 
@@ -1249,9 +1376,14 @@ function HookRow({ label, text }: { label: string; text: string }) {
 function CopyButton({
   text,
   small = false,
+  label,
 }: {
   text: string;
   small?: boolean;
+  /** Override the button's idle text. Defaults to "copy". Used
+   *  for buttons where the tap surface is bigger than a bare
+   *  icon-style copy affordance ("Copy image URL", etc.). */
+  label?: string;
 }) {
   const [copied, setCopied] = useState(false);
   function onClick() {
@@ -1281,13 +1413,15 @@ function CopyButton({
       type="button"
       onClick={onClick}
       className={
-        small
+        label
+          ? "text-[11px] px-3 py-1.5 rounded-lg border border-border hover:border-border-strong hover:bg-panel2 text-muted hover:text-text transition-colors"
+          : small
           ? "text-[10px] text-muted hover:text-accent transition-colors px-1.5 py-0.5"
           : "text-[11px] text-muted hover:text-accent transition-colors px-2 py-1"
       }
       title="Copy to clipboard"
     >
-      {copied ? "✓ copied" : "copy"}
+      {copied ? "✓ copied" : (label ?? "copy")}
     </button>
   );
 }

@@ -2323,7 +2323,9 @@ export interface ShopProductDetailEnriched {
   category: string | undefined;
   /** Discount percentage (1..100) surfaced by the listing itself —
    *  a live voucher / coupon / sale on TikTok Shop right now. Null
-   *  when no discount is active. */
+   *  when no discount is active. When multiple SKU variants exist,
+   *  this is the MIN discount across variants (safe default so we
+   *  don't advertise a % the operator can't actually deliver). */
   discountPercent: number | null;
   /** Best guess of the discount mechanism. TikHub responses distinguish
    *  vouchers/coupons (claimable, price stays list) from sales (sticker
@@ -2333,6 +2335,16 @@ export interface ShopProductDetailEnriched {
   /** True when the product returned any commission signal at all.
    *  Used to auto-tick the affiliate hint in the review UI. */
   isAffiliate: boolean;
+  /** Additional image URLs scraped from the response (main image
+   *  plus gallery). Publicly-accessible TikTok CDN URLs — the /prompts
+   *  modal surfaces them as a quick-copy strip for paste into Google
+   *  Flow. Capped at 8. First item usually the primary product image. */
+  additionalImages: string[];
+  /** Product description text from the listing. HTML stripped, capped
+   *  at 2000 chars. Useful reference material for the LLM copy pass
+   *  and for the operator to sanity-check what the product actually
+   *  does before approving. Null when TikHub returned no description. */
+  sourceDescription: string | null;
 }
 
 /**
@@ -2368,24 +2380,49 @@ export async function getShopProductDetailEnriched(
   const d = detail as Record<string, unknown>;
 
   const discount = pluckDiscount(d);
+  const additionalImages = pluckImageUrls(d);
+  const sourceDescription = pluckSourceDescription(d);
 
   return {
     ...base,
     discountPercent: discount.percent,
     discountType: discount.type,
     isAffiliate: base.commissionRate > 0,
+    additionalImages,
+    sourceDescription,
   };
 }
 
 /** Extract a discount % + type from a TikTok Shop product detail
- *  payload. Looks in the common places TikHub returns promo info:
- *    d.discount_price / d.original_price → derives % as a sale
- *    d.promotion_info / d.promotions[] → voucher/coupon %
- *    d.coupon / d.vouchers[] → voucher %
- *  Falls back to null/null when nothing is confidently detectable. */
+ *  payload. Tries paths in this order:
+ *
+ *  0. SKU price map (the "1729...411": {discount_decimal: "0.35"}
+ *     shape). Recursively walk the response tree to find EVERY
+ *     object with a valid discount_decimal (the map is nested deep
+ *     under different keys across TikHub response shapes). Take
+ *     the MIN discount across all variants — safest to advertise
+ *     the smallest guaranteed % than to overpromise on a variant
+ *     that might sell out first. Type: "sale" because SKU prices
+ *     are baked into origin_price vs sale_price, not a claimable
+ *     voucher.
+ *  1. discount_price vs original_price at the top level → sale.
+ *  2. promotion_info.{discount, type} → voucher or sale.
+ *  3. promotions[] / vouchers[] / coupons[] → biggest voucher %.
+ *
+ *  Falls back to null/null when nothing confidently matches. */
 function pluckDiscount(
   d: Record<string, unknown>,
 ): { percent: number | null; type: "voucher" | "sale" | null } {
+  // Path 0: recursive SKU discount walk.
+  const skuDiscounts: number[] = [];
+  collectSkuDiscounts(d, skuDiscounts);
+  if (skuDiscounts.length > 0) {
+    const minDecimal = Math.min(...skuDiscounts); // 0.35 = 35%
+    const pct = Math.round(minDecimal * 100);
+    if (pct >= 1 && pct <= 100) {
+      return { percent: pct, type: "sale" };
+    }
+  }
   // Path 1: derive percent from discount_price vs original_price
   // (implies an actual sale price on the listing itself).
   const originalPrice = toNumber(
@@ -2438,6 +2475,139 @@ function pluckDiscount(
     return { percent: Math.round(bestVoucher), type: "voucher" };
   }
   return { percent: null, type: null };
+}
+
+/** Recursively walk a TikHub product-detail payload collecting
+ *  every valid discount_decimal (0..1) value from SKU-shaped
+ *  objects. The map is nested under different keys across
+ *  response shapes (sku_price_infos, sku_prices, promotion.skus,
+ *  price_info, etc.), so we don't assume a path — just find every
+ *  object that has both a sku_id AND a discount_decimal, or bare
+ *  discount_decimal for shapes that flatten the map. Depth cap
+ *  keeps this bounded for pathological payloads. */
+function collectSkuDiscounts(
+  v: unknown,
+  acc: number[],
+  depth: number = 0,
+): void {
+  if (depth > 8) return;
+  if (!v) return;
+  if (Array.isArray(v)) {
+    for (const item of v) collectSkuDiscounts(item, acc, depth + 1);
+    return;
+  }
+  if (typeof v === "object") {
+    const o = v as Record<string, unknown>;
+    const dd = o.discount_decimal ?? o.discountDecimal;
+    if (dd !== undefined && dd !== null) {
+      const n = toNumber(dd);
+      // 0 < n <= 1 (decimals like 0.35 = 35%). Reject 0
+      // (no discount) and > 1 (already a %, wrong path).
+      if (n !== null && n > 0 && n <= 1) {
+        acc.push(n);
+      }
+    }
+    for (const k of Object.keys(o)) {
+      collectSkuDiscounts(o[k], acc, depth + 1);
+    }
+  }
+}
+
+/** Pluck a gallery of image URLs from the response. Recursive
+ *  walk collecting any string that looks like an image CDN URL,
+ *  deduped, capped at 8. Used to populate a small image strip on
+ *  the /prompts modal for Google Flow paste. */
+function pluckImageUrls(d: Record<string, unknown>): string[] {
+  const found = new Set<string>();
+  collectImageUrls(d, found, 0);
+  // Prefer the primary image first if we can identify it, then
+  // gallery. Order is not guaranteed by the walk; we sort by
+  // insertion (Set preserves) so callers see the first-encountered
+  // (usually main product image) at [0].
+  return Array.from(found).slice(0, 8);
+}
+
+function collectImageUrls(
+  v: unknown,
+  acc: Set<string>,
+  depth: number,
+): void {
+  if (depth > 8) return;
+  if (!v) return;
+  if (typeof v === "string") {
+    if (looksLikeImageUrl(v)) acc.add(v);
+    return;
+  }
+  if (Array.isArray(v)) {
+    for (const item of v) collectImageUrls(item, acc, depth + 1);
+    return;
+  }
+  if (typeof v === "object") {
+    for (const val of Object.values(v as Record<string, unknown>)) {
+      collectImageUrls(val, acc, depth + 1);
+    }
+  }
+}
+
+function looksLikeImageUrl(s: string): boolean {
+  if (!s.startsWith("http")) return false;
+  if (s.length > 500) return false;
+  // TikTok CDN images can be .jpeg / .jpg / .png / .webp — or
+  // extensionless with a "tos-alisg" / "p-tt" host segment
+  // (TikTok Object Storage). Cast a wide net; downstream code
+  // just uses these as <img src>, so a false positive renders
+  // as a broken thumbnail rather than corrupting anything.
+  if (/\.(jpe?g|png|webp|gif)(\?|$)/i.test(s)) return true;
+  if (/(tiktokcdn|byteimg|ttwstatic|tos-|p-tt|byteoss)/i.test(s)) return true;
+  return false;
+}
+
+/** Pluck a source description string. TikHub returns product
+ *  descriptions in a few different shapes; we accept a plain
+ *  string, an object with a text/content field, or an HTML blob
+ *  that we strip tags from. Returned string is capped at 2000
+ *  chars for storage sanity. */
+function pluckSourceDescription(d: Record<string, unknown>): string | null {
+  const candidates: unknown[] = [
+    d.description,
+    d.product_description,
+    d.desc,
+    d.detail,
+    d.product_desc,
+  ];
+  for (const c of candidates) {
+    const text = extractDescriptionText(c);
+    if (text) return text.slice(0, 2000);
+  }
+  return null;
+}
+
+function extractDescriptionText(v: unknown): string | null {
+  if (!v) return null;
+  if (typeof v === "string") {
+    return stripHtml(v).trim() || null;
+  }
+  if (typeof v === "object" && !Array.isArray(v)) {
+    const o = v as Record<string, unknown>;
+    const nested =
+      (typeof o.text === "string" && o.text) ||
+      (typeof o.content === "string" && o.content) ||
+      (typeof o.value === "string" && o.value) ||
+      (typeof o.rich_text === "string" && o.rich_text);
+    if (nested) return stripHtml(nested).trim() || null;
+  }
+  return null;
+}
+
+function stripHtml(s: string): string {
+  return s
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function toNumber(v: unknown): number | null {

@@ -566,6 +566,15 @@ export interface BatchPromptsProduct {
   chosenCopyPart1: string | null;
   chosenCopyPart2: string | null;
   chosenCopyPart3: string | null;
+  /** TikHub-sourced image URLs (main + gallery) — the /prompts
+   *  modal surfaces them as a quick-copy strip for Google Flow
+   *  paste. Empty when TikHub didn't return any / enrichment
+   *  hasn't run. */
+  sourceImages: string[];
+  /** TikHub-sourced product description text (HTML stripped,
+   *  ≤2000 chars). Reference material for the operator; not fed
+   *  to the LLM. Null when unavailable. */
+  sourceDescription: string | null;
 }
 
 export interface BatchPromptsCounts {
@@ -589,6 +598,23 @@ export interface BatchPromptsState {
   postingQrDataUrl?: string;
   products?: BatchPromptsProduct[];
   counts?: BatchPromptsCounts;
+}
+
+/** Defensive JSON decoder for Product.sourceImages. Returns an
+ *  array of strings; empty on any parse failure or non-array
+ *  payload so consumers can render conditionally without null-
+ *  checks. */
+function parseSourceImages(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const decoded = JSON.parse(raw);
+    if (Array.isArray(decoded)) {
+      return decoded.filter((s): s is string => typeof s === "string");
+    }
+  } catch {
+    // ignore
+  }
+  return [];
 }
 
 /** Absolute base URL for QR-encoded links. Falls back to a
@@ -644,6 +670,8 @@ export async function getBatchPromptsState(
           chosenCopyPart1: true,
           chosenCopyPart2: true,
           chosenCopyPart3: true,
+          sourceImages: true,
+          sourceDescription: true,
         },
       },
     },
@@ -706,6 +734,8 @@ export async function getBatchPromptsState(
       chosenCopyPart1: p.chosenCopyPart1 ?? null,
       chosenCopyPart2: p.chosenCopyPart2 ?? null,
       chosenCopyPart3: p.chosenCopyPart3 ?? null,
+      sourceImages: parseSourceImages(p.sourceImages),
+      sourceDescription: p.sourceDescription ?? null,
     };
   });
 

@@ -295,6 +295,9 @@ model Product {
   // Discount kind (voucher/coupon vs sale). See SQLite schema for
   // full rationale. Null = fall back to voucher/coupon per market.
   discountType       String?
+  // TikHub source data — see SQLite schema for details.
+  sourceImages       String?
+  sourceDescription  String?
   // Phase-5 mobile posting workflow status. Independent of
   // reviewStatus — defaults to "needs_posting" until the user
   // marks it posted via the mobile posting QR page.
