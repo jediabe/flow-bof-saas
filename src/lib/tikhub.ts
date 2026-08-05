@@ -2077,20 +2077,26 @@ async function getTikHubShop(
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
     let resp: Response;
     try {
+      // Match curl BYTE-FOR-BYTE. Same VPS + same URL + same
+      // key: curl succeeds, Node fetch fails. The only remaining
+      // differences are (a) User-Agent, (b) auto-added headers.
+      // Sending exactly what curl sends, nothing more, nothing
+      // less.
+      //
+      // Prior versions of this code sent X-API-Key too (belt-
+      // and-braces guess) — dropped, curl doesn't send it and
+      // it may be confusing TikHub's edge.
+      //
+      // Accept-Encoding: identity disables compression, keeping
+      // the response body byte-identical to curl (which doesn't
+      // request compression unless --compressed is passed).
       resp = await fetch(url, {
         method: "GET",
         headers: {
           "Authorization": `Bearer ${apiKey}`,
-          // Belt-and-braces: also send TikHub's alternate header
-          // name. Their docs playground uses X-API-Key on some
-          // endpoints; harmless to include everywhere.
-          "X-API-Key": apiKey,
           "Accept": "application/json",
-          // curl works, Node's default UA doesn't set anything
-          // useful. Match a common browser-ish string so if
-          // TikHub's edge is sniffing UA, we don't get bounced.
-          "User-Agent":
-            "Mozilla/5.0 (compatible; APEX-BOF-SaaS/1.0; +https://apex-bof.local)",
+          "User-Agent": "curl/8.4.0",
+          "Accept-Encoding": "identity",
         },
         signal: AbortSignal.timeout(45_000),
       });
@@ -2437,35 +2443,96 @@ export async function getShopProductDetailEnriched(
   });
   if (!raw || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
-  const detail =
-    (r.data as Record<string, unknown> | undefined)?.product ??
-    (r.data as Record<string, unknown> | undefined) ??
-    r;
-  if (!detail || typeof detail !== "object") return null;
-  // TikHub returns {exists: false, error_code: 23002002, message:
-  // "商品不存在 / product not exist"} when the product isn't in
-  // the queried region's catalog. Treat as a real "not found" so
-  // the enrichment layer can count it separately from generic API
-  // failures. This is the #1 hit at first-import: batch region
-  // and product region mismatch.
-  const d = detail as Record<string, unknown>;
-  if (d.exists === false) {
-    const msg = typeof d.message === "string" ? d.message.slice(0, 120) : "";
+
+  // TikHub returns {exists: false, error_code, message} at the
+  // TOP level when the product isn't in the queried region's
+  // catalog. Not-found is a distinct outcome from api-failure.
+  if (r.exists === false) {
+    const msg = typeof r.message === "string" ? r.message.slice(0, 120) : "";
     console.warn(
       `[tikhub-detail] product=${productId} region=${region} NOT FOUND: ${msg}`,
     );
     return null;
   }
 
-  // Reuse the existing shape-tolerant plucker for the fields it
-  // already handles, then layer the enrichment on top.
-  const wrapped = { data: { products: [detail] } };
-  const base = pluckShopProducts(wrapped)[0];
-  if (!base) return null;
+  // Response shape (as of 2026-08 for /shop/web/fetch_product_detail_v3):
+  //
+  // {
+  //   code: 200, request_id, message, cache_url, router, params,
+  //   data: {
+  //     product_data: {
+  //       page_config: {
+  //         components_map: [
+  //           { component_type: "product_info",
+  //             component_data: {
+  //               product_info: { product_model: { product_id, name,
+  //                 description (STRING-encoded JSON!), sold_count, ... }}
+  //             }
+  //           },
+  //           { component_type: "coupon_popup", component_data: {...} },
+  //           ... other components with images / prices / SKUs
+  //         ]
+  //       }
+  //     }
+  //   }
+  // }
+  //
+  // The interesting bits are scattered across multiple components.
+  // Rather than chase specific paths (fragile if TikHub reorders),
+  // we recursively find:
+  //   - product_model (has product_id + name)
+  //   - all image URLs anywhere in the tree
+  //   - all discount_decimal values anywhere
+  //   - text description content
+  //
+  // pluckImageUrls / pluckDiscount / pluckSourceDescription are
+  // already recursive walkers — we just pass the full response
+  // and let them find everything.
+  const productModel = findProductModel(r) ?? {};
+  if (!productModel.product_id && !productModel.title && !productModel.name) {
+    // Couldn't find a product_model anywhere in the response —
+    // shape has drifted more than we can accommodate. Log the
+    // top-level keys so the operator can share them for a fix.
+    console.warn(
+      `[tikhub-detail] product=${productId} region=${region} NO PRODUCT MODEL — top keys: ${Object.keys(r).slice(0, 12).join(", ")}`,
+    );
+    return null;
+  }
 
-  const discount = pluckDiscount(d);
-  const additionalImages = pluckImageUrls(d);
-  const sourceDescription = pluckSourceDescription(d);
+  // Base fields from the product_model. All defensive coercion —
+  // TikHub uses various key names across shapes.
+  const base: ShopMarketProduct = {
+    productId:
+      String(productModel.product_id ?? productModel.id ?? productId).trim(),
+    title: String(productModel.name ?? productModel.title ?? "").trim(),
+    imageUrlRemote: undefined, // filled by pluckImageUrls[0] below
+    price: toNumber(productModel.price ?? productModel.sale_price) ?? 0,
+    commissionRate:
+      toNumber(
+        productModel.commission_rate ??
+          productModel.commissionRate ??
+          (productModel.commission as Record<string, unknown> | undefined)
+            ?.rate,
+      ) ?? 0,
+    soldCount: toNumber(productModel.sold_count ?? productModel.soldCount) ?? 0,
+    category: undefined,
+  };
+
+  // Walk the ENTIRE response for images, discount, and description
+  // — these live in scattered components (coupon_popup, price
+  // component, description string) not on product_model itself.
+  const discount = pluckDiscount(r);
+  const additionalImages = pluckImageUrls(r);
+  const sourceDescription = pluckSourceDescription(productModel) ??
+    pluckSourceDescription(r);
+
+  // Backfill primary image from the first gallery URL if we
+  // didn't get one from base extraction.
+  if (!base.imageUrlRemote && additionalImages.length > 0) {
+    base.imageUrlRemote = additionalImages[0];
+  }
+
+  const d = r; // keep the name for the debug block below
 
   // Extraction debug. Set TIKHUB_ENRICH_DEBUG=1 in the env to dump
   // the raw payload + everything we plucked to the server logs
@@ -2666,6 +2733,19 @@ function collectImageUrls(
   if (v === null || v === undefined) return;
   if (typeof v === "string") {
     if (looksLikeImageUrl(v)) push(v);
+    // TikTok Shop's product-detail response encodes some
+    // structured content (notably `description`) as a JSON
+    // string. Try to parse strings that look like JSON and
+    // recurse into the parsed shape so images buried inside
+    // {"type":"image","image":{"url_list":[...]}} get picked up.
+    else if (looksLikeJsonPayload(v)) {
+      try {
+        const parsed = JSON.parse(v);
+        collectImageUrls(parsed, push, depth + 1);
+      } catch {
+        // Not valid JSON despite the shape — ignore.
+      }
+    }
     return;
   }
   if (Array.isArray(v)) {
@@ -2711,6 +2791,52 @@ function collectImageUrls(
 function firstString(...vs: unknown[]): string | null {
   for (const v of vs) {
     if (typeof v === "string" && v.trim().length > 0) return v;
+  }
+  return null;
+}
+
+/** Heuristic: does this string look like a JSON array or object
+ *  we should try to parse and recurse into? Cheap check to avoid
+ *  running JSON.parse on every string we walk. */
+function looksLikeJsonPayload(s: string): boolean {
+  const t = s.trimStart();
+  return (
+    (t.startsWith("[") && s.trimEnd().endsWith("]")) ||
+    (t.startsWith("{") && s.trimEnd().endsWith("}"))
+  );
+}
+
+/** Recursively find the deepest object that looks like a TikTok
+ *  Shop product_model: has a product_id AND a name/title. This
+ *  is the "real" product object buried in
+ *  data.product_data.page_config.components_map[N].component_data
+ *  .product_info.product_model (which is a mouthful and prone to
+ *  reordering). Depth cap keeps pathological payloads bounded.
+ *
+ *  Returns null when nothing matches. */
+function findProductModel(
+  v: unknown,
+  depth: number = 0,
+): Record<string, unknown> | null {
+  if (depth > 15) return null;
+  if (!v || typeof v !== "object") return null;
+  if (Array.isArray(v)) {
+    for (const item of v) {
+      const found = findProductModel(item, depth + 1);
+      if (found) return found;
+    }
+    return null;
+  }
+  const o = v as Record<string, unknown>;
+  const hasProductId =
+    typeof o.product_id === "string" && o.product_id.length > 0;
+  const hasName =
+    (typeof o.name === "string" && o.name.length > 0) ||
+    (typeof o.title === "string" && o.title.length > 0);
+  if (hasProductId && hasName) return o;
+  for (const val of Object.values(o)) {
+    const found = findProductModel(val, depth + 1);
+    if (found) return found;
   }
   return null;
 }
