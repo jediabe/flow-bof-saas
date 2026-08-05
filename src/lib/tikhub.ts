@@ -2891,6 +2891,23 @@ function pluckSourceDescription(d: Record<string, unknown>): string | null {
 function extractDescriptionText(v: unknown): string | null {
   if (!v) return null;
   if (typeof v === "string") {
+    // TikTok Shop's product-detail description is a STRINGIFIED
+    // JSON array of typed content items:
+    //   [{"type":"image", "image": {...}},
+    //    {"type":"text",  "text":  "..."},
+    //    ...]
+    // Parse it and pull only the type:"text" items so we get
+    // real product copy the operator can read, not the raw JSON
+    // wrapped in curly braces + escaped quotes.
+    if (looksLikeJsonPayload(v)) {
+      try {
+        const parsed = JSON.parse(v);
+        const text = collectDescriptionText(parsed).trim();
+        if (text) return text;
+      } catch {
+        // Fall through to plain HTML-strip path
+      }
+    }
     return stripHtml(v).trim() || null;
   }
   if (typeof v === "object" && !Array.isArray(v)) {
@@ -2903,6 +2920,54 @@ function extractDescriptionText(v: unknown): string | null {
     if (nested) return stripHtml(nested).trim() || null;
   }
   return null;
+}
+
+/** Recursively concatenate every text item out of a parsed
+ *  TikTok Shop description structure. Handles:
+ *    - Typed items: {type:"text", text:"..."} → include; other
+ *      types (image, video, etc.) → skip
+ *    - Arrays: walk each item, newline-separate results
+ *    - Untyped objects with a text/content/value/t field →
+ *      include (the "sub" array inside a text item uses "t")
+ *    - Plain strings → include as-is
+ *
+ *  Keeps the reading order the seller intended (sections
+ *  usually come as header text → paragraph → image → header
+ *  → paragraph, so newline joins preserve the flow).
+ */
+function collectDescriptionText(v: unknown): string {
+  if (v === null || v === undefined) return "";
+  if (typeof v === "string") return v;
+  if (Array.isArray(v)) {
+    return v
+      .map(collectDescriptionText)
+      .filter((s) => s.length > 0)
+      .join("\n");
+  }
+  if (typeof v === "object") {
+    const o = v as Record<string, unknown>;
+    // Typed items — respect the type when present.
+    if (typeof o.type === "string") {
+      if (o.type === "text") {
+        if (typeof o.text === "string") return o.text;
+        if (typeof o.content === "string") return o.content;
+        return "";
+      }
+      // Skip image / video / spacer / etc.
+      return "";
+    }
+    // Untyped object — try the common text-bearing keys, then
+    // fall back to recursing into everything.
+    if (typeof o.text === "string") return o.text;
+    if (typeof o.content === "string") return o.content;
+    if (typeof o.value === "string") return o.value;
+    if (typeof o.t === "string") return o.t;
+    return Object.values(o)
+      .map(collectDescriptionText)
+      .filter((s) => s.length > 0)
+      .join(" ");
+  }
+  return "";
 }
 
 function stripHtml(s: string): string {
