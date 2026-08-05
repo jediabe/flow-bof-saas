@@ -411,6 +411,22 @@ export default function MobileReviewClient({
           Unlocks the four percentage-based hook variants. Leave blank if
           the product isn&apos;t discounted right now.
         </p>
+        {/* Auto-detected hint. Heuristic: when the product is still
+            in needs_review AND we already have a discountPercent,
+            it was pre-filled by the Kalodata → TikHub enrichment
+            sweep — the operator hasn't touched it yet. Tell them
+            to sanity-check (TikHub data can be stale by a few
+            minutes; live discount could have ended). Chip goes
+            away naturally once they Approve (reviewStatus flips). */}
+        {current.reviewStatus === "needs_review" &&
+          current.discountPercent != null && (
+            <div className="mt-2 rounded-lg border border-blue-500/40 bg-blue-500/10 px-3 py-2 text-[11px] text-blue-300 leading-relaxed">
+              <span className="font-medium">Auto-detected from TikHub.</span>{" "}
+              Double-check the % + deal type against the live TikTok Shop
+              listing before approving — TikHub data can lag by a few
+              minutes.
+            </div>
+          )}
 
         {/* Sale vs voucher/coupon toggle — SOP bait-and-switch rule.
             Copy will say "20% off voucher" (default) or "20% off sale"

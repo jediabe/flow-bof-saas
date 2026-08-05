@@ -2265,6 +2265,191 @@ export async function getShopProductDetail(
 }
 
 /**
+ * Extract the numeric TikTok Shop product ID from a full TikTok URL.
+ * Handles the common Kalodata / TikTok Shop URL shapes:
+ *   https://shop.tiktok.com/view/product/1729459734203894312
+ *   https://www.tiktok.com/view/product/1729...
+ *   https://shop-us.tiktok.com/view/product/1729...?...
+ *   ...?product_id=1729459734203894312
+ *
+ * Returns null if the URL is empty, malformed, or clearly doesn't
+ * contain a product id (e.g. a /video/ url, a bare shop.tiktok.com
+ * homepage, a short vm.tiktok.com/... redirect we can't resolve).
+ *
+ * Product ids are TikTok snowflake-style integers, ~18–20 digits.
+ */
+export function extractTikTokProductId(
+  url: string | null | undefined,
+): string | null {
+  if (!url) return null;
+  const s = String(url).trim();
+  if (!s) return null;
+  // Fast reject: video URLs never carry a product id.
+  if (/\/video\//i.test(s)) return null;
+  // 1) /product/<digits> or /view/product/<digits>
+  const productPath = /\/product\/(\d{10,})/i.exec(s);
+  if (productPath) return productPath[1];
+  // 2) ?product_id=<digits>
+  const productParam = /[?&]product_id=(\d{10,})/i.exec(s);
+  if (productParam) return productParam[1];
+  // 3) Last-resort: any 15+ digit sequence anywhere. Kalodata URLs
+  //    sometimes drop the /product/ segment when they've been
+  //    routed through a shortener that got resolved. 15 is chosen
+  //    to avoid matching timestamps (10 digit UNIX seconds) or
+  //    short user ids.
+  const anyLong = /(\d{15,})/.exec(s);
+  if (anyLong) return anyLong[1];
+  return null;
+}
+
+/**
+ * Enriched detail shape — everything the Kalodata-import enrichment
+ * path needs to pre-fill a Product row so mobile review is a tap-
+ * to-approve rather than a manual-data-entry step.
+ *
+ * All fields are optional / nullable because TikHub responses drift:
+ * a product without an active voucher won't have promo fields, a
+ * non-affiliate product won't have commissionRate, etc.
+ */
+export interface ShopProductDetailEnriched {
+  productId: string;
+  title: string;
+  imageUrlRemote: string | undefined;
+  price: number;
+  /** Commission rate as a percentage (e.g. 15 for 15%). 0 when the
+   *  product isn't part of an affiliate program. */
+  commissionRate: number;
+  soldCount: number;
+  category: string | undefined;
+  /** Discount percentage (1..100) surfaced by the listing itself —
+   *  a live voucher / coupon / sale on TikTok Shop right now. Null
+   *  when no discount is active. */
+  discountPercent: number | null;
+  /** Best guess of the discount mechanism. TikHub responses distinguish
+   *  vouchers/coupons (claimable, price stays list) from sales (sticker
+   *  price is actually lower) in different fields — we normalize to
+   *  the same enum Product.discountType uses. Null when we can't tell. */
+  discountType: "voucher" | "sale" | null;
+  /** True when the product returned any commission signal at all.
+   *  Used to auto-tick the affiliate hint in the review UI. */
+  isAffiliate: boolean;
+}
+
+/**
+ * Same as getShopProductDetail but returns the enriched shape with
+ * discount %, discount type, and affiliate flag. The Kalodata import
+ * pipeline calls this per row after the Product is created so the
+ * operator's mobile review starts with those fields already filled.
+ *
+ * Very tolerant of shape drift — TikHub's fetch_product_detail_v3
+ * has shipped multiple response layouts over time. When a field
+ * isn't present or can't be parsed cleanly, we leave it null rather
+ * than raising; the mobile UI just falls back to manual entry.
+ */
+export async function getShopProductDetailEnriched(
+  productId: string,
+): Promise<ShopProductDetailEnriched | null> {
+  const raw = await getTikHubShop(ENDPOINTS.shopProductDetail, {
+    product_id: productId,
+  });
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const detail =
+    (r.data as Record<string, unknown> | undefined)?.product ??
+    (r.data as Record<string, unknown> | undefined) ??
+    r;
+  if (!detail || typeof detail !== "object") return null;
+
+  // Reuse the existing shape-tolerant plucker for the fields it
+  // already handles, then layer the enrichment on top.
+  const wrapped = { data: { products: [detail] } };
+  const base = pluckShopProducts(wrapped)[0];
+  if (!base) return null;
+  const d = detail as Record<string, unknown>;
+
+  const discount = pluckDiscount(d);
+
+  return {
+    ...base,
+    discountPercent: discount.percent,
+    discountType: discount.type,
+    isAffiliate: base.commissionRate > 0,
+  };
+}
+
+/** Extract a discount % + type from a TikTok Shop product detail
+ *  payload. Looks in the common places TikHub returns promo info:
+ *    d.discount_price / d.original_price → derives % as a sale
+ *    d.promotion_info / d.promotions[] → voucher/coupon %
+ *    d.coupon / d.vouchers[] → voucher %
+ *  Falls back to null/null when nothing is confidently detectable. */
+function pluckDiscount(
+  d: Record<string, unknown>,
+): { percent: number | null; type: "voucher" | "sale" | null } {
+  // Path 1: derive percent from discount_price vs original_price
+  // (implies an actual sale price on the listing itself).
+  const originalPrice = toNumber(
+    d.original_price ?? d.originalPrice ?? d.list_price,
+  );
+  const discountPrice = toNumber(
+    d.discount_price ?? d.discountPrice ?? d.sale_price ?? d.current_price,
+  );
+  if (
+    originalPrice !== null &&
+    discountPrice !== null &&
+    originalPrice > 0 &&
+    discountPrice > 0 &&
+    discountPrice < originalPrice
+  ) {
+    const pct = Math.round(((originalPrice - discountPrice) / originalPrice) * 100);
+    if (pct >= 1 && pct <= 100) {
+      return { percent: pct, type: "sale" };
+    }
+  }
+  // Path 2: explicit promo info fields. TikHub sometimes returns
+  // {promotion_info: {discount: 20, type: "voucher"}} or similar.
+  const promoInfo =
+    (d.promotion_info as Record<string, unknown> | undefined) ??
+    (d.promotionInfo as Record<string, unknown> | undefined);
+  if (promoInfo) {
+    const pct = toNumber(promoInfo.discount ?? promoInfo.discount_percent ?? promoInfo.percentage);
+    if (pct !== null && pct >= 1 && pct <= 100) {
+      const t = String(promoInfo.type ?? promoInfo.promotion_type ?? "voucher").toLowerCase();
+      const type: "voucher" | "sale" = t.includes("sale") ? "sale" : "voucher";
+      return { percent: Math.round(pct), type };
+    }
+  }
+  // Path 3: coupons / vouchers array — take the biggest %.
+  const promoList =
+    (Array.isArray(d.promotions) && (d.promotions as unknown[])) ||
+    (Array.isArray(d.vouchers) && (d.vouchers as unknown[])) ||
+    (Array.isArray(d.coupons) && (d.coupons as unknown[])) ||
+    [];
+  let bestVoucher: number | null = null;
+  for (const p of promoList) {
+    if (!p || typeof p !== "object") continue;
+    const po = p as Record<string, unknown>;
+    const pct = toNumber(po.discount ?? po.discount_percent ?? po.percentage ?? po.value);
+    if (pct !== null && pct >= 1 && pct <= 100) {
+      if (bestVoucher === null || pct > bestVoucher) bestVoucher = pct;
+    }
+  }
+  if (bestVoucher !== null) {
+    return { percent: Math.round(bestVoucher), type: "voucher" };
+  }
+  return { percent: null, type: null };
+}
+
+function toNumber(v: unknown): number | null {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string") {
+    const n = parseFloat(v);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+/**
  * fetch_general_search_result — count of creator videos matching a
  * product name. The "creator saturation" signal for BOF Score.
  * Docs cap count at 30 per call; we ask for 30 and use the total-

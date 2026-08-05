@@ -1318,6 +1318,42 @@ export async function importKalodataXlsx(
   revalidatePath(`/batches/${batchId}`);
   revalidatePath("/dashboard");
 
+  // Fire-and-forget TikHub enrichment. For every product with a
+  // TikTok Shop URL, hit fetch_product_detail_v3 and back-fill
+  // discountPercent + discountType so the operator's mobile
+  // review is pre-filled. Runs async — the import response
+  // returns immediately; enrichment happens in the background
+  // over the next ~30-60s for a typical Kalodata sheet.
+  //
+  // Individual failures never touch the Product rows we just
+  // created; if the enrichment loop hits a TikHub outage the
+  // operator just fills in discount % manually the same way as
+  // before this feature landed.
+  if (productsCreated > 0) {
+    const bgBatchId = batch.id;
+    const bgWorkspaceId = workspace.id;
+    Promise.resolve().then(async () => {
+      try {
+        const { enrichBatchFromTikHub } = await import(
+          "@/lib/tikhub-enrichment"
+        );
+        await enrichBatchFromTikHub({
+          batchId: bgBatchId,
+          workspaceId: bgWorkspaceId,
+        });
+        // Bump the batch's revalidation so an operator refreshing
+        // /prompts or /batches sees the enriched discount fields
+        // once the sweep finishes.
+        revalidatePath(`/batches/${bgBatchId}`);
+      } catch (err) {
+        console.error(
+          `[kalodata] enrichment batch=${bgBatchId} threw:`,
+          err,
+        );
+      }
+    });
+  }
+
   return {
     ok: true,
     message:
@@ -1325,7 +1361,7 @@ export async function importKalodataXlsx(
         ? `Imported ${productsCreated} product(s) but ${permissionErrors} image(s) failed with permission errors. ` +
             `Run scripts/fix-upload-perms.sh on the server and re-import.`
         : productsCreated > 0
-          ? `Imported ${productsCreated} product(s) from "${parsed.sheetName}".`
+          ? `Imported ${productsCreated} product(s) from "${parsed.sheetName}". TikHub enrichment (discount %, type) will finish in the background over the next minute.`
           : "No product rows found in the workbook.",
     sheetName: parsed.sheetName,
     productsFound: parsed.rows.length,
