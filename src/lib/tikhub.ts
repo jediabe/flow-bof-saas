@@ -2055,6 +2055,16 @@ async function getTikHubShop(
     qs.set(k, String(v));
   }
   const url = `${TIKHUB_BASE}${path}${qs.toString() ? `?${qs.toString()}` : ""}`;
+  // When TIKHUB_ENRICH_DEBUG=1, log every outbound URL + the
+  // last 6 chars of the api key so the operator can diff against
+  // the URL they hit successfully in a browser / curl. Never log
+  // the full key.
+  if (process.env.TIKHUB_ENRICH_DEBUG === "1") {
+    const keyTail = apiKey.length > 6 ? apiKey.slice(-6) : "(short)";
+    console.log(
+      `[tikhub-shop-get] GET ${url}  (key ...${keyTail})`,
+    );
+  }
   let resp: Response;
   try {
     resp = await fetch(url, {
