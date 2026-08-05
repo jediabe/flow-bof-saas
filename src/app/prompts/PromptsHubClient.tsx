@@ -10,6 +10,7 @@ import {
   importKalodataForPrompts,
   getBatchPromptsState,
   regenerateApprovedInBatch,
+  setChosenCopyPart,
   type BatchPromptsState,
   type BatchPromptsProduct,
   type RecentBatchSummary,
@@ -823,14 +824,34 @@ function Style1KitContents({
   product: BatchPromptsProduct;
 }) {
   const flowInput = useMemo(() => buildGoogleFlowToolInput(kit), [kit]);
+
+  // Local pick state — starts from the persisted values but
+  // updates optimistically on tap so the ElevenLabs script
+  // preview re-composes instantly (no server round-trip in the
+  // render path). Server write fires in a transition below.
+  const [chosen1, setChosen1] = useState<string | null>(
+    product.chosenCopyPart1,
+  );
+  const [chosen2, setChosen2] = useState<string | null>(
+    product.chosenCopyPart2,
+  );
+  const [chosen3, setChosen3] = useState<string | null>(
+    product.chosenCopyPart3,
+  );
+  const [, startPickTransition] = useTransition();
+  const persistPick = (part: "1" | "2" | "3", text: string) => {
+    startPickTransition(async () => {
+      await setChosenCopyPart({
+        productId: product.id,
+        part,
+        text,
+      });
+    });
+  };
+
   const elevenLabsScript = useMemo(
-    () =>
-      buildElevenLabsScript(
-        kit,
-        product.chosenCopyPart1,
-        product.chosenCopyPart2,
-      ),
-    [kit, product.chosenCopyPart1, product.chosenCopyPart2],
+    () => buildElevenLabsScript(kit, chosen1, chosen2),
+    [kit, chosen1, chosen2],
   );
 
   return (
@@ -852,24 +873,38 @@ function Style1KitContents({
         </pre>
       </div>
 
-      {/* 2. Copy options — 5 per part */}
+      {/* 2. Copy options — 5 per part. Tap on desktop persists
+          via setChosenCopyPart (workspace-auth) AND updates local
+          state so the ElevenLabs script below re-composes instantly. */}
       <CopyOptionsBlock
         label="Part 1 · hook (on-screen Scene 1 + spoken)"
-        hint="Displayed on Scene 1 AND read by ElevenLabs across the full ~8s. Pick one on mobile posting."
+        hint="Displayed on Scene 1 AND read by ElevenLabs across the full ~8s. Tap to pick — the ElevenLabs script below updates live."
         options={kit.copy.part1Options}
-        chosen={product.chosenCopyPart1}
+        chosen={chosen1}
+        onPick={(text) => {
+          setChosen1(text);
+          persistPick("1", text);
+        }}
       />
       <CopyOptionsBlock
         label="Part 2 · voiceover (spoken over Scene 2)"
         hint="Spoken only, ~8s. Pasted into ElevenLabs after Part 1 to make one 16s voice file."
         options={kit.copy.part2Options}
-        chosen={product.chosenCopyPart2}
+        chosen={chosen2}
+        onPick={(text) => {
+          setChosen2(text);
+          persistPick("2", text);
+        }}
       />
       <CopyOptionsBlock
         label="Part 3 · on-screen sale text (Scene 2, ≤10 words)"
         hint="Shown on Scene 2 for the whole clip. Not read aloud."
         options={kit.copy.part3Options}
-        chosen={product.chosenCopyPart3}
+        chosen={chosen3}
+        onPick={(text) => {
+          setChosen3(text);
+          persistPick("3", text);
+        }}
       />
 
       {/* 3. ElevenLabs script — composed from picks */}
@@ -969,21 +1004,56 @@ function LegacyProductContents({
   );
 }
 
-/** Block for one Part's 5 options with per-option copy buttons.
- *  Highlights the chosen option (persisted picks from the mobile
- *  posting page). */
+/** Block for one Part's 5 options — tap-to-pick + per-option copy.
+ *  When onPick is provided (desktop /prompts modal), the whole row
+ *  is tappable: tapping picks the option (green outline) AND
+ *  copies its text to the clipboard. When onPick is absent, the
+ *  block is read-only (a passive display of the persisted pick). */
 function CopyOptionsBlock({
   label,
   hint,
   options,
   chosen,
+  onPick,
 }: {
   label: string;
   hint?: string;
   options: string[];
   chosen: string | null;
+  onPick?: (text: string) => void;
 }) {
+  const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
   if (options.length === 0) return null;
+
+  function copyToClipboard(text: string) {
+    (async () => {
+      try {
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(text);
+        } else {
+          const ta = document.createElement("textarea");
+          ta.value = text;
+          ta.style.position = "fixed";
+          ta.style.opacity = "0";
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand("copy");
+          document.body.removeChild(ta);
+        }
+      } catch {
+        // ignore
+      }
+    })();
+  }
+
+  const handleTap = (text: string, i: number) => {
+    if (!onPick) return;
+    onPick(text);
+    copyToClipboard(text);
+    setCopiedIndex(i);
+    setTimeout(() => setCopiedIndex(null), 1500);
+  };
+
   return (
     <div className="field-row">
       <span className="label">{label}</span>
@@ -991,27 +1061,52 @@ function CopyOptionsBlock({
       <div className="space-y-1.5">
         {options.map((text, i) => {
           const isChosen = chosen === text;
-          return (
-            <div
-              key={i}
-              className={`flex items-start gap-2 group px-3 py-2 rounded-xl border ${
-                isChosen
-                  ? "border-ok/50 bg-ok/[0.05]"
-                  : "border-border bg-bg/60"
-              }`}
-            >
+          const wasJustCopied = copiedIndex === i;
+          const rowClass = `flex items-start gap-2 group px-3 py-2 rounded-xl border transition-colors ${
+            isChosen
+              ? "border-ok/60 bg-ok/[0.06]"
+              : "border-border bg-bg/60"
+          } ${onPick ? "cursor-pointer hover:border-border-strong text-left w-full" : ""}`;
+          const inner = (
+            <>
               <span className="text-[10px] font-mono text-muted2 min-w-[24px] pt-1">
                 {i + 1}
               </span>
               <div className="flex-1 text-sm text-text leading-relaxed">
                 {text}
-                {isChosen && (
-                  <span className="ml-2 text-[10px] text-ok">✓ picked on mobile</span>
+                {isChosen && !wasJustCopied && (
+                  <span className="ml-2 text-[10px] text-ok">
+                    ✓ picked
+                  </span>
+                )}
+                {wasJustCopied && (
+                  <span className="ml-2 text-[10px] text-ok">
+                    ✓ copied
+                  </span>
                 )}
               </div>
-              <div className="opacity-0 group-hover:opacity-100 transition-opacity">
-                <CopyButton text={text} small />
-              </div>
+              {!onPick && (
+                <div className="opacity-0 group-hover:opacity-100 transition-opacity">
+                  <CopyButton text={text} small />
+                </div>
+              )}
+            </>
+          );
+          if (onPick) {
+            return (
+              <button
+                type="button"
+                key={i}
+                onClick={() => handleTap(text, i)}
+                className={rowClass}
+              >
+                {inner}
+              </button>
+            );
+          }
+          return (
+            <div key={i} className={rowClass}>
+              {inner}
             </div>
           );
         })}

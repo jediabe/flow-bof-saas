@@ -57,6 +57,11 @@ export interface MobileProduct {
    *  generator's %-dependent hook variants when the reviewer taps
    *  Approve. */
   discountPercent: number | null;
+  /** Whether the discount is a claimable voucher/coupon or a real
+   *  sale price. Drives the exact word ("voucher"/"coupon" vs
+   *  "sale") the LLM uses across all copy. Null → defaults to
+   *  voucher/coupon per market. */
+  discountType: "voucher" | "sale" | null;
 }
 
 const STATUS_LABEL: Record<ReviewStatus, string> = {
@@ -116,6 +121,16 @@ export default function MobileReviewClient({
         ]),
       ),
   );
+  // Discount type per product ("voucher" | "sale"). Defaults to
+  // voucher when the product has no persisted pick — matches the
+  // SOP bait-and-switch safe default. Persisted on Approve.
+  const [discountType, setDiscountType] = useState<
+    Record<string, "voucher" | "sale">
+  >(() =>
+    Object.fromEntries(
+      initial.map((p) => [p.id, p.discountType === "sale" ? "sale" : "voucher"]),
+    ),
+  );
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const counts = useMemo(() => {
@@ -173,6 +188,10 @@ export default function MobileReviewClient({
       parsed <= 100
         ? Math.round(parsed)
         : null;
+    // Send discountType alongside discountPercent — server ignores
+    // it for non-approve statuses but there's no harm persisting
+    // the operator's pick regardless.
+    const dt = discountType[productId] ?? "voucher";
     setErrorMsg(null);
     startTransition(async () => {
       let r: { ok: boolean; message?: string };
@@ -182,6 +201,7 @@ export default function MobileReviewClient({
           productId,
           status,
           discountPercent,
+          discountType: dt,
         });
       } catch (e) {
         // A raw throw from the server action ends up here — most
@@ -207,7 +227,7 @@ export default function MobileReviewClient({
       setProducts((prev) =>
         prev.map((p) =>
           p.id === productId
-            ? { ...p, reviewStatus: status, discountPercent }
+            ? { ...p, reviewStatus: status, discountPercent, discountType: dt }
             : p,
         ),
       );
@@ -391,6 +411,48 @@ export default function MobileReviewClient({
           Unlocks the four percentage-based hook variants. Leave blank if
           the product isn&apos;t discounted right now.
         </p>
+
+        {/* Sale vs voucher/coupon toggle — SOP bait-and-switch rule.
+            Copy will say "20% off voucher" (default) or "20% off sale"
+            depending on this pick. */}
+        <div className="mt-4">
+          <div className="text-[11px] uppercase tracking-wide text-zinc-400 mb-1.5">
+            Deal type
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <DealTypeBtn
+              active={(discountType[current.id] ?? "voucher") === "voucher"}
+              onClick={() =>
+                setDiscountType((prev) => ({
+                  ...prev,
+                  [current.id]: "voucher",
+                }))
+              }
+              label={
+                batchMarket.toLowerCase() === "us"
+                  ? "Coupon"
+                  : "Voucher"
+              }
+              hint="Claimable — copy says voucher/coupon"
+            />
+            <DealTypeBtn
+              active={(discountType[current.id] ?? "voucher") === "sale"}
+              onClick={() =>
+                setDiscountType((prev) => ({
+                  ...prev,
+                  [current.id]: "sale",
+                }))
+              }
+              label="Sale"
+              hint="Real sale price — copy says sale"
+            />
+          </div>
+          <p className="mt-1.5 text-[11px] text-zinc-500 leading-relaxed">
+            Only pick Sale when the price is actually reduced. Calling a
+            voucher a sale reads as a bait-and-switch when the viewer
+            lands on full price.
+          </p>
+        </div>
       </section>
 
       {/* Phase 9 — IP / trademark risk banner. Surfaces the verdict
@@ -576,6 +638,35 @@ function ReviewBtn({
       className={`w-full py-4 rounded-2xl text-base font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${color} ${textColor}`}
     >
       {label}
+    </button>
+  );
+}
+
+/** Two-state toggle button for the deal-type row (Voucher vs Sale).
+ *  Green outline + fill when active; muted otherwise. */
+function DealTypeBtn({
+  active,
+  onClick,
+  label,
+  hint,
+}: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+  hint: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`text-left rounded-xl px-3 py-3 border transition-colors ${
+        active
+          ? "border-green-500/60 bg-green-500/10 text-zinc-100"
+          : "border-zinc-800 bg-zinc-900 text-zinc-300 hover:border-zinc-700"
+      }`}
+    >
+      <div className="text-sm font-medium">{label}</div>
+      <div className="text-[10px] text-zinc-500 mt-0.5">{hint}</div>
     </button>
   );
 }

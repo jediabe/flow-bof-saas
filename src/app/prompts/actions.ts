@@ -839,3 +839,57 @@ export async function getBatchReviewProgress(
     })),
   };
 }
+
+/**
+ * Persist which Part 1 / Part 2 / Part 3 copy option the operator
+ * picked, from the desktop /prompts modal. Workspace-authenticated
+ * (via getCurrentWorkspace) — no token needed since /prompts is
+ * behind the same auth as the rest of the app.
+ *
+ * The mobile posting page uses setChosenCopyPartViaToken instead
+ * — same underlying write, different auth model. Both update the
+ * same chosenCopyPart{1,2,3} columns so the picks stay in sync
+ * across surfaces.
+ */
+export async function setChosenCopyPart(input: {
+  productId: string;
+  /** "1" | "2" | "3" — which Part the pick belongs to. */
+  part: string;
+  /** The chosen option text verbatim, or null to clear. */
+  text: string | null;
+}): Promise<{ ok: boolean; message?: string }> {
+  const { productId, part } = input;
+  if (!productId) return { ok: false, message: "missing productId" };
+  if (part !== "1" && part !== "2" && part !== "3") {
+    return { ok: false, message: "invalid part" };
+  }
+  const { workspace } = await getCurrentWorkspace();
+  const product = await db.product.findFirst({
+    where: {
+      id: productId,
+      deletedAt: null,
+      batch: { workspaceId: workspace.id },
+    },
+    select: { id: true, batchId: true },
+  });
+  if (!product) {
+    return { ok: false, message: "product not found in this workspace" };
+  }
+  const cleaned =
+    typeof input.text === "string" && input.text.trim().length > 0
+      ? input.text
+      : null;
+  const field =
+    part === "1"
+      ? "chosenCopyPart1"
+      : part === "2"
+        ? "chosenCopyPart2"
+        : "chosenCopyPart3";
+  await db.product.update({
+    where: { id: product.id },
+    data:  { [field]: cleaned },
+  });
+  revalidatePath("/prompts");
+  revalidatePath(`/batches/${product.batchId}`);
+  return { ok: true };
+}

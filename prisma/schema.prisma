@@ -357,6 +357,13 @@ model Product {
   // %-dependent variants (WAIT_3, DEAL_1, DEAL_5, DEAL_6). Null
   // when no discount is in effect. Integer 1..100.
   discountPercent         Int?
+  // Whether the discount is a claimable voucher/coupon or an
+  // actual sale price. Per the Style 1 SOP: "Only say 'sale' if
+  // it's an actual sale price (not a coupon)" — bait-and-switch
+  // rule. Values: "voucher" (default, UK) / "coupon" (US) /
+  // "sale". Null = fall back to voucher/coupon per market. The
+  // LLM copy generator picks the exact wording from this field.
+  discountType            String?
   // Phase-5 mobile posting workflow status. Independent of
   // reviewStatus — a product can be "approved" for generation AND
   // separately "posted" after the user has uploaded its video to

@@ -292,6 +292,9 @@ model Product {
   // Integer 1..100; anything outside that range is treated as null
   // at the action layer.
   discountPercent    Int?
+  // Discount kind (voucher/coupon vs sale). See SQLite schema for
+  // full rationale. Null = fall back to voucher/coupon per market.
+  discountType       String?
   // Phase-5 mobile posting workflow status. Independent of
   // reviewStatus — defaults to "needs_posting" until the user
   // marks it posted via the mobile posting QR page.

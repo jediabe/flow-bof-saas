@@ -62,6 +62,7 @@ export default async function MobileReviewPage({
           // returning to an already-approved product sees what
           // they typed last time.
           discountPercent: true,
+          discountType: true,
         },
         orderBy: [
           // Push needs_review to the top so the user lands on
@@ -120,6 +121,10 @@ export default async function MobileReviewPage({
       ipRiskReasons:     ipRiskChecksEnabled ? reasons : [],
       ipRiskOverride:    p.ipRiskOverride,
       discountPercent:   p.discountPercent ?? null,
+      discountType:
+        p.discountType === "sale" || p.discountType === "voucher"
+          ? (p.discountType as "sale" | "voucher")
+          : null,
     };
   });
 

@@ -79,6 +79,21 @@ export interface ProductPromptInput {
    * rule bans on-screen prices.
    */
   discountPercent?:   number | null;
+  /**
+   * Kind of discount — "voucher" (claimable UK voucher / US
+   * coupon) or "sale" (real sale price). Per the Style 1 SOP:
+   * "Only say 'sale' if it's an actual sale price (not a
+   * coupon)." — a voucher called a sale reads as a bait-and-
+   * switch when the viewer lands on full list price.
+   *
+   * Fed into the LLM copy generator's wording pass:
+   *   voucher (UK) → "X% off voucher — claim it"
+   *   coupon  (US) → "X% off coupon — claim it"
+   *   sale         → "X% off sale — get yours"
+   * Undefined / null → LLM uses "voucher" (UK) or "coupon" (US)
+   * as the safe default.
+   */
+  discountType?:      "voucher" | "sale" | null;
 }
 
 /**

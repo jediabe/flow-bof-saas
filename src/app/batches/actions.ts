@@ -758,6 +758,14 @@ export async function setProductReviewStatusViaToken(input: {
    * pass garbage to the LLM.
    */
   discountPercent?: number | null;
+  /**
+   * Sale vs voucher/coupon toggle from mobile review. Fed to the
+   * LLM copy generator so the Style 1 wording matches reality
+   * ("20% off voucher" vs "20% off sale"). Anything other than
+   * "sale" | "voucher" is coerced to null (LLM defaults to
+   * voucher/coupon per market).
+   */
+  discountType?: string | null;
 }): Promise<{ ok: boolean; message?: string }> {
   const { token, productId, status } = input;
   if (!token || !productId) {
@@ -801,6 +809,17 @@ export async function setProductReviewStatusViaToken(input: {
     pctRaw <= 100
       ? Math.round(pctRaw)
       : null;
+  // Sanitize discountType. Only "sale" or "voucher" are valid —
+  // everything else (including "coupon", which we canonicalize on
+  // the wire as "voucher" for the DB even though US copy says
+  // "coupon") → null. LLM defaults per market when null.
+  const dtRaw = (input.discountType ?? "").toString().trim().toLowerCase();
+  const discountType: "sale" | "voucher" | null =
+    dtRaw === "sale"
+      ? "sale"
+      : dtRaw === "voucher" || dtRaw === "coupon"
+        ? "voucher"
+        : null;
 
   // Write in a try/catch so a schema mismatch (e.g. dev DB
   // hasn't been `prisma db push`'d yet after adding
@@ -817,14 +836,16 @@ export async function setProductReviewStatusViaToken(input: {
   try {
     await db.product.update({
       where: { id: product.id },
-      data:  { reviewStatus: status, discountPercent },
+      data:  { reviewStatus: status, discountPercent, discountType },
     });
   } catch (err) {
     const msg = (err as Error).message || "";
     const looksLikeMissingColumn =
       msg.includes("discountPercent") ||
+      msg.includes("discountType") ||
       msg.includes("P2022") ||
       msg.includes("Unknown arg `discountPercent`") ||
+      msg.includes("Unknown arg `discountType`") ||
       msg.includes("no such column");
     if (looksLikeMissingColumn) {
       try {
@@ -835,7 +856,7 @@ export async function setProductReviewStatusViaToken(input: {
         return {
           ok: true,
           message:
-            "Status saved, but the discount % column is missing on this deployment. Run `prisma db push` (dev) or the equivalent prod migration to enable capturing discounts.",
+            "Status saved, but a discount column is missing on this deployment. Run `prisma db push` (dev) or the equivalent prod migration to enable capturing discount % + type.",
         };
       } catch (err2) {
         return {
@@ -1678,6 +1699,7 @@ export async function generateAiPromptForProduct(input: {
       // variants. Captured on the mobile review card at approval
       // time. Null when the reviewer didn't type a %.
       discountPercent: true,
+      discountType: true,
     },
   });
   if (!product) {
@@ -1718,6 +1740,10 @@ export async function generateAiPromptForProduct(input: {
         referenceImageUrl: visionUrl ?? product.referenceImageUrl,
         market:            effectiveMarket,
         discountPercent:   product.discountPercent ?? null,
+        discountType:
+          product.discountType === "sale" || product.discountType === "voucher"
+            ? product.discountType
+            : null,
       },
       settings,
       { useVision: visionUrl !== null },

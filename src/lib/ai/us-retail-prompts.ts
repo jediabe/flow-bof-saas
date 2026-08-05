@@ -174,6 +174,14 @@ DISCOUNT RULES (all apply to Part 1, Part 2, AND Part 3)
 - Only say "sale" if it's an actual sale price (not a coupon).
   Calling a coupon a sale feels like a bait-and-switch when the
   viewer lands on full price.
+- The user prompt now includes a "Discount type:" line — obey it
+  literally:
+    "Discount type: coupon" → write "20% off coupon" throughout
+      (Part 1, Part 2, Part 3, productDescription).
+    "Discount type: sale"   → write "20% off sale" throughout
+      (Part 1, Part 2, Part 3, productDescription). Do NOT say
+      "coupon" anywhere when the type is sale.
+  Default when the line is missing: coupon.
 - No £/$ prices anywhere. Percent-off only.
 - Benefits stay experiential (what you saw and felt) — never
   clinical or absolute claims ("cures", "guaranteed", "removes
@@ -237,6 +245,19 @@ export function formatUserPrompt(p: ProductPromptInput): string {
     lines.push(`Discount %: ${Math.round(pct)}`);
   } else {
     lines.push(`Discount %: (not provided — add a warning per the DISCOUNT RULES)`);
+  }
+  // Discount type is the operator's explicit sale-vs-coupon pick
+  // from mobile review. US default = coupon. Sale is only used
+  // when the operator explicitly picked it.
+  const dt = p.discountType;
+  if (dt === "sale") {
+    lines.push(
+      `Discount type: sale (operator confirmed this is a real sale price, not a claimable coupon). Use "sale" wording everywhere.`,
+    );
+  } else {
+    lines.push(
+      `Discount type: coupon (default US — a claimable coupon). Use "coupon" wording everywhere.`,
+    );
   }
   lines.push("", "Return the Style 1 kit as strict JSON now. No prose, no markdown.");
   return lines.join("\n");
