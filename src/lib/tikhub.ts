@@ -2671,7 +2671,13 @@ function collectSkuDiscounts(
   acc: number[],
   depth: number = 0,
 ): void {
-  if (depth > 8) return;
+  // TikTok Shop nests SKU discount data DEEP:
+  //   data.product_data.page_config.components_map[N]
+  //     .component_data.product_info.product_model
+  //     .promotion_model.promotion_product_price.skus_price.<id>
+  //     .discount_decimal
+  // = 13 levels from the response root. Cap generously.
+  if (depth > 20) return;
   if (!v) return;
   if (Array.isArray(v)) {
     for (const item of v) collectSkuDiscounts(item, acc, depth + 1);
@@ -2729,7 +2735,10 @@ function collectImageUrls(
   push: (u: string) => void,
   depth: number,
 ): void {
-  if (depth > 10) return;
+  // Same reasoning as collectSkuDiscounts — TikTok Shop's nested
+  // components put per-SKU image maps at ~12 levels deep. Cap
+  // generously so galleries pick up variant thumbnails too.
+  if (depth > 20) return;
   if (v === null || v === undefined) return;
   if (typeof v === "string") {
     if (looksLikeImageUrl(v)) push(v);
