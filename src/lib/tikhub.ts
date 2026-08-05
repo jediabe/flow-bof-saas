@@ -2065,45 +2065,89 @@ async function getTikHubShop(
       `[tikhub-shop-get] GET ${url}  (key ...${keyTail})`,
     );
   }
-  let resp: Response;
-  try {
-    resp = await fetch(url, {
-      method: "GET",
-      headers: {
-        "Authorization": `Bearer ${apiKey}`,
-        "Accept": "application/json",
-      },
-      signal: AbortSignal.timeout(45_000),
-    });
-  } catch (err) {
-    const e = err as Error;
-    throw new TikHubError(
-      "NETWORK",
-      `TikHub fetch failed: ${e.name}: ${e.message.slice(0, 200)}`,
-      undefined,
-      { url: maskUrl(url) },
-    );
-  }
-  if (!resp.ok) {
-    const text = await resp.text().catch(() => "");
-    throw new TikHubError(
+
+  // Retry the call up to 3 times when TikHub returns a transient
+  // 400 (their own error message asks us to retry) or any 5xx.
+  // Curl users hit this less often because they retry manually;
+  // Node's fetch fails fast by default. 400ms → 1200ms backoff
+  // gives us ~2s worst case before the batch loop moves on.
+  const MAX_ATTEMPTS = 3;
+  const backoffMs = [400, 1200];
+  let lastError: TikHubError | null = null;
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
+    let resp: Response;
+    try {
+      resp = await fetch(url, {
+        method: "GET",
+        headers: {
+          "Authorization": `Bearer ${apiKey}`,
+          // Belt-and-braces: also send TikHub's alternate header
+          // name. Their docs playground uses X-API-Key on some
+          // endpoints; harmless to include everywhere.
+          "X-API-Key": apiKey,
+          "Accept": "application/json",
+          // curl works, Node's default UA doesn't set anything
+          // useful. Match a common browser-ish string so if
+          // TikHub's edge is sniffing UA, we don't get bounced.
+          "User-Agent":
+            "Mozilla/5.0 (compatible; APEX-BOF-SaaS/1.0; +https://apex-bof.local)",
+        },
+        signal: AbortSignal.timeout(45_000),
+      });
+    } catch (err) {
+      const e = err as Error;
+      lastError = new TikHubError(
+        "NETWORK",
+        `TikHub fetch failed: ${e.name}: ${e.message.slice(0, 200)}`,
+        undefined,
+        { url: maskUrl(url) },
+      );
+      if (attempt < MAX_ATTEMPTS - 1) {
+        await sleep(backoffMs[attempt] ?? 1200);
+        continue;
+      }
+      throw lastError;
+    }
+    // Success — return the parsed body.
+    if (resp.ok) {
+      try {
+        return await resp.json();
+      } catch (err) {
+        const e = err as Error;
+        throw new TikHubError(
+          "PARSE",
+          `TikHub response not JSON: ${e.message.slice(0, 200)}`,
+        );
+      }
+    }
+    // Non-ok. Decide retry vs terminal.
+    const bodyText = await resp.text().catch(() => "");
+    const looksTransient =
+      resp.status >= 500 ||
+      (resp.status === 400 && /please retry|retry/i.test(bodyText));
+    lastError = new TikHubError(
       "HTTP_ERROR",
-      `TikHub returned ${resp.status}: ${text.slice(0, 300)}`,
+      `TikHub returned ${resp.status}: ${bodyText.slice(0, 300)}`,
       resp.status,
       { url: maskUrl(url) },
     );
+    if (looksTransient && attempt < MAX_ATTEMPTS - 1) {
+      if (process.env.TIKHUB_ENRICH_DEBUG === "1") {
+        console.warn(
+          `[tikhub-shop-get] transient ${resp.status} attempt=${attempt + 1}, retrying in ${backoffMs[attempt] ?? 1200}ms`,
+        );
+      }
+      await sleep(backoffMs[attempt] ?? 1200);
+      continue;
+    }
+    throw lastError;
   }
-  let json: unknown;
-  try {
-    json = await resp.json();
-  } catch (err) {
-    const e = err as Error;
-    throw new TikHubError(
-      "PARSE",
-      `TikHub response not JSON: ${e.message.slice(0, 200)}`,
-    );
-  }
-  return json;
+  // Should be unreachable — the loop either returns or throws.
+  throw lastError ?? new TikHubError("HTTP_ERROR", "TikHub exhausted retries");
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /** Shape returned to /research callers per Shop-endpoint row. */
