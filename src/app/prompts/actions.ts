@@ -923,3 +923,52 @@ export async function setChosenCopyPart(input: {
   revalidatePath(`/batches/${product.batchId}`);
   return { ok: true };
 }
+
+/**
+ * Re-run TikHub enrichment against every product in an EXISTING
+ * batch — same helper the Kalodata import uses, called by hand.
+ * Overwrites source-* fields (fresh TikHub data), leaves operator-
+ * supplied discountPercent/discountType alone.
+ *
+ * Point: when the enrichment extractor gets smarter (broader
+ * image patterns, better discount plucking, etc.) the operator
+ * shouldn't have to re-upload the Kalodata sheet to benefit.
+ * Tap this from /prompts and the batch gets re-enriched in place.
+ *
+ * Synchronous — a 30-row batch takes ~10s with concurrency 5.
+ */
+export async function reEnrichBatchFromTikHub(input: {
+  batchId: string;
+}): Promise<{ ok: boolean; message: string }> {
+  if (!input.batchId) return { ok: false, message: "missing batchId" };
+  const { workspace } = await getCurrentWorkspace();
+  const batch = await db.batch.findFirst({
+    where: { id: input.batchId, workspaceId: workspace.id },
+    select: { id: true, name: true },
+  });
+  if (!batch) {
+    return { ok: false, message: "batch not found in this workspace" };
+  }
+  try {
+    const { enrichBatchFromTikHub } = await import(
+      "@/lib/tikhub-enrichment"
+    );
+    const report = await enrichBatchFromTikHub({
+      batchId: batch.id,
+      workspaceId: workspace.id,
+    });
+    revalidatePath("/prompts");
+    revalidatePath(`/batches/${batch.id}`);
+    const parts: string[] = [];
+    parts.push(`TikHub touched ${report.attempted} product(s), updated ${report.updated}`);
+    if (report.failedApi > 0) parts.push(`${report.failedApi} API failure(s)`);
+    if (report.failedNoProductId > 0)
+      parts.push(`${report.failedNoProductId} without a TikTok product URL`);
+    return { ok: true, message: parts.join(" · ") + "." };
+  } catch (err) {
+    return {
+      ok: false,
+      message: `Re-enrichment errored: ${(err as Error).message.slice(0, 200)}`,
+    };
+  }
+}

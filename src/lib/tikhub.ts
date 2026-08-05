@@ -2383,6 +2383,36 @@ export async function getShopProductDetailEnriched(
   const additionalImages = pluckImageUrls(d);
   const sourceDescription = pluckSourceDescription(d);
 
+  // Extraction debug. Set TIKHUB_ENRICH_DEBUG=1 in the env to dump
+  // the raw payload + everything we plucked to the server logs
+  // per product. Useful when the operator says "the gallery is
+  // empty" and we need to see what TikHub actually sent back.
+  //
+  // Off by default because a Kalodata sheet with 30 rows would
+  // otherwise spew 30 * O(response size) worth of JSON into the
+  // logs and cost log-rotation cycles for no benefit at steady
+  // state.
+  if (process.env.TIKHUB_ENRICH_DEBUG === "1") {
+    console.log(
+      `[tikhub-detail] product=${productId} images_found=${additionalImages.length} discount_pct=${discount.percent} discount_type=${discount.type} desc_len=${sourceDescription?.length ?? 0}`,
+    );
+    if (additionalImages.length === 0) {
+      // Print top-level keys so we can see whether the images
+      // live behind a wrapper we're not descending into.
+      const topKeys = Object.keys(d).sort().join(", ");
+      console.log(
+        `[tikhub-detail] product=${productId} NO IMAGES — top-level keys: ${topKeys}`,
+      );
+      // Print the first 4KB of the raw JSON so we can inspect
+      // the shape without spamming megabytes. Enough to see the
+      // wrapper structure without leaking full product data.
+      const preview = JSON.stringify(d).slice(0, 4000);
+      console.log(
+        `[tikhub-detail] product=${productId} raw preview: ${preview}`,
+      );
+    }
+  }
+
   return {
     ...base,
     discountPercent: discount.percent,
@@ -2513,52 +2543,118 @@ function collectSkuDiscounts(
   }
 }
 
-/** Pluck a gallery of image URLs from the response. Recursive
- *  walk collecting any string that looks like an image CDN URL,
- *  deduped, capped at 8. Used to populate a small image strip on
- *  the /prompts modal for Google Flow paste. */
+/** Pluck a gallery of image URLs from the response. Aggressive
+ *  recursive walk that handles the shapes TikHub actually returns:
+ *
+ *  - Bare strings: "https://p16-oec-common-va.tiktokcdn-us.com/..."
+ *  - {url: "..."} — the classic single-image object
+ *  - {url_list: [...]} — TikTok's canonical multi-CDN mirror list
+ *    (same image, different edge hosts for redundancy)
+ *  - {thumb_url_list: [...]} — thumbnail variants
+ *  - {uri: "tos-alisg-i-.../<hash>~..."} — bare TikTok Object Storage
+ *    URIs which we don't try to resolve (need signing) but log
+ *  - Product image objects: {images: [{url_list: [...]}, ...]}
+ *
+ *  For url_list mirrors, we only keep the FIRST URL per list to
+ *  avoid the same image appearing 3-5 times in the gallery.
+ *
+ *  Capped at 12 to leave headroom for a rich gallery without
+ *  hoarding.
+ */
 function pluckImageUrls(d: Record<string, unknown>): string[] {
-  const found = new Set<string>();
-  collectImageUrls(d, found, 0);
-  // Prefer the primary image first if we can identify it, then
-  // gallery. Order is not guaranteed by the walk; we sort by
-  // insertion (Set preserves) so callers see the first-encountered
-  // (usually main product image) at [0].
-  return Array.from(found).slice(0, 8);
+  const found: string[] = [];
+  const seen = new Set<string>();
+  const push = (u: string) => {
+    if (!u || seen.has(u)) return;
+    seen.add(u);
+    found.push(u);
+  };
+  collectImageUrls(d, push, 0);
+  return found.slice(0, 12);
 }
 
 function collectImageUrls(
   v: unknown,
-  acc: Set<string>,
+  push: (u: string) => void,
   depth: number,
 ): void {
-  if (depth > 8) return;
-  if (!v) return;
+  if (depth > 10) return;
+  if (v === null || v === undefined) return;
   if (typeof v === "string") {
-    if (looksLikeImageUrl(v)) acc.add(v);
+    if (looksLikeImageUrl(v)) push(v);
     return;
   }
   if (Array.isArray(v)) {
-    for (const item of v) collectImageUrls(item, acc, depth + 1);
+    for (const item of v) collectImageUrls(item, push, depth + 1);
     return;
   }
   if (typeof v === "object") {
-    for (const val of Object.values(v as Record<string, unknown>)) {
-      collectImageUrls(val, acc, depth + 1);
+    const o = v as Record<string, unknown>;
+    // Fast-path the common object shapes so we don't miss a
+    // singular url when a sibling key throws off the recursive walk.
+    const singleUrl = firstString(o.url, o.URL, o.image_url, o.imageUrl);
+    if (singleUrl && looksLikeImageUrl(singleUrl)) push(singleUrl);
+    // url_list / thumb_url_list / uri_list are TikTok's mirror
+    // arrays — same image at different CDN edges. Take only the
+    // first URL per list so the gallery doesn't fill with dupes.
+    const mirrorLists = [
+      o.url_list,
+      o.urlList,
+      o.thumb_url_list,
+      o.thumbUrlList,
+      o.uri_list,
+    ];
+    for (const list of mirrorLists) {
+      if (Array.isArray(list)) {
+        for (const u of list) {
+          if (typeof u === "string" && looksLikeImageUrl(u)) {
+            push(u);
+            break; // only first mirror
+          }
+        }
+      }
+    }
+    // Then recurse into everything so we catch nested {images: [...]}
+    // and {sku: [{image: {url_list: [...]}}]} shapes.
+    for (const val of Object.values(o)) {
+      collectImageUrls(val, push, depth + 1);
     }
   }
 }
 
+/** Return the first argument that's a non-empty string, else null.
+ *  Used to pick between synonym keys (url vs URL vs image_url etc). */
+function firstString(...vs: unknown[]): string | null {
+  for (const v of vs) {
+    if (typeof v === "string" && v.trim().length > 0) return v;
+  }
+  return null;
+}
+
+/** Very permissive URL matcher. TikTok CDN hosts span dozens of
+ *  patterns (tiktokcdn, tiktokcdn-us, tiktokcdn-sg, byteimg,
+ *  ibyteimg, ibytedtos, ttwstatic, tos-*, p16-*, p-tt*, ipstatp,
+ *  byteoss, muscdn, snssdk-*). Rather than allowlisting every
+ *  known TikTok host, we accept ANY https URL that either:
+ *    - has a common image extension in the path
+ *    - contains "image", "img", "photo", "pic" in the path/host
+ *    - matches a known TikTok/ByteDance CDN host substring
+ *
+ *  Downstream code just uses these as <img src>, so a false
+ *  positive renders as a broken thumbnail — safer to over-collect
+ *  than to under-collect. */
 function looksLikeImageUrl(s: string): boolean {
   if (!s.startsWith("http")) return false;
-  if (s.length > 500) return false;
-  // TikTok CDN images can be .jpeg / .jpg / .png / .webp — or
-  // extensionless with a "tos-alisg" / "p-tt" host segment
-  // (TikTok Object Storage). Cast a wide net; downstream code
-  // just uses these as <img src>, so a false positive renders
-  // as a broken thumbnail rather than corrupting anything.
-  if (/\.(jpe?g|png|webp|gif)(\?|$)/i.test(s)) return true;
-  if (/(tiktokcdn|byteimg|ttwstatic|tos-|p-tt|byteoss)/i.test(s)) return true;
+  if (s.length > 800) return false;
+  if (/\.(jpe?g|png|webp|gif|avif|heic)(\?|#|$)/i.test(s)) return true;
+  if (
+    /(tiktokcdn|byteimg|ibyteimg|ibytedtos|ttwstatic|byteoss|muscdn|snssdk|ipstatp)/i.test(
+      s,
+    )
+  )
+    return true;
+  if (/\/(image|img|photo|photos|pic|pics|cover|thumb)\//i.test(s)) return true;
+  if (/[?&](image|img|url)=/i.test(s)) return true;
   return false;
 }
 

@@ -11,6 +11,7 @@ import {
   getBatchPromptsState,
   regenerateApprovedInBatch,
   setChosenCopyPart,
+  reEnrichBatchFromTikHub,
   type BatchPromptsState,
   type BatchPromptsProduct,
   type RecentBatchSummary,
@@ -303,6 +304,24 @@ function ActiveBatchView({ state }: { state: BatchPromptsState }) {
     });
   }
 
+  const [enrichMsg, setEnrichMsg] = useState<string | null>(null);
+  const [enrichPending, startEnrichTransition] = useTransition();
+  function reEnrichBatch() {
+    if (!state.batchId) return;
+    const batchId = state.batchId;
+    setEnrichMsg(null);
+    startEnrichTransition(async () => {
+      const r = await reEnrichBatchFromTikHub({ batchId });
+      setEnrichMsg(r.message);
+      setTimeout(() => setEnrichMsg(null), 8000);
+      // Server action already revalidatePath'd /prompts; a router
+      // refresh reloads the server component so the freshly
+      // populated source-images/description show up in the modal
+      // without a manual page reload.
+      router.refresh();
+    });
+  }
+
   function copyReviewUrl() {
     if (!state.reviewUrl) return;
     (async () => {
@@ -388,6 +407,20 @@ function ActiveBatchView({ state }: { state: BatchPromptsState }) {
                 )}
                 {regenMsg && (
                   <span className="text-[11px] text-muted">{regenMsg}</span>
+                )}
+                <button
+                  type="button"
+                  onClick={reEnrichBatch}
+                  disabled={enrichPending}
+                  className="btn btn-sm"
+                  title="Re-run TikHub product-detail enrichment on every product in this batch. Overwrites source images + description with the freshest TikHub data; doesn't touch operator-supplied discount % / type."
+                >
+                  {enrichPending
+                    ? "Re-enriching…"
+                    : "Re-enrich from TikHub"}
+                </button>
+                {enrichMsg && (
+                  <span className="text-[11px] text-muted">{enrichMsg}</span>
                 )}
               </div>
             </div>
