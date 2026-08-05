@@ -2247,9 +2247,11 @@ export async function getTopAdsProducts(input?: {
  */
 export async function getShopProductDetail(
   productId: string,
+  input?: { region?: string },
 ): Promise<ShopMarketProduct | null> {
   const raw = await getTikHubShop(ENDPOINTS.shopProductDetail, {
     product_id: productId,
+    region: input?.region ?? "GB",
   });
   if (!raw || typeof raw !== "object") return null;
   // Detail endpoint returns a single product envelope, not a list.
@@ -2259,6 +2261,18 @@ export async function getShopProductDetail(
     (r.data as Record<string, unknown> | undefined)?.product ??
     (r.data as Record<string, unknown> | undefined) ??
     r;
+  // TikHub returns {exists: false, error_code, message} for
+  // products that aren't in the queried catalog. Skip these
+  // early — they'd otherwise pass pluckShopProducts (which only
+  // requires a product_id) and return a garbage row with empty
+  // title / price / images.
+  if (
+    detail &&
+    typeof detail === "object" &&
+    (detail as Record<string, unknown>).exists === false
+  ) {
+    return null;
+  }
   const wrapped = { data: { products: [detail] } };
   const list = pluckShopProducts(wrapped);
   return list[0] ?? null;
@@ -2360,9 +2374,12 @@ export interface ShopProductDetailEnriched {
  */
 export async function getShopProductDetailEnriched(
   productId: string,
+  input?: { region?: string },
 ): Promise<ShopProductDetailEnriched | null> {
+  const region = input?.region ?? "GB";
   const raw = await getTikHubShop(ENDPOINTS.shopProductDetail, {
     product_id: productId,
+    region,
   });
   if (!raw || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
@@ -2371,13 +2388,26 @@ export async function getShopProductDetailEnriched(
     (r.data as Record<string, unknown> | undefined) ??
     r;
   if (!detail || typeof detail !== "object") return null;
+  // TikHub returns {exists: false, error_code: 23002002, message:
+  // "商品不存在 / product not exist"} when the product isn't in
+  // the queried region's catalog. Treat as a real "not found" so
+  // the enrichment layer can count it separately from generic API
+  // failures. This is the #1 hit at first-import: batch region
+  // and product region mismatch.
+  const d = detail as Record<string, unknown>;
+  if (d.exists === false) {
+    const msg = typeof d.message === "string" ? d.message.slice(0, 120) : "";
+    console.warn(
+      `[tikhub-detail] product=${productId} region=${region} NOT FOUND: ${msg}`,
+    );
+    return null;
+  }
 
   // Reuse the existing shape-tolerant plucker for the fields it
   // already handles, then layer the enrichment on top.
   const wrapped = { data: { products: [detail] } };
   const base = pluckShopProducts(wrapped)[0];
   if (!base) return null;
-  const d = detail as Record<string, unknown>;
 
   const discount = pluckDiscount(d);
   const additionalImages = pluckImageUrls(d);

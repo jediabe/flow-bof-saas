@@ -1333,13 +1333,24 @@ export async function importKalodataXlsx(
         batchId: batch.id,
         workspaceId: workspace.id,
       });
+      const parts: string[] = [];
       if (enrichReport.updated > 0) {
-        enrichmentSummary = ` TikHub filled in ${enrichReport.updated}/${enrichReport.attempted} product(s).`;
-      } else if (enrichReport.failedApi > 0) {
-        enrichmentSummary = ` TikHub enrichment failed for all products — fill in discount % manually on mobile review.`;
-      } else if (enrichReport.failedNoProductId === enrichReport.attempted) {
-        enrichmentSummary = ` No TikTok Shop URLs in the sheet — TikHub enrichment skipped.`;
+        parts.push(`TikHub filled in ${enrichReport.updated}/${enrichReport.attempted} product(s)`);
       }
+      if (enrichReport.notFoundOnTikHub > 0) {
+        parts.push(
+          `${enrichReport.notFoundOnTikHub} not found in the TikHub catalog (check that the batch market matches the products' actual region)`,
+        );
+      }
+      if (enrichReport.failedApi > 0) {
+        parts.push(`${enrichReport.failedApi} TikHub API failure(s)`);
+      }
+      if (enrichReport.failedNoProductId > 0) {
+        parts.push(
+          `${enrichReport.failedNoProductId} row(s) had no TikTok Shop URL`,
+        );
+      }
+      enrichmentSummary = parts.length > 0 ? ` ${parts.join(". ")}.` : "";
     } catch (err) {
       console.error(
         `[kalodata] enrichment batch=${batch.id} threw:`,

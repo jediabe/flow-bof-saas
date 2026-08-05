@@ -31,7 +31,22 @@ export interface EnrichmentReport {
   succeeded: number;
   failedNoProductId: number;
   failedApi: number;
+  /** Products where TikHub's fetch_product_detail_v3 returned
+   *  exists=false — the product isn't in the queried catalog.
+   *  Almost always a region mismatch (batch is UK, product
+   *  actually lives in the US shop) OR the product has been
+   *  delisted from TikTok Shop since Kalodata exported it. */
+  notFoundOnTikHub: number;
   updated: number;
+}
+
+/** Map internal batch market ("uk" | "us") to TikHub's region
+ *  code ("GB" | "US"). Defaults to GB for anything unknown to
+ *  match the rest of the codebase. */
+function batchMarketToRegion(market: string | null | undefined): string {
+  const m = (market ?? "").toLowerCase();
+  if (m === "us") return "US";
+  return "GB";
 }
 
 /**
@@ -55,8 +70,12 @@ export async function enrichProductFromTikHub(input: {
   productId: string;
   workspaceId: string;
   batchId: string;
+  /** TikHub region code ("GB" | "US"). Derived from batch.market
+   *  by the batch-level caller. Individual callers can pass it
+   *  directly. Defaults to GB. */
+  region?: string;
 }): Promise<
-  "no-product-id" | "api-failed" | "updated" | "no-op"
+  "no-product-id" | "api-failed" | "not-found" | "updated" | "no-op"
 > {
   const row = await db.product.findFirst({
     where: { id: input.productId, deletedAt: null },
@@ -75,7 +94,9 @@ export async function enrichProductFromTikHub(input: {
 
   let detail;
   try {
-    detail = await getShopProductDetailEnriched(productIdOnTikTok);
+    detail = await getShopProductDetailEnriched(productIdOnTikTok, {
+      region: input.region,
+    });
   } catch (err) {
     console.error(
       `[tikhub-enrichment] fetch failed for product=${input.productId} tiktok_product=${productIdOnTikTok}:`,
@@ -83,7 +104,13 @@ export async function enrichProductFromTikHub(input: {
     );
     return "api-failed";
   }
-  if (!detail) return "api-failed";
+  // getShopProductDetailEnriched returns null in two distinct
+  // cases: (a) the HTTP call returned a non-object payload
+  // (should be rare — that would be a network / body-parse
+  // issue), and (b) TikHub returned exists=false meaning the
+  // product isn't in the queried region. Case (b) is the
+  // ~always-culprit here so we bias the diagnostic toward it.
+  if (!detail) return "not-found";
 
   // Build the update payload. Source-* fields ALWAYS overwrite
   // (they're fresh TikHub data, not operator picks). Discount
@@ -191,6 +218,16 @@ export async function enrichBatchFromTikHub(input: {
   batchId: string;
   workspaceId: string;
 }): Promise<EnrichmentReport> {
+  // Fetch the batch's market so we send the right region to
+  // TikHub. Without this, product-detail lookups against UK
+  // products hit the default region and TikHub returns
+  // exists=false — the #1 cause of "0/N updated" reports.
+  const batch = await db.batch.findFirst({
+    where: { id: input.batchId, workspaceId: input.workspaceId },
+    select: { market: true },
+  });
+  const region = batchMarketToRegion(batch?.market);
+
   const rows = await db.product.findMany({
     where: { batchId: input.batchId, deletedAt: null },
     select: { id: true },
@@ -200,6 +237,7 @@ export async function enrichBatchFromTikHub(input: {
     succeeded: 0,
     failedNoProductId: 0,
     failedApi: 0,
+    notFoundOnTikHub: 0,
     updated: 0,
   };
 
@@ -217,6 +255,7 @@ export async function enrichBatchFromTikHub(input: {
         productId: r.id,
         workspaceId: input.workspaceId,
         batchId: input.batchId,
+        region,
       });
       switch (result) {
         case "updated":
@@ -228,6 +267,9 @@ export async function enrichBatchFromTikHub(input: {
           break;
         case "no-product-id":
           report.failedNoProductId += 1;
+          break;
+        case "not-found":
+          report.notFoundOnTikHub += 1;
           break;
         case "api-failed":
           report.failedApi += 1;
@@ -242,7 +284,7 @@ export async function enrichBatchFromTikHub(input: {
   );
 
   console.log(
-    `[tikhub-enrichment] batch=${input.batchId} done: ${report.updated}/${report.attempted} updated · ${report.failedApi} api-failed · ${report.failedNoProductId} missing product id`,
+    `[tikhub-enrichment] batch=${input.batchId} region=${region} done: ${report.updated}/${report.attempted} updated · ${report.notFoundOnTikHub} not-found · ${report.failedApi} api-failed · ${report.failedNoProductId} missing product id`,
   );
   return report;
 }

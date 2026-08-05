@@ -961,6 +961,10 @@ export async function reEnrichBatchFromTikHub(input: {
     revalidatePath(`/batches/${batch.id}`);
     const parts: string[] = [];
     parts.push(`TikHub touched ${report.attempted} product(s), updated ${report.updated}`);
+    if (report.notFoundOnTikHub > 0)
+      parts.push(
+        `${report.notFoundOnTikHub} not found in catalog (region mismatch?)`,
+      );
     if (report.failedApi > 0) parts.push(`${report.failedApi} API failure(s)`);
     if (report.failedNoProductId > 0)
       parts.push(`${report.failedNoProductId} without a TikTok product URL`);
