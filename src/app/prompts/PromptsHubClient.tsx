@@ -8,6 +8,7 @@ import StatusChip from "@/components/StatusChip";
 import EmptyState from "@/components/ui/EmptyState";
 import {
   importKalodataForPrompts,
+  importTikTokUrlsForPrompts,
   getBatchPromptsState,
   regenerateApprovedInBatch,
   setChosenCopyPart,
@@ -125,6 +126,12 @@ export default function PromptsHubClient({
         }}
       />
 
+      <PasteUrlsImportBar
+        onImported={(batchId) => {
+          router.replace(`/prompts?batch=${batchId}`);
+        }}
+      />
+
       {state && state.batchId ? (
         <ActiveBatchView state={state} />
       ) : recentBatches.length > 0 ? (
@@ -231,6 +238,139 @@ function KalodataImportBar({
           </button>
         </div>
         {file && <div className="text-[11px] text-muted">Selected: {file.name}</div>}
+        {error && <div className="text-[12px] text-bad">{error}</div>}
+      </div>
+    </Panel>
+  );
+}
+
+/**
+ * Paste-URLs import bar — sibling to the Kalodata upload. Text
+ * area for TikTok Shop URLs (one per line or comma-separated).
+ * Wraps importTikTokUrlsForPrompts which parses out product IDs,
+ * runs the same enrichment + auto-gen chain as Kalodata import,
+ * and returns a review QR.
+ */
+function PasteUrlsImportBar({
+  onImported,
+}: {
+  onImported: (batchId: string) => void;
+}) {
+  const [urls, setUrls] = useState("");
+  const [batchName, setBatchName] = useState("");
+  const [market, setMarket] = useState<"uk" | "us">("uk");
+  const [pending, startTransition] = useTransition();
+  const [error, setError] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+
+  const urlCount = useMemo(() => {
+    if (!urls.trim()) return 0;
+    return urls
+      .split(/[\s,]+/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0).length;
+  }, [urls]);
+
+  function submit() {
+    if (!urls.trim()) return;
+    setError(null);
+    setMessage(null);
+    const fd = new FormData();
+    fd.set("urls", urls);
+    fd.set("market", market);
+    if (batchName.trim()) fd.set("batchName", batchName.trim());
+    startTransition(async () => {
+      try {
+        const r = await importTikTokUrlsForPrompts(fd);
+        if (!r.ok || !r.batchId) {
+          setError(r.message);
+          return;
+        }
+        setMessage(r.message);
+        setUrls("");
+        setBatchName("");
+        onImported(r.batchId);
+      } catch (e) {
+        setError((e as Error).message || "import failed");
+      }
+    });
+  }
+
+  return (
+    <Panel title="Import from pasted TikTok URLs">
+      <div className="space-y-3">
+        <p className="text-xs text-muted leading-relaxed">
+          Paste TikTok Shop product URLs (one per line or comma-
+          separated). The hub extracts each product ID, pulls the
+          name, image, gallery, and discount from TikHub, and
+          creates a batch you can review on your phone. Same
+          Style 1 auto-gen chain as the Kalodata upload above.
+        </p>
+        <div className="field-row">
+          <label className="label" htmlFor="urls-input">
+            TikTok Shop URLs
+            {urlCount > 0 && (
+              <span className="normal-case tracking-normal text-muted2 ml-1">
+                · {urlCount} URL{urlCount === 1 ? "" : "s"} detected
+              </span>
+            )}
+          </label>
+          <textarea
+            id="urls-input"
+            rows={5}
+            value={urls}
+            onChange={(e) => setUrls(e.target.value)}
+            disabled={pending}
+            placeholder={
+              "https://www.tiktok.com/shop/gb/pdp/1729630463883254523\nhttps://www.tiktok.com/shop/gb/pdp/1729633218171017662\n..."
+            }
+            className="field font-mono text-[11px] leading-relaxed"
+            spellCheck={false}
+          />
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-[minmax(0,140px)_minmax(0,240px)_auto] gap-3 items-end">
+          <div className="field-row">
+            <label className="label" htmlFor="urls-market">
+              Market
+            </label>
+            <select
+              id="urls-market"
+              value={market}
+              onChange={(e) => setMarket(e.target.value === "us" ? "us" : "uk")}
+              disabled={pending}
+              className="field"
+            >
+              <option value="uk">UK</option>
+              <option value="us">US</option>
+            </select>
+          </div>
+          <div className="field-row">
+            <label className="label" htmlFor="urls-name">
+              Batch name{" "}
+              <span className="normal-case tracking-normal text-muted2 ml-1">
+                · optional
+              </span>
+            </label>
+            <input
+              id="urls-name"
+              type="text"
+              placeholder="Pasted URLs · today"
+              className="field"
+              value={batchName}
+              onChange={(e) => setBatchName(e.target.value)}
+              disabled={pending}
+            />
+          </div>
+          <button
+            type="button"
+            onClick={submit}
+            disabled={urlCount === 0 || pending}
+            className="btn btn-primary whitespace-nowrap"
+          >
+            {pending ? "Importing…" : `Import ${urlCount || ""} & review`}
+          </button>
+        </div>
+        {message && <div className="text-[11px] text-ok">{message}</div>}
         {error && <div className="text-[12px] text-bad">{error}</div>}
       </div>
     </Panel>

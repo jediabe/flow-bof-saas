@@ -2340,11 +2340,17 @@ export async function getShopProductDetail(
 
 /**
  * Extract the numeric TikTok Shop product ID from a full TikTok URL.
- * Handles the common Kalodata / TikTok Shop URL shapes:
- *   https://shop.tiktok.com/view/product/1729459734203894312
- *   https://www.tiktok.com/view/product/1729...
- *   https://shop-us.tiktok.com/view/product/1729...?...
- *   ...?product_id=1729459734203894312
+ * Handles the common URL shapes TikTok uses across regions:
+ *   Kalodata style:
+ *     https://shop.tiktok.com/view/product/1729459734203894312
+ *     https://www.tiktok.com/view/product/1729...
+ *     https://shop-us.tiktok.com/view/product/1729...?...
+ *   Product Detail Page (PDP) style — what you get from the app or
+ *   a "Copy link" on a listing:
+ *     https://www.tiktok.com/shop/gb/pdp/1729630463883254523?source=...
+ *     https://www.tiktok.com/shop/us/pdp/1729...
+ *   Query-param style (some deep links):
+ *     ...?product_id=1729459734203894312
  *
  * Returns null if the URL is empty, malformed, or clearly doesn't
  * contain a product id (e.g. a /video/ url, a bare shop.tiktok.com
@@ -2360,8 +2366,9 @@ export function extractTikTokProductId(
   if (!s) return null;
   // Fast reject: video URLs never carry a product id.
   if (/\/video\//i.test(s)) return null;
-  // 1) /product/<digits> or /view/product/<digits>
-  const productPath = /\/product\/(\d{10,})/i.exec(s);
+  // 1) /product/<digits> or /pdp/<digits> — the two path patterns
+  //    TikTok uses across shop.tiktok.com and www.tiktok.com/shop/.
+  const productPath = /\/(?:product|pdp)\/(\d{10,})/i.exec(s);
   if (productPath) return productPath[1];
   // 2) ?product_id=<digits>
   const productParam = /[?&]product_id=(\d{10,})/i.exec(s);

@@ -49,6 +49,25 @@ function batchMarketToRegion(market: string | null | undefined): string {
   return "GB";
 }
 
+/** Is this product name empty or a placeholder we set at import
+ *  time (paste-URL flow) that we should overwrite with the real
+ *  title once enrichment gets one?
+ *
+ *  Kalodata imports always land with a real productName so this
+ *  returns false and TikHub-supplied names never clobber the
+ *  cleaner Kalodata versions. Paste-URL imports land with the
+ *  "Pasted URL — <productId>" or empty pattern below and get
+ *  the TikHub name written on top.
+ */
+function isPlaceholderName(name: string | null | undefined): boolean {
+  const s = (name ?? "").trim();
+  if (!s) return true;
+  if (/^Pasted URL —\s*\d+/i.test(s)) return true;
+  if (/^Loading —\s*\d+/i.test(s)) return true;
+  if (/^Product #\d+/i.test(s)) return true;
+  return false;
+}
+
 /**
  * Enrich a single Product row via TikHub. Reads the row's
  * tiktokUrl + referenceImageUrl, hits TikHub for detail, updates
@@ -85,6 +104,8 @@ export async function enrichProductFromTikHub(input: {
       discountPercent: true,
       discountType: true,
       referenceImageUrl: true,
+      productName: true,
+      originalTitle: true,
     },
   });
   if (!row) return "no-op";
@@ -115,11 +136,17 @@ export async function enrichProductFromTikHub(input: {
   // Build the update payload. Source-* fields ALWAYS overwrite
   // (they're fresh TikHub data, not operator picks). Discount
   // fields ONLY overwrite when the row has no operator input yet.
+  // Name field ONLY overwrites when the current name is empty or
+  // matches a placeholder pattern (see isPlaceholderName) — this
+  // is the mechanism paste-URL imports rely on to get real
+  // product names populated after enrichment.
   const updateData: {
     discountPercent?: number | null;
     discountType?: string | null;
     sourceImages?: string | null;
     sourceDescription?: string | null;
+    productName?: string;
+    originalTitle?: string;
   } = {};
   if (row.discountPercent == null && detail.discountPercent != null) {
     updateData.discountPercent = detail.discountPercent;
@@ -132,6 +159,12 @@ export async function enrichProductFromTikHub(input: {
   }
   if (detail.sourceDescription) {
     updateData.sourceDescription = detail.sourceDescription;
+  }
+  if (detail.title && isPlaceholderName(row.productName)) {
+    updateData.productName = detail.title;
+    if (isPlaceholderName(row.originalTitle)) {
+      updateData.originalTitle = detail.title;
+    }
   }
 
   let didWrite = false;

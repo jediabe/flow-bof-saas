@@ -276,6 +276,182 @@ export async function importKalodataForPrompts(
 }
 
 /**
+ * Paste-URLs import — the lightweight sibling of the Kalodata
+ * XLSX flow.
+ *
+ * Operator pastes a bunch of TikTok Shop product URLs (one per
+ * line, or comma-separated), we extract each product ID via
+ * extractTikTokProductId, create Product rows with placeholder
+ * names + no local image, and hand off to the same enrichment
+ * chain as Kalodata import:
+ *
+ *   parse URLs → dedupe → create rows → enrichment (sync) →
+ *   auto-fire Style 1 gen (background) → return QR to mobile review.
+ *
+ * The name-placeholder pattern ("Pasted URL — <id>") matches the
+ * isPlaceholderName check in tikhub-enrichment.ts so the real
+ * product title from TikHub overwrites it during enrichment.
+ * Kalodata-import productNames pass isPlaceholderName as false
+ * so they never get clobbered.
+ */
+export async function importTikTokUrlsForPrompts(
+  formData: FormData,
+): Promise<ImportKalodataToPromptsResult> {
+  const rawUrls = String(formData.get("urls") || "").trim();
+  if (!rawUrls) {
+    return { ok: false, message: "Paste at least one TikTok Shop URL first." };
+  }
+
+  const { workspace } = await getCurrentWorkspace();
+
+  const nameOverride = String(formData.get("batchName") || "").trim();
+  const today = new Date();
+  const dateSlug = `${today.getUTCFullYear()}-${String(
+    today.getUTCMonth() + 1,
+  ).padStart(2, "0")}-${String(today.getUTCDate()).padStart(2, "0")}`;
+  const batchName = nameOverride || `Pasted URLs · ${dateSlug}`;
+
+  // Accept "uk" / "us" from the form; default to "uk". The batch
+  // market drives the region we send to TikHub during enrichment.
+  const marketField = String(formData.get("market") || "uk").toLowerCase();
+  const market: "uk" | "us" = marketField === "us" ? "us" : "uk";
+
+  // Parse: split on newlines / commas / whitespace, extract product
+  // id from each URL, dedupe. Preserve the first URL we saw per
+  // product id so the row's tiktokUrl stays a clickable link the
+  // operator can verify.
+  const tokens = rawUrls
+    .split(/[\s,]+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+
+  const seen = new Set<string>();
+  const parsed: Array<{ url: string; productId: string }> = [];
+  const rejected: string[] = [];
+  const { extractTikTokProductId } = await import("@/lib/tikhub");
+  for (const url of tokens) {
+    const productId = extractTikTokProductId(url);
+    if (!productId) {
+      rejected.push(url);
+      continue;
+    }
+    if (seen.has(productId)) continue;
+    seen.add(productId);
+    parsed.push({ url, productId });
+  }
+
+  if (parsed.length === 0) {
+    const preview = rejected.slice(0, 3).join(", ");
+    const more = rejected.length > 3 ? ` +${rejected.length - 3} more` : "";
+    return {
+      ok: false,
+      message: rejected.length > 0
+        ? `Couldn't parse a TikTok Shop product ID from any URL. Rejected: ${preview}${more}`
+        : "No URLs found in the pasted text.",
+    };
+  }
+
+  const batch = await db.batch.create({
+    data: { workspaceId: workspace.id, name: batchName, market },
+    select: { id: true },
+  });
+
+  let productsCreated = 0;
+  for (const { url, productId } of parsed) {
+    await db.product.create({
+      data: {
+        batchId: batch.id,
+        // Placeholder name — matches isPlaceholderName so
+        // enrichment overwrites with the real TikHub title.
+        productName:   `Pasted URL — ${productId}`,
+        originalTitle: `Pasted URL — ${productId}`,
+        tiktokUrl:     url,
+        // No imageUrl / referenceImageUrl until enrichment gets
+        // us a CDN URL and downloads it.
+        imageUrl:      null,
+      },
+    });
+    productsCreated += 1;
+  }
+
+  // Enrichment (sync) + auto-fire Style 1 gen (background) —
+  // identical to the Kalodata import chain. Errors here don't
+  // roll back the Product rows.
+  let enrichmentSummary = "";
+  try {
+    const { enrichBatchFromTikHub, triggerStyle1GenerationIfDiscountReady } =
+      await import("@/lib/tikhub-enrichment");
+    const enrichReport = await enrichBatchFromTikHub({
+      batchId: batch.id,
+      workspaceId: workspace.id,
+    });
+    const parts: string[] = [];
+    if (enrichReport.updated > 0) {
+      parts.push(`TikHub filled in ${enrichReport.updated}/${enrichReport.attempted}`);
+    }
+    if (enrichReport.notFoundOnTikHub > 0) {
+      parts.push(
+        `${enrichReport.notFoundOnTikHub} not found (region mismatch or delisted)`,
+      );
+    }
+    if (enrichReport.failedApi > 0) {
+      parts.push(`${enrichReport.failedApi} API failure(s)`);
+    }
+    const genReport = await triggerStyle1GenerationIfDiscountReady({
+      batchId: batch.id,
+      workspaceId: workspace.id,
+    });
+    if (genReport.queued > 0) {
+      parts.push(`Style 1 copy queued for ${genReport.queued} in the background`);
+    }
+    enrichmentSummary = parts.length > 0 ? ` ${parts.join(". ")}.` : "";
+  } catch (err) {
+    console.error(`[urls-import] enrichment threw for batch=${batch.id}:`, err);
+  }
+
+  // Same mobile-review token + QR minting as Kalodata import.
+  const tokenResp = await getOrCreateBatchReviewToken(batch.id);
+  if (!tokenResp.ok || !tokenResp.token) {
+    return {
+      ok: false,
+      message: `Imported ${productsCreated} URL(s) but couldn't mint a review link: ${tokenResp.message ?? "unknown error"}.`,
+      batchId: batch.id,
+    };
+  }
+  const appUrl = (process.env.NEXT_PUBLIC_APP_URL || "").trim();
+  const reviewUrl = appUrl
+    ? `${appUrl.replace(/\/$/, "")}/mobile-review/${tokenResp.token}`
+    : `/mobile-review/${tokenResp.token}`;
+  let qrDataUrl: string | undefined;
+  try {
+    qrDataUrl = await QRCode.toDataURL(reviewUrl, {
+      width: 256,
+      margin: 1,
+      color: { dark: "#0A1220", light: "#FFFFFF" },
+    });
+  } catch (err) {
+    console.error("[urls-import] QR render failed:", err);
+  }
+
+  revalidatePath("/prompts");
+  revalidatePath("/batches");
+  revalidatePath("/dashboard");
+
+  const rejectedNote =
+    rejected.length > 0
+      ? ` ${rejected.length} URL(s) were rejected (no product ID found).`
+      : "";
+  return {
+    ok: true,
+    message: `Imported ${productsCreated} product(s) from pasted URLs.${enrichmentSummary}${rejectedNote}`,
+    batchId: batch.id,
+    reviewToken: tokenResp.token,
+    reviewUrl,
+    qrDataUrl,
+  };
+}
+
+/**
  * Poll helper for the /prompts UI. Given a batchId returned by
  * importKalodataForPrompts, return the current review + generation
  * status of every product in the batch. The UI can poll this
