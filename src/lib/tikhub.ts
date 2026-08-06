@@ -2971,9 +2971,17 @@ function extractDescriptionText(v: unknown): string | null {
       try {
         const parsed = JSON.parse(v);
         const text = collectDescriptionText(parsed).trim();
-        if (text) return text;
+        // Trust the parse — even if the description is
+        // ALL images (Soundcore-style listings where sellers
+        // rely entirely on infographic panels for messaging),
+        // return null rather than falling through to the raw-
+        // JSON path. Falling through would dump the escaped
+        // JSON blob into the UI as "description text", which
+        // is worse than showing no description at all.
+        return text || null;
       } catch {
-        // Fall through to plain HTML-strip path
+        // Not valid JSON despite the shape — fall through to
+        // the plain HTML-strip path below.
       }
     }
     return stripHtml(v).trim() || null;
