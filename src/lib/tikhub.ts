@@ -2733,9 +2733,29 @@ function pluckImageUrls(d: Record<string, unknown>): string[] {
     seen.add(u);
     found.push(u);
   };
-  collectImageUrls(d, push, 0);
+  // Two-pass walk.
+  //
+  // First pass: prioritize the real product carousel by skipping
+  // known-noise keys (marketing infographics in `description`,
+  // UI config, shipping metadata, etc.). For most listings this
+  // fills the gallery with the actual product photos operators
+  // want for Google Flow paste.
+  //
+  // Second pass: SOME listings (Soundcore Sleep A30, and other
+  // image-only-description sellers) rely entirely on description
+  // infographic panels — they have empty product_model.images[]
+  // and only visual content lives in the description. If the
+  // first pass found nothing (or very little), retry allowing
+  // the noise keys so at least SOMETHING renders. Dedup handles
+  // any overlap with pass-one URLs.
+  collectImageUrls(d, push, 0, IMAGE_WALK_SKIP_KEYS);
+  if (found.length < 4) {
+    collectImageUrls(d, push, 0, EMPTY_SKIP_SET);
+  }
   return found.slice(0, 12);
 }
+
+const EMPTY_SKIP_SET: ReadonlySet<string> = new Set();
 
 /** Object keys we consume specially and MUST NOT re-visit during
  *  the object-values recursion below. If we did re-visit them
@@ -2791,6 +2811,7 @@ function collectImageUrls(
   v: unknown,
   push: (u: string) => void,
   depth: number,
+  skipKeys: ReadonlySet<string>,
 ): void {
   // Same reasoning as collectSkuDiscounts — TikTok Shop's nested
   // components put per-SKU image maps at ~12 levels deep. Cap
@@ -2799,15 +2820,15 @@ function collectImageUrls(
   if (v === null || v === undefined) return;
   if (typeof v === "string") {
     if (looksLikeImageUrl(v)) push(v);
-    // Some fields encode structured content as stringified JSON.
-    // Description USED to fall through here but it's now in the
-    // skip set (see IMAGE_WALK_SKIP_KEYS) so this branch is only
-    // exercised for other JSON-shaped strings TikHub might
-    // occasionally return.
+    // Some fields encode structured content as stringified JSON
+    // — parse and recurse so images buried inside content items
+    // like {"type":"image","image":{"url_list":[...]}} get
+    // picked up. The caller controls whether we ever REACH
+    // JSON-string fields via skipKeys.
     else if (looksLikeJsonPayload(v)) {
       try {
         const parsed = JSON.parse(v);
-        collectImageUrls(parsed, push, depth + 1);
+        collectImageUrls(parsed, push, depth + 1, skipKeys);
       } catch {
         // Not valid JSON despite the shape — ignore.
       }
@@ -2815,7 +2836,7 @@ function collectImageUrls(
     return;
   }
   if (Array.isArray(v)) {
-    for (const item of v) collectImageUrls(item, push, depth + 1);
+    for (const item of v) collectImageUrls(item, push, depth + 1, skipKeys);
     return;
   }
   if (typeof v === "object") {
@@ -2845,11 +2866,13 @@ function collectImageUrls(
     // Recurse into remaining keys — skip:
     //   - mirror list keys (already processed; skipping avoids
     //     re-picking-up the second mirror)
-    //   - noise keys (description marketing, UI config, etc.)
+    //   - keys in the caller's skipKeys set (description
+    //     marketing, UI config, etc. on the first pass — empty
+    //     on the fallback pass)
     for (const key of Object.keys(o)) {
       if (IMAGE_MIRROR_LIST_KEYS.has(key)) continue;
-      if (IMAGE_WALK_SKIP_KEYS.has(key)) continue;
-      collectImageUrls(o[key], push, depth + 1);
+      if (skipKeys.has(key)) continue;
+      collectImageUrls(o[key], push, depth + 1, skipKeys);
     }
   }
 }

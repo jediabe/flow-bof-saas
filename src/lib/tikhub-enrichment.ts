@@ -174,12 +174,18 @@ export async function enrichProductFromTikHub(input: {
   if (!row.discountType && detail.discountType) {
     updateData.discountType = detail.discountType;
   }
-  if (detail.additionalImages.length > 0) {
-    updateData.sourceImages = JSON.stringify(detail.additionalImages);
-  }
-  if (detail.sourceDescription) {
-    updateData.sourceDescription = detail.sourceDescription;
-  }
+  // ALWAYS overwrite source-* fields on every successful
+  // enrichment, even when the new value is null / empty. Without
+  // this, previously-stored stale data (raw JSON from the pre-fix
+  // description parser, description-infographic dupes from before
+  // the mirror-dedup fix, etc.) survived re-enrichment because
+  // the old "only overwrite when truthy" check meant a null
+  // extraction couldn't clear the field.
+  updateData.sourceImages =
+    detail.additionalImages.length > 0
+      ? JSON.stringify(detail.additionalImages)
+      : null;
+  updateData.sourceDescription = detail.sourceDescription ?? null;
   if (detail.title && isPlaceholderName(row.productName)) {
     updateData.productName = detail.title;
     if (isPlaceholderName(row.originalTitle)) {
