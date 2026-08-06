@@ -54,6 +54,21 @@ import {
 
 const POLL_INTERVAL_MS = 4000;
 
+/**
+ * Universal Google Flow MOTION prompts from the Style 1 SOP.
+ * Same for every product (unlike the image prompts, which need
+ * a store name or [SETTING] substitution). Pasted into Flow's
+ * video-generation step AFTER the operator has generated the
+ * still images via their external Google Flow tool. Kept as
+ * verbatim string constants — the SOP calls out that the exact
+ * phrasing is tuned, so we don't LLM-generate them.
+ */
+const SOP_SCENE1_MOTION_PROMPT =
+  "Bring the camera closer to the product and have a hand poke the product as if the person recording touched it";
+
+const SOP_SCENE2_MOTION_PROMPT =
+  "bring the camera slowly closer to the product naturally as if someone is filming it on their phone at home, and have a hand come in and poke the product as if the person recording reached out and touched it, no transitions, product stays the clear focus, no warping of the product or label";
+
 export default function PromptsHubClient({
   initialState,
   recentBatches,
@@ -1050,6 +1065,30 @@ function Style1KitContents({
         <pre className="text-[12px] leading-relaxed text-text bg-bg/60 border border-border rounded-xl px-3 py-2 whitespace-pre-wrap font-mono">
           {flowInput}
         </pre>
+      </div>
+
+      {/* 1b. Universal video motion prompts from the SOP.
+          Static — same wording for every product. Pasted into
+          Flow's video step AFTER the still images are generated.
+          Kept per-product so the operator can copy inline without
+          switching to the SOP tab. */}
+      <div className="panel p-4 space-y-3">
+        <div className="text-[11px] uppercase tracking-[0.14em] text-muted">
+          Video motion prompts (from Style 1 SOP)
+        </div>
+        <p className="text-[11px] text-muted leading-relaxed">
+          Universal — same wording for every product. Paste into
+          Flow&apos;s video-generation step AFTER your still images
+          come back.
+        </p>
+        <PromptRow
+          label="Scene 1 · store walk-up"
+          text={SOP_SCENE1_MOTION_PROMPT}
+        />
+        <PromptRow
+          label="Scene 2 · product at home"
+          text={SOP_SCENE2_MOTION_PROMPT}
+        />
       </div>
 
       {/* 2. Copy options — 5 per part. Tap on desktop persists
