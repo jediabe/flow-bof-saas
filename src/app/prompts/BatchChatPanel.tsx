@@ -488,17 +488,48 @@ function ChatBubble({ message }: { message: ChatMessage }) {
   }
   const attached = safeParseImages(message.attachedImagesJson);
   const toolCalls = safeParseToolCalls(message.toolCallsJson);
+  const mediaUrls = extractMediaUrls(message.content);
   return (
     <div className={isUser ? "flex justify-end" : "flex justify-start"}>
       <div
         className={
-          "max-w-[85%] rounded-2xl px-3 py-2 text-[13px] leading-relaxed whitespace-pre-wrap " +
+          "max-w-[85%] rounded-2xl px-3 py-2 text-[13px] leading-relaxed whitespace-pre-wrap break-words " +
           (isUser
             ? "bg-accent/15 border border-accent/40 text-text"
             : "bg-panel2 border border-border text-text")
         }
       >
-        {message.content}
+        <LinkifiedText text={message.content} />
+        {mediaUrls.length > 0 && (
+          <div className="mt-2 grid grid-cols-2 gap-2">
+            {mediaUrls.map((m) => (
+              <a
+                key={m.url}
+                href={m.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="block rounded-lg overflow-hidden border border-border bg-panel"
+                title={m.url}
+              >
+                {m.kind === "video" ? (
+                  <video
+                    src={m.url}
+                    controls
+                    playsInline
+                    className="w-full h-auto max-h-64 object-contain bg-black"
+                  />
+                ) : (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={m.url}
+                    alt="generated"
+                    className="w-full h-auto max-h-64 object-contain bg-black"
+                  />
+                )}
+              </a>
+            ))}
+          </div>
+        )}
         {attached.length > 0 && (
           <div className="mt-2 flex gap-1 flex-wrap">
             {attached.map((u) => (
@@ -507,7 +538,7 @@ function ChatBubble({ message }: { message: ChatMessage }) {
                 key={u}
                 src={u}
                 alt="attachment"
-                className="w-12 h-12 object-cover rounded-md border border-border"
+                className="w-14 h-14 object-cover rounded-md border border-border"
               />
             ))}
           </div>
@@ -528,6 +559,84 @@ function ChatBubble({ message }: { message: ChatMessage }) {
       </div>
     </div>
   );
+}
+
+/**
+ * Auto-linkify URLs in plain text. The agent replies in plain
+ * text per its SOP so it never renders markdown — this keeps
+ * URLs clickable without invoking a full markdown parser.
+ * Splits on the URL regex and reinserts anchor tags for matches.
+ */
+const URL_REGEX = /(https?:\/\/[^\s<>"']+)/g;
+
+function LinkifiedText({ text }: { text: string }) {
+  if (!text) return null;
+  const parts = text.split(URL_REGEX);
+  return (
+    <>
+      {parts.map((part, i) => {
+        if (i % 2 === 1) {
+          return (
+            <a
+              key={i}
+              href={part}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-accent underline break-all"
+            >
+              {part}
+            </a>
+          );
+        }
+        return <span key={i}>{part}</span>;
+      })}
+    </>
+  );
+}
+
+/**
+ * Pick URLs out of the bubble text that look like renderable
+ * media. Two heuristics:
+ *   1. File extension (image / video).
+ *   2. Known Google Flow / useapi asset hosts even when the URL
+ *      carries a query string with no visible extension (signed
+ *      URLs frequently look like this).
+ * Anything else is left as a link in the text body.
+ */
+interface MediaHit {
+  url: string;
+  kind: "image" | "video";
+}
+
+const IMAGE_EXT = /\.(png|jpe?g|webp|gif|avif)(\?|#|$)/i;
+const VIDEO_EXT = /\.(mp4|webm|mov|m4v)(\?|#|$)/i;
+const IMAGE_HOSTS = [
+  "googleusercontent.com",
+  "storage.googleapis.com",
+  "useapi.net",
+];
+const VIDEO_HOSTS = ["googlevideo.com"];
+
+function extractMediaUrls(text: string): MediaHit[] {
+  if (!text) return [];
+  const seen = new Set<string>();
+  const out: MediaHit[] = [];
+  const matches = text.match(URL_REGEX) ?? [];
+  for (const raw of matches) {
+    // Trim common trailing punctuation the regex greedy-grabs.
+    const url = raw.replace(/[.,;:!?)\]]+$/, "");
+    if (seen.has(url)) continue;
+    seen.add(url);
+    if (VIDEO_EXT.test(url) || VIDEO_HOSTS.some((h) => url.includes(h))) {
+      out.push({ url, kind: "video" });
+    } else if (
+      IMAGE_EXT.test(url) ||
+      IMAGE_HOSTS.some((h) => url.includes(h))
+    ) {
+      out.push({ url, kind: "image" });
+    }
+  }
+  return out;
 }
 
 function safeParseImages(json: string | null): string[] {
