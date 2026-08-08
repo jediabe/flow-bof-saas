@@ -21,7 +21,12 @@ RUN npm ci --no-audit --no-fund
 # Copy source + tsconfig and compile.
 COPY tsconfig.json ./
 COPY src ./src
-RUN npm run build
+# Call tsc directly rather than `npm run build` — the package's
+# `prebuild` hook runs `node test/check-deps.mjs`, but our
+# .dockerignore excludes test/ from the build context (we don't
+# want test helpers in the production image). tsc alone gives the
+# same output without the missing-file crash.
+RUN npx tsc
 
 # ---- runner -----------------------------------------------------
 FROM node:20-alpine AS runner
