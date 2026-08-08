@@ -39,9 +39,19 @@ import { db } from "@/lib/db";
 import { loadOrCreateSettings } from "@/lib/workspace-settings";
 import { callMcpTool, listMcpTools } from "@/lib/apex-mcp";
 
-/** Anthropic model for the agent loop. Sonnet 5 is the picked
- *  default — best tool-use balance for the price. */
-const MODEL = "claude-sonnet-5";
+/** Anthropic model when calling Anthropic directly. Sonnet 5 is
+ *  the picked default — best tool-use balance for the price.
+ *  Overridable via WorkspaceSettings.anthropicModel. */
+const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5";
+
+/** Default model when routing through OpenRouter. OpenRouter
+ *  uses prefixed model IDs (`<provider>/<name>`); we default to
+ *  the newest Sonnet variant they typically carry. Overridable
+ *  via WorkspaceSettings.openrouterModel — if OpenRouter hasn't
+ *  yet added a model, the operator can set the exact id there.
+ *  We deliberately DON'T default to openrouter/auto because
+ *  auto-routing can land on a model without tool-use support. */
+const DEFAULT_OPENROUTER_MODEL = "anthropic/claude-sonnet-4.5";
 
 /** Hard cap on the agent loop. Prevents runaway tool-call chains
  *  from a hallucinating model. Real Style-1 flows should finish
@@ -98,12 +108,46 @@ async function* runAgentTurnInner(input: {
   conversationId: string;
 }): AsyncGenerator<AgentEvent, void, void> {
   const settings = await loadOrCreateSettings(input.workspaceId);
-  const apiKey = (settings.anthropicApiKey ?? "").trim();
-  if (!apiKey) {
+  // Provider selection: prefer a direct Anthropic key when set;
+  // fall back to OpenRouter routed through Anthropic's SDK via
+  // baseURL override. OpenRouter's /api/v1/messages endpoint is
+  // Anthropic-Messages-API-compatible and passes tool_use /
+  // tool_result blocks through to the underlying model, so the
+  // rest of the agent loop is provider-agnostic.
+  const anthropicKey  = (settings.anthropicApiKey  ?? "").trim();
+  const openrouterKey = (settings.openrouterApiKey ?? "").trim();
+
+  let apiKey: string;
+  let baseURL: string | undefined;
+  let modelName: string;
+  let providerLabel: string;
+  let defaultHeaders: Record<string, string> | undefined;
+
+  if (anthropicKey) {
+    apiKey = anthropicKey;
+    baseURL = undefined;
+    modelName =
+      (settings.anthropicModel ?? "").trim() || DEFAULT_ANTHROPIC_MODEL;
+    providerLabel = "Anthropic";
+  } else if (openrouterKey) {
+    apiKey = openrouterKey;
+    baseURL = "https://openrouter.ai/api/v1";
+    modelName =
+      (settings.openrouterModel ?? "").trim() || DEFAULT_OPENROUTER_MODEL;
+    providerLabel = "OpenRouter";
+    // OpenRouter's per-app leaderboard headers. Optional but a
+    // nice signal on their dashboard about which app is calling.
+    const headers: Record<string, string> = {};
+    if (settings.openrouterSiteUrl)
+      headers["HTTP-Referer"] = settings.openrouterSiteUrl;
+    if (settings.openrouterAppName)
+      headers["X-Title"] = settings.openrouterAppName;
+    if (Object.keys(headers).length > 0) defaultHeaders = headers;
+  } else {
     yield {
       type: "error",
       message:
-        "No Anthropic API key configured on this workspace. Set one in Settings → AI Providers.",
+        "No AI provider key configured. Set an Anthropic OR OpenRouter API key in Settings → AI Providers.",
     };
     return;
   }
@@ -167,7 +211,14 @@ async function* runAgentTurnInner(input: {
     return;
   }
 
-  const anthropic = new Anthropic({ apiKey });
+  const anthropic = new Anthropic({
+    apiKey,
+    ...(baseURL ? { baseURL } : {}),
+    ...(defaultHeaders ? { defaultHeaders } : {}),
+  });
+  console.log(
+    `[agent-runner] provider=${providerLabel} model=${modelName} workspace=${input.workspaceId}`,
+  );
   const systemPrompt = buildSystemPrompt();
 
   // Tool-use loop. Each iteration: send messages[] to Anthropic,
@@ -182,7 +233,7 @@ async function* runAgentTurnInner(input: {
       // for perceived speed but adds complexity around handling
       // partial tool_use blocks. Can retrofit later.
       finalMessage = await anthropic.messages.create({
-        model: MODEL,
+        model: modelName,
         max_tokens: MAX_TOKENS,
         system: systemPrompt,
         tools: anthropicTools,
