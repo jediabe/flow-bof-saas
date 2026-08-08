@@ -198,3 +198,143 @@ export async function mcpDisconnectGoogleFlowAccount(
     { method: "DELETE" },
   );
 }
+
+/* ------------------------------------------------------------------
+ * /mcp — MCP tool client (JWT-authenticated, per-request)
+ *
+ * The MCP server's /mcp endpoint is stateless: a fresh transport
+ * and server per POST, no sessions. We use the official MCP SDK's
+ * Client + StreamableHTTPClientTransport to speak JSON-RPC over
+ * that endpoint.
+ *
+ * Auth: per-request HS256 JWT signed with APEX_JWT_SECRET. The
+ * MCP server verifies signature + reads sub (user/workspace id)
+ * and flow_email (which connected Google Flow account to act as)
+ * from the payload.
+ *
+ * Never expose flow_email to the model — it comes from the
+ * workspace's persisted binding (WorkspaceSettings.flowEmail),
+ * NOT from anywhere the model or a user-supplied field can
+ * influence. That's the whole point of the signed-claim design.
+ * ---------------------------------------------------------------- */
+
+import jwt from "jsonwebtoken";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+
+/** HS256 secret shared with the MCP server. Both containers must
+ *  have the SAME value. */
+function jwtSecret(): string {
+  const s = (process.env.APEX_JWT_SECRET || "").trim();
+  if (!s) {
+    throw new Error(
+      "APEX_JWT_SECRET is not set. Add it to .env.production — must match the MCP container's value.",
+    );
+  }
+  return s;
+}
+
+/** Mint an HS256 JWT for a single MCP request. Short expiry so
+ *  a leaked token can't be replayed indefinitely. sub identifies
+ *  the workspace/user (currently workspace id — see the deferred
+ *  per-user migration memo); flow_email picks which connected
+ *  Google Flow account the MCP server should act as. */
+export function mintMcpJwt(input: {
+  sub: string;
+  flowEmail: string;
+  /** Seconds until expiry. Default 5 min — plenty for one tool
+   *  call including polling; short enough to limit blast radius
+   *  on leak. */
+  expiresInSeconds?: number;
+}): string {
+  const now = Math.floor(Date.now() / 1000);
+  const expiresIn = input.expiresInSeconds ?? 300;
+  return jwt.sign(
+    {
+      sub:        input.sub,
+      flow_email: input.flowEmail,
+      iat:        now,
+      exp:        now + expiresIn,
+    },
+    jwtSecret(),
+    { algorithm: "HS256" },
+  );
+}
+
+/** Build a fresh MCP client bound to a JWT. Callers should call
+ *  connect() before use and close() afterwards. Stateless: don't
+ *  cache — every logical operation (list-tools, one-tool-call)
+ *  gets its own connection so a JWT expiring mid-loop doesn't
+ *  poison the whole conversation. */
+export async function connectMcpClient(input: {
+  sub: string;
+  flowEmail: string;
+}): Promise<Client> {
+  const token = mintMcpJwt(input);
+  const url = new URL(`${mcpBaseUrl()}/mcp`);
+  const transport = new StreamableHTTPClientTransport(url, {
+    requestInit: {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    },
+  });
+  const client = new Client(
+    { name: "flow-bof-saas", version: "0.1.0" },
+    { capabilities: {} },
+  );
+  await client.connect(transport);
+  return client;
+}
+
+/** One-shot: discover the tools available on the MCP server for
+ *  this JWT. Used at agent-loop start to bind the tool schemas
+ *  into the Anthropic Messages API `tools` parameter. */
+export async function listMcpTools(input: {
+  sub: string;
+  flowEmail: string;
+}): Promise<Array<{
+  name: string;
+  description: string | undefined;
+  inputSchema: unknown;
+}>> {
+  const client = await connectMcpClient(input);
+  try {
+    const resp = await client.listTools();
+    return resp.tools.map((t) => ({
+      name: t.name,
+      description: t.description,
+      inputSchema: t.inputSchema,
+    }));
+  } finally {
+    await client.close().catch(() => {});
+  }
+}
+
+/** One-shot: call a tool and return the structured result. */
+export async function callMcpTool(input: {
+  sub: string;
+  flowEmail: string;
+  name: string;
+  args: Record<string, unknown>;
+}): Promise<{
+  isError: boolean;
+  content: unknown[];
+  structuredContent?: unknown;
+}> {
+  const client = await connectMcpClient(input);
+  try {
+    const result = await client.callTool({
+      name: input.name,
+      arguments: input.args,
+    });
+    return {
+      isError: Boolean(result.isError),
+      content: Array.isArray(result.content) ? result.content : [],
+      structuredContent: (result as { structuredContent?: unknown })
+        .structuredContent,
+    };
+  } finally {
+    await client.close().catch(() => {});
+  }
+}

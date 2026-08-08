@@ -173,57 +173,9 @@ export async function renameConversation(input: {
   return { ok: true };
 }
 
-/* ------------------------------------------------------------------
- * Send message (SCAFFOLD — Commit 4 adds the LLM turn)
- * ---------------------------------------------------------------- */
-
-export async function sendUserMessage(input: {
-  conversationId: string;
-  text: string;
-}): Promise<{ ok: boolean; message?: string; messageId?: string }> {
-  const text = (input.text ?? "").trim();
-  if (!input.conversationId) {
-    return { ok: false, message: "missing conversationId" };
-  }
-  if (!text) return { ok: false, message: "message cannot be empty" };
-  if (text.length > 20_000) {
-    return { ok: false, message: "message too long (max 20k chars)" };
-  }
-  const { workspace } = await getCurrentWorkspace();
-  const conv = await db.conversation.findFirst({
-    where: {
-      id: input.conversationId,
-      workspaceId: workspace.id,
-      deletedAt: null,
-    },
-    select: { id: true, title: true, _count: { select: { messages: true } } },
-  });
-  if (!conv) return { ok: false, message: "conversation not found" };
-
-  const created = await db.message.create({
-    data: {
-      conversationId: conv.id,
-      role:    "user",
-      content: text,
-    },
-    select: { id: true },
-  });
-
-  // Auto-derive a conversation title from the FIRST user message —
-  // truncated to something readable. If the operator later renames
-  // it manually, renameConversation writes and this path never
-  // touches it again (only fires when messageCount was 0).
-  if (conv._count.messages === 0 && conv.title === "New chat") {
-    const autoTitle =
-      text.length <= 60
-        ? text
-        : text.slice(0, 60).replace(/\s+\S*$/, "") + "…";
-    await db.conversation.update({
-      where: { id: conv.id },
-      data:  { title: autoTitle },
-    });
-  }
-
-  revalidatePath("/generate");
-  return { ok: true, messageId: created.id };
-}
+// sendUserMessage removed in Commit 4 — the SSE endpoint at
+// /api/generate/stream/[conversationId] now handles the user
+// message persistence + auto-title derivation as part of the
+// same request that runs the agent loop. This keeps the "user
+// input → agent turn → persisted history" happening in one
+// atomic-ish flow instead of two round-trips.

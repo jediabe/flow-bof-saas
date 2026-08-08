@@ -1,32 +1,53 @@
 "use client";
 
 /**
- * /generate chat UI — scaffold (Commit 3).
+ * /generate chat UI — Commit 4 (agent loop wired).
  *
  * Two-pane layout: conversation list on the left, active thread
  * on the right. Selected conversation lives in the URL (?c=<id>)
- * so refresh preserves it and back/forward works.
+ * so refresh preserves it.
  *
- * SCAFFOLD status: send persists a user message and echoes an
- * assistant placeholder ("agent loop lands in Commit 4"). No
- * MCP calls, no LLM, no streaming — the shape is here so
- * Commit 4 only needs to swap the placeholder for real
- * sendMessage plumbing.
+ * Sending a message opens an SSE connection to
+ * /api/generate/stream/<conversationId> — the server persists
+ * the user message, runs the Anthropic tool-use loop against the
+ * APEX MCP, and streams events back:
+ *   text_delta      → append to a live "streaming" assistant bubble
+ *   tool_call       → render an expandable "🔧 tool_name" pill
+ *   tool_result     → attach preview + status to the matching pill
+ *   message_saved   → note that a DB row exists (used for eventual
+ *                     reconciliation on refresh)
+ *   done            → refetch conversation, drop the streaming bubble
+ *   error           → red banner + drop the streaming state
  */
 
-import { useEffect, useMemo, useState, useTransition } from "react";
+import { useCallback, useEffect, useState, useTransition } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import {
   createConversation,
   deleteConversation,
   getConversationDetail,
-  renameConversation,
-  sendUserMessage,
   type ConversationSummary,
   type ConversationDetail,
   type ChatMessage,
 } from "./actions";
+
+/** In-progress state maintained locally while the SSE stream is
+ *  running for the currently-selected conversation. Not persisted;
+ *  when the stream ends we refetch the conversation from the DB
+ *  which is the source of truth. */
+interface StreamingState {
+  /** Accumulating assistant text as text_delta events arrive. */
+  text: string;
+  /** In-flight tool calls this turn, keyed by toolUseId. Each
+   *  gets a "result" appended when the paired tool_result arrives. */
+  toolCalls: Array<{
+    toolUseId: string;
+    name: string;
+    input: Record<string, unknown>;
+    result?: { isError: boolean; preview: string };
+  }>;
+}
 
 export default function GenerateClient({
   initialConversations,
@@ -45,9 +66,14 @@ export default function GenerateClient({
   const [detail, setDetail] = useState<ConversationDetail | null>(initialSelected);
   const [refreshing, startRefresh] = useTransition();
 
-  // Whenever the URL's ?c changes (nav / back / initial route),
-  // refetch that conversation's detail. Server-side initial fetch
-  // covers the first paint; this handles subsequent selections.
+  const reloadConversationDetail = useCallback(
+    async (id: string) => {
+      const d = await getConversationDetail(id);
+      setDetail(d);
+    },
+    [],
+  );
+
   useEffect(() => {
     if (!selectedId) {
       setDetail(null);
@@ -58,21 +84,13 @@ export default function GenerateClient({
       return;
     }
     startRefresh(async () => {
-      const d = await getConversationDetail(selectedId);
-      setDetail(d);
+      await reloadConversationDetail(selectedId);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId]);
 
   function selectConversation(id: string) {
     router.replace(`/generate?c=${id}`);
-  }
-
-  async function reloadConversations() {
-    // Actions revalidate /generate; router.refresh triggers a
-    // server-component re-render. Also mirror into local state
-    // for immediate UI feedback.
-    router.refresh();
   }
 
   return (
@@ -83,12 +101,12 @@ export default function GenerateClient({
         onSelect={selectConversation}
         onCreated={(id) => {
           selectConversation(id);
-          reloadConversations();
+          router.refresh();
         }}
         onDeleted={(id) => {
           setConversations((prev) => prev.filter((c) => c.id !== id));
           if (selectedId === id) router.replace("/generate");
-          reloadConversations();
+          router.refresh();
         }}
       />
       <ThreadPane
@@ -96,23 +114,10 @@ export default function GenerateClient({
         selectedId={selectedId}
         refreshing={refreshing}
         flowEmail={flowEmail}
-        onMessageSent={(newMsg) => {
-          setDetail((prev) =>
-            prev && prev.ok
-              ? {
-                  ...prev,
-                  messages: [...(prev.messages ?? []), newMsg],
-                }
-              : prev,
-          );
-          reloadConversations();
-        }}
-        onTitleChanged={(id, newTitle) => {
-          setConversations((prev) =>
-            prev.map((c) => (c.id === id ? { ...c, title: newTitle } : c)),
-          );
-          if (detail && detail.id === id) {
-            setDetail({ ...detail, title: newTitle });
+        onTurnComplete={async () => {
+          if (selectedId) {
+            await reloadConversationDetail(selectedId);
+            router.refresh();
           }
         }}
       />
@@ -121,7 +126,7 @@ export default function GenerateClient({
 }
 
 /* ------------------------------------------------------------------
- * Left rail — conversation list + new-chat button
+ * Left rail
  * ---------------------------------------------------------------- */
 
 function ConversationRail({
@@ -231,7 +236,7 @@ function ConversationRow({
 }
 
 /* ------------------------------------------------------------------
- * Right pane — active thread
+ * Right pane — thread + composer + streaming
  * ---------------------------------------------------------------- */
 
 function ThreadPane({
@@ -239,54 +244,151 @@ function ThreadPane({
   selectedId,
   refreshing,
   flowEmail,
-  onMessageSent,
-  onTitleChanged,
+  onTurnComplete,
 }: {
   detail: ConversationDetail | null;
   selectedId: string | null;
   refreshing: boolean;
   flowEmail: string | null;
-  onMessageSent: (msg: ChatMessage) => void;
-  onTitleChanged: (id: string, title: string) => void;
+  onTurnComplete: () => Promise<void>;
 }) {
   const [draft, setDraft] = useState("");
-  const [sendPending, startSend] = useTransition();
+  const [streaming, setStreaming] = useState<StreamingState | null>(null);
   const [error, setError] = useState<string | null>(null);
-
-  const messages = detail?.messages ?? [];
   const hasFlowEmail = !!flowEmail;
+  const isBusy = streaming !== null;
 
-  function send() {
-    if (!selectedId || !draft.trim() || sendPending) return;
+  async function send() {
+    if (!selectedId || !draft.trim() || isBusy) return;
+    if (!hasFlowEmail) {
+      setError(
+        "Bind a Google Flow account in Settings before running the agent.",
+      );
+      return;
+    }
     setError(null);
     const text = draft;
-    startSend(async () => {
-      const r = await sendUserMessage({ conversationId: selectedId, text });
-      if (!r.ok) {
-        setError(r.message || "send failed");
-        return;
-      }
-      setDraft("");
-      onMessageSent({
-        id: r.messageId!,
-        role: "user",
-        content: text,
-        toolCallsJson: null,
-        toolResultJson: null,
-        createdAt: new Date().toISOString(),
+    setDraft("");
+    setStreaming({ text: "", toolCalls: [] });
+    // Optimistically render the user's message right away —
+    // we know the server will persist it. The refetch after
+    // done reconciles.
+
+    let resp: Response;
+    try {
+      resp = await fetch(`/api/generate/stream/${selectedId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
       });
-      // Refresh full detail to catch the auto-derived title if
-      // this was the first message.
-      const fresh = await getConversationDetail(selectedId);
-      if (fresh.ok && fresh.title && detail?.id === selectedId) {
-        onTitleChanged(fresh.id!, fresh.title);
+    } catch (err) {
+      setStreaming(null);
+      setError(
+        `Failed to open stream: ${(err as Error).message?.slice(0, 200)}`,
+      );
+      return;
+    }
+    if (!resp.ok || !resp.body) {
+      setStreaming(null);
+      setError(
+        `Stream request failed: ${resp.status} ${resp.statusText}`,
+      );
+      return;
+    }
+
+    // Consume the SSE stream by hand (EventSource doesn't
+    // support POST bodies, so we use fetch + a reader).
+    const reader = resp.body
+      .pipeThrough(new TextDecoderStream())
+      .getReader();
+    let buffer = "";
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += value;
+        // SSE frames are separated by \n\n.
+        let sepIndex;
+        while ((sepIndex = buffer.indexOf("\n\n")) !== -1) {
+          const frame = buffer.slice(0, sepIndex);
+          buffer = buffer.slice(sepIndex + 2);
+          const parsed = parseSseFrame(frame);
+          if (parsed) handleAgentEvent(parsed);
+        }
       }
-    });
+    } catch (err) {
+      setError(
+        `Stream read error: ${(err as Error).message?.slice(0, 200)}`,
+      );
+    } finally {
+      reader.releaseLock();
+    }
+
+    // Wrap up: refetch conversation from DB so the transcript is
+    // canonical, then drop the local streaming state.
+    await onTurnComplete();
+    setStreaming(null);
+
+    function handleAgentEvent(evt: {
+      event: string;
+      data: Record<string, unknown>;
+    }) {
+      switch (evt.event) {
+        case "text_delta": {
+          const delta = String(evt.data.delta ?? "");
+          setStreaming((prev) =>
+            prev ? { ...prev, text: prev.text + delta } : prev,
+          );
+          break;
+        }
+        case "tool_call": {
+          const toolUseId = String(evt.data.toolUseId ?? "");
+          const name = String(evt.data.name ?? "");
+          const input =
+            (evt.data.input as Record<string, unknown>) ?? {};
+          setStreaming((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  toolCalls: [
+                    ...prev.toolCalls,
+                    { toolUseId, name, input },
+                  ],
+                }
+              : prev,
+          );
+          break;
+        }
+        case "tool_result": {
+          const toolUseId = String(evt.data.toolUseId ?? "");
+          const isError = Boolean(evt.data.isError);
+          const preview = String(evt.data.preview ?? "");
+          setStreaming((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  toolCalls: prev.toolCalls.map((tc) =>
+                    tc.toolUseId === toolUseId
+                      ? { ...tc, result: { isError, preview } }
+                      : tc,
+                  ),
+                }
+              : prev,
+          );
+          break;
+        }
+        case "error": {
+          setError(String(evt.data.message ?? "unknown error"));
+          break;
+        }
+        // message_saved / done: no UI update needed — done ends
+        // the loop, message_saved is for eventual reconciliation
+        break;
+      }
+    }
   }
 
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
-    // Cmd/Ctrl + Enter to send. Plain Enter inserts newline —
-    // agent prompts are often multi-line.
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       send();
@@ -311,15 +413,14 @@ function ThreadPane({
         <div className="text-sm text-bad">
           {detail.message || "Conversation not found"}
         </div>
-        <Link
-          href="/generate"
-          className="btn btn-sm mt-4 inline-block"
-        >
+        <Link href="/generate" className="btn btn-sm mt-4 inline-block">
           Back to list
         </Link>
       </div>
     );
   }
+
+  const messages = detail?.messages ?? [];
 
   return (
     <section className="panel flex flex-col min-h-0">
@@ -341,12 +442,17 @@ function ThreadPane({
       )}
 
       <div className="flex-1 overflow-y-auto px-4 py-4 space-y-3">
-        {messages.length === 0 ? (
+        {messages.length === 0 && !streaming ? (
           <div className="text-[12px] text-muted2 italic text-center py-8">
             Send the first message to start the conversation.
           </div>
         ) : (
-          messages.map((m) => <MessageBubble key={m.id} message={m} />)
+          <>
+            {messages.map((m) => (
+              <MessageBubble key={m.id} message={m} />
+            ))}
+            {streaming && <StreamingBubble state={streaming} />}
+          </>
         )}
       </div>
 
@@ -355,7 +461,7 @@ function ThreadPane({
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={onKeyDown}
-          disabled={sendPending}
+          disabled={isBusy}
           rows={3}
           placeholder={
             hasFlowEmail
@@ -367,19 +473,22 @@ function ThreadPane({
         <div className="flex items-center justify-between gap-2">
           {error ? (
             <span className="text-[11px] text-bad">{error}</span>
+          ) : isBusy ? (
+            <span className="text-[11px] text-accent">
+              Agent working…
+            </span>
           ) : (
             <span className="text-[11px] text-muted2">
-              Cmd/Ctrl+Enter to send. Agent loop lands in the next
-              commit — for now, messages just persist.
+              Cmd/Ctrl+Enter to send.
             </span>
           )}
           <button
             type="button"
             onClick={send}
-            disabled={sendPending || !draft.trim()}
+            disabled={isBusy || !draft.trim() || !hasFlowEmail}
             className="btn btn-primary text-xs"
           >
-            {sendPending ? "Sending…" : "Send"}
+            {isBusy ? "…" : "Send"}
           </button>
         </div>
       </footer>
@@ -401,28 +510,174 @@ function ConnectFlowNudge() {
   );
 }
 
+/* ------------------------------------------------------------------
+ * Message bubbles
+ * ---------------------------------------------------------------- */
+
 function MessageBubble({ message }: { message: ChatMessage }) {
+  // A user-role row is EITHER a plain user message (content set,
+  // toolResultJson null) OR a tool_result row (content empty,
+  // toolResultJson populated). Render the latter as a compact
+  // tool-result pill.
+  if (message.role === "user" && message.toolResultJson) {
+    return <PersistedToolResult json={message.toolResultJson} />;
+  }
   const isUser = message.role === "user";
   const isAssistant = message.role === "assistant";
-  // Scaffold: no assistant / tool rendering yet since we don't
-  // create those rows. Bubble style is user-first.
+  const toolCalls = message.toolCallsJson
+    ? safeParseArray(message.toolCallsJson)
+    : [];
+
   return (
     <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
       <div
-        className={`max-w-[85%] px-3 py-2 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap ${
+        className={`max-w-[85%] px-3 py-2 rounded-2xl text-sm leading-relaxed space-y-2 ${
           isUser
-            ? "bg-accent/15 text-text"
+            ? "bg-accent/15 text-text whitespace-pre-wrap"
             : isAssistant
               ? "bg-panel2 text-text border border-border"
               : "bg-panel2 text-muted border border-border font-mono text-[11px]"
         }`}
       >
-        {message.content}
+        {message.content && (
+          <div className="whitespace-pre-wrap">{message.content}</div>
+        )}
+        {toolCalls.map((tc, i) => (
+          <ToolCallPill
+            key={(tc.id as string) ?? i}
+            name={String(tc.name ?? "")}
+            input={(tc.input as Record<string, unknown>) ?? {}}
+          />
+        ))}
       </div>
     </div>
   );
 }
 
-// Suppress unused-import warning for useMemo. Left imported for
-// Commit 4 which will use it heavily (tool-call parsing per turn).
-void useMemo;
+function StreamingBubble({ state }: { state: StreamingState }) {
+  return (
+    <div className="flex justify-start">
+      <div className="max-w-[85%] px-3 py-2 rounded-2xl text-sm leading-relaxed space-y-2 bg-panel2 text-text border border-border">
+        {state.text && (
+          <div className="whitespace-pre-wrap">{state.text}</div>
+        )}
+        {state.toolCalls.map((tc) => (
+          <div key={tc.toolUseId} className="space-y-1">
+            <ToolCallPill name={tc.name} input={tc.input} />
+            {tc.result ? (
+              <ToolResultRow
+                isError={tc.result.isError}
+                preview={tc.result.preview}
+              />
+            ) : (
+              <div className="text-[10px] text-muted2 italic pl-2">
+                waiting for result…
+              </div>
+            )}
+          </div>
+        ))}
+        {!state.text && state.toolCalls.length === 0 && (
+          <div className="text-[10px] text-muted2 italic">thinking…</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function PersistedToolResult({ json }: { json: string }) {
+  const parsed = safeParseObject(json);
+  const isError = Boolean(parsed.is_error);
+  const content =
+    typeof parsed.content === "string" ? parsed.content : "";
+  return (
+    <div className="flex justify-start">
+      <div className="max-w-[85%] w-full">
+        <ToolResultRow isError={isError} preview={content.slice(0, 300)} />
+      </div>
+    </div>
+  );
+}
+
+function ToolCallPill({
+  name,
+  input,
+}: {
+  name: string;
+  input: Record<string, unknown>;
+}) {
+  return (
+    <details className="rounded-lg border border-border bg-bg/60 text-[11px]">
+      <summary className="cursor-pointer px-2 py-1 text-accent hover:text-text">
+        🔧 {name}
+      </summary>
+      <pre className="px-2 py-2 border-t border-border overflow-x-auto text-[10px] text-muted leading-relaxed whitespace-pre">
+        {JSON.stringify(input, null, 2)}
+      </pre>
+    </details>
+  );
+}
+
+function ToolResultRow({
+  isError,
+  preview,
+}: {
+  isError: boolean;
+  preview: string;
+}) {
+  return (
+    <div
+      className={`rounded-lg border text-[10px] px-2 py-1 leading-relaxed ${
+        isError
+          ? "border-bad/40 bg-bad/10 text-bad"
+          : "border-ok/40 bg-ok/[0.06] text-muted"
+      }`}
+    >
+      <span className="font-semibold">
+        {isError ? "tool error:" : "result:"}
+      </span>{" "}
+      <span className="whitespace-pre-wrap break-all">{preview}</span>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------
+ * Helpers
+ * ---------------------------------------------------------------- */
+
+function parseSseFrame(
+  frame: string,
+): { event: string; data: Record<string, unknown> } | null {
+  const lines = frame.split("\n");
+  let event = "";
+  let data = "";
+  for (const line of lines) {
+    if (line.startsWith("event:")) event = line.slice(6).trim();
+    else if (line.startsWith("data:")) data += line.slice(5).trim();
+  }
+  if (!event || !data) return null;
+  try {
+    return { event, data: JSON.parse(data) as Record<string, unknown> };
+  } catch {
+    return null;
+  }
+}
+
+function safeParseArray(json: string): Array<Record<string, unknown>> {
+  try {
+    const parsed = JSON.parse(json);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function safeParseObject(json: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(json);
+    return parsed && typeof parsed === "object"
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+}
