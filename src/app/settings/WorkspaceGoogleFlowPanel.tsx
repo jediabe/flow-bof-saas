@@ -82,7 +82,7 @@ export default function WorkspaceGoogleFlowPanel({
   return (
     <div className="space-y-4">
       <p className="text-xs text-muted leading-relaxed">
-        Connect a Google Flow account to unlock the /generate video
+        Connect a Google Flow account to unlock the per-batch chat
         agent. Every generated video runs on this account&apos;s
         credits. Pick from what&apos;s already on your useapi.net
         subscription, or add a new one via cookie paste.

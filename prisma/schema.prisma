@@ -80,43 +80,44 @@ model Workspace {
   // Rotate freely — old token is invalidated the moment a new
   // one is generated.
   apiToken   String? @unique
-  // MCP /generate chat conversations — one workspace has many.
-  conversations Conversation[]
+  // NOTE: Conversation used to live at workspace scope. Moved to
+  // batch scope in the /prompts chat-panel refactor — see
+  // Batch.conversations below.
 }
 
 // ---------------------------------------------------------------------------
-// /generate agent chat — conversations + messages
+// Batch-scoped LLM chat — conversations + messages
 //
-// Backs the workspace-level chat UI where the operator talks to an
-// LLM agent that has both our custom product-context tools AND the
-// APEX MCP's 19 Flow tools bound. The LLM plans / calls tools /
-// composes video kits per-product; results attach to Products via
-// the FlowGeneratedVideo table (added in Commit 7).
+// Backs the chat panel inside /prompts. Each Batch has its own
+// conversations so the operator's mental model ("I'm working on
+// this batch") maps 1:1 to their transcript history. Cross-batch
+// / workspace-level chat was the /generate page (deleted in the
+// same commit that added this shape).
 //
-// Multiple threads per workspace, indexed for cheap listing. No
-// per-user scoping yet — matches the current single-operator
-// workspace model. When real multi-user auth lands, add a userId
-// column so threads become per-user within a workspace.
+// One conversation can persist a "currentProductId" so switching
+// back to it later remembers which product the operator was
+// working on. Product selection drives which images the picker
+// surfaces for attachment.
 
 model Conversation {
   id          String   @id @default(cuid())
-  workspaceId String
-  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  batchId     String
+  batch       Batch    @relation(fields: [batchId], references: [id], onDelete: Cascade)
   // Human-readable title — auto-derived from the first user
-  // message ("Generate videos for the Ninja..." → "Ninja
-  // videos") or defaults to "New chat" until edited/first-
-  // message-set.
+  // message or defaults to "New chat" until edited.
   title       String   @default("New chat")
-  // Soft-delete flag so a hidden thread doesn't lose its history
-  // (we may want undo later). Real cleanup is a manual cron
-  // decision, not a per-user action.
+  // Product currently focused in the chat panel — drives which
+  // images show up in the reference picker. Null on a fresh
+  // conversation; set when the operator picks a product.
+  currentProductId String?
+  // Soft-delete flag so a hidden thread doesn't lose its history.
   deletedAt   DateTime?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
   messages    Message[]
 
-  @@index([workspaceId, updatedAt(sort: Desc)])
+  @@index([batchId, updatedAt(sort: Desc)])
 }
 
 model Message {
@@ -129,25 +130,23 @@ model Message {
   //                 stored under toolResultJson below)
   //   "assistant" — LLM output (also carries tool_use blocks
   //                 in toolCallsJson)
-  //   "system"    — never persisted; system prompt is built per-
-  //                 request from the SOP + workspace context and
-  //                 not part of the transcript
   role           String
   // Plain text content for user turns and text portions of
-  // assistant turns. Empty string when the turn is 100% tool-use
-  // (rare — Anthropic almost always emits a lead-in text block).
+  // assistant turns.
   content        String   @default("")
   // JSON-encoded array of Anthropic tool_use blocks when
-  // role="assistant" and the turn included tool calls. Shape
-  // matches the Messages API: [{type:"tool_use", id, name, input}].
-  // Rendered in the UI as expandable "🔧 tool_name" pills.
+  // role="assistant" and the turn included tool calls.
   toolCallsJson  String?
   // JSON-encoded tool_result block when role="user" and this row
   // is the paired result for the previous assistant's tool_use.
-  // Shape: {type:"tool_result", tool_use_id, content}. Kept as a
-  // separate field so the plain "content" column stays clean
-  // text for the transcript view.
   toolResultJson String?
+  // JSON-encoded array of image URLs the operator attached to
+  // this user turn (from the reference-image picker). Kept
+  // separate from content so the raw text stays clean in the
+  // transcript view; the agent runner rebuilds the prepended
+  // "[Reference images: ...]" block when constructing the
+  // Anthropic MessageParam on send.
+  attachedImagesJson String?
   createdAt      DateTime @default(now())
 
   @@index([conversationId, createdAt])
@@ -350,6 +349,10 @@ model Batch {
   // Flow-reconciliation tab to group unmatched / bound / ignored
   // tiles per batch instead of mixing tiles from other batches.
   flowItems FlowItem[]
+  // Chat-panel refactor: each batch owns its own /generate
+  // conversations. Deletes cascade so a removed batch takes its
+  // transcript with it.
+  conversations Conversation[]
 
   @@index([workspaceId])
 }

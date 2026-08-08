@@ -1,22 +1,25 @@
 /**
- * Local tools for the /generate agent — workspace-scoped functions
- * the LLM can call alongside the APEX MCP's 19 Flow tools.
+ * Local tools for the APEX MCP chat agent — batch-scoped
+ * functions the LLM can call alongside the MCP's Google Flow
+ * tools.
  *
- * These give the agent context about our own data model:
- *   - What products are in this workspace
- *   - What copy / images / discount each product has
- *   - How to persist a generated video back to a product so it
- *     appears on the mobile posting page
+ * Scope: every tool operates on the products of ONE batch (the
+ * batch that owns the current conversation). The chat panel
+ * refactor moved conversations under Batch so the agent's
+ * mental model matches the operator's — "help me finish this
+ * batch" — instead of surfacing every product in the workspace.
  *
- * Every tool is namespaced with the `local_` prefix so it's
- * unambiguous which layer runs a given call in the agent loop
- * (local_* → runLocalTool, everything else → callMcpTool).
+ * Every tool is namespaced with the `local_` prefix so dispatch
+ * in the runner is unambiguous (local_* → runLocalTool,
+ * everything else → callMcpTool).
  *
  * SECURITY MODEL: every input arg the LLM supplies is treated as
- * untrusted — no eval, no dynamic SQL, no raw file access. workspaceId
- * is bound at the top of runLocalTool from the caller's context,
- * NEVER from an LLM-supplied field. A prompt-injected model that
- * tries to pass workspaceId in args is ignored.
+ * untrusted. workspaceId AND batchId are bound at the top of
+ * runLocalTool from the caller's context — never from LLM-
+ * supplied fields. A prompt-injected model that tries to pass
+ * either in args is ignored. Every DB query also joins through
+ * batch → workspaceId so a leaked batchId still can't reach
+ * another tenant.
  */
 
 import { db } from "@/lib/db";
@@ -28,7 +31,7 @@ export const LOCAL_TOOLS: Tool[] = [
   {
     name: "local_list_workspace_products",
     description:
-      "List products in this workspace, optionally filtered by review status. Use this when the operator asks about 'my products', 'approved products', or refers to a product by name — call this first to find the productId, then get_product_context. Returns id, name, market, category, discountPercent, hasReferenceImage, hasStyle1Kit, generatedVideoCount.",
+      "List products in the CURRENT BATCH, optionally filtered by review status. Use this when the operator asks about 'my products', 'the approved products', or refers to a product by name — call this first to find the productId, then get_product_context. Only products belonging to the batch this conversation is scoped to are returned; other batches are invisible. Returns id, name, market, category, discountPercent, hasReferenceImage, hasStyle1Kit, generatedVideoCount.",
     input_schema: {
       type: "object" as const,
       properties: {
@@ -127,37 +130,39 @@ export const LOCAL_TOOL_NAMES = new Set(LOCAL_TOOLS.map((t) => t.name));
  */
 export async function runLocalTool(input: {
   workspaceId: string;
+  batchId: string;
   name: string;
   args: Record<string, unknown>;
 }): Promise<{ isError: boolean; result: string }> {
+  const ctx = { workspaceId: input.workspaceId, batchId: input.batchId };
   try {
     switch (input.name) {
       case "local_list_workspace_products":
         return {
           isError: false,
           result: JSON.stringify(
-            await listWorkspaceProducts(input.workspaceId, input.args),
+            await listBatchProducts(ctx, input.args),
           ).slice(0, 20_000),
         };
       case "local_get_product_context":
         return {
           isError: false,
           result: JSON.stringify(
-            await getProductContext(input.workspaceId, input.args),
+            await getProductContext(ctx, input.args),
           ).slice(0, 20_000),
         };
       case "local_save_generated_video":
         return {
           isError: false,
           result: JSON.stringify(
-            await saveGeneratedVideo(input.workspaceId, input.args),
+            await saveGeneratedVideo(ctx, input.args),
           ),
         };
       case "local_list_saved_videos_for_product":
         return {
           isError: false,
           result: JSON.stringify(
-            await listSavedVideosForProduct(input.workspaceId, input.args),
+            await listSavedVideosForProduct(ctx, input.args),
           ),
         };
       default:
@@ -178,8 +183,13 @@ export async function runLocalTool(input: {
  * Individual tool implementations
  * ---------------------------------------------------------------- */
 
-async function listWorkspaceProducts(
-  workspaceId: string,
+interface LocalToolCtx {
+  workspaceId: string;
+  batchId: string;
+}
+
+async function listBatchProducts(
+  ctx: LocalToolCtx,
   args: Record<string, unknown>,
 ): Promise<{
   products: Array<{
@@ -200,14 +210,16 @@ async function listWorkspaceProducts(
 
   const rows = await db.product.findMany({
     where: {
-      batch: { workspaceId },
+      // Belt + braces: batchId scopes to this batch, and the
+      // batch relation join keeps the workspace boundary as a
+      // second gate in case a bug ever leaked a stale batchId.
+      batchId: ctx.batchId,
+      batch: { workspaceId: ctx.workspaceId },
       deletedAt: null,
       ...(status !== "any" ? { reviewStatus: status } : {}),
-      // SQLite's LIKE (what Prisma's contains compiles to on the
-      // SQLite provider) is case-insensitive by default for ASCII
-      // — no mode:"insensitive" needed. Postgres also honors this
-      // shape (case-sensitive by default there, but the operator
-      // typically types the same case as the stored name).
+      // SQLite's LIKE (what Prisma's `contains` compiles to on
+      // the SQLite provider) is case-insensitive by default for
+      // ASCII — no mode:"insensitive" needed.
       ...(search
         ? { productName: { contains: search } }
         : {}),
@@ -242,7 +254,7 @@ async function listWorkspaceProducts(
 }
 
 async function getProductContext(
-  workspaceId: string,
+  ctx: LocalToolCtx,
   args: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
   const productId = String(args.productId ?? "").trim();
@@ -250,7 +262,8 @@ async function getProductContext(
   const row = await db.product.findFirst({
     where: {
       id: productId,
-      batch: { workspaceId },
+      batchId: ctx.batchId,
+      batch: { workspaceId: ctx.workspaceId },
       deletedAt: null,
     },
     include: {
@@ -316,7 +329,7 @@ async function getProductContext(
 }
 
 async function saveGeneratedVideo(
-  workspaceId: string,
+  ctx: LocalToolCtx,
   args: Record<string, unknown>,
 ): Promise<{ id: string; sceneLabel: string }> {
   const productId = String(args.productId ?? "").trim();
@@ -341,14 +354,19 @@ async function saveGeneratedVideo(
     );
   }
 
-  // Verify product belongs to this workspace — the agent's args
-  // could point at any id, but the workspace boundary is
-  // authoritative.
+  // Verify the product belongs to THIS BATCH — the agent's args
+  // could point at any id, but the batch boundary is
+  // authoritative and workspace is the outer gate.
   const product = await db.product.findFirst({
-    where: { id: productId, batch: { workspaceId }, deletedAt: null },
+    where: {
+      id: productId,
+      batchId: ctx.batchId,
+      batch: { workspaceId: ctx.workspaceId },
+      deletedAt: null,
+    },
     select: { id: true },
   });
-  if (!product) throw new Error(`product "${productId}" not found`);
+  if (!product) throw new Error(`product "${productId}" not found in this batch`);
 
   const row = await db.flowGeneratedVideo.create({
     data: {
@@ -364,7 +382,7 @@ async function saveGeneratedVideo(
 }
 
 async function listSavedVideosForProduct(
-  workspaceId: string,
+  ctx: LocalToolCtx,
   args: Record<string, unknown>,
 ): Promise<{
   videos: Array<{
@@ -379,10 +397,15 @@ async function listSavedVideosForProduct(
   const productId = String(args.productId ?? "").trim();
   if (!productId) throw new Error("productId is required");
   const product = await db.product.findFirst({
-    where: { id: productId, batch: { workspaceId }, deletedAt: null },
+    where: {
+      id: productId,
+      batchId: ctx.batchId,
+      batch: { workspaceId: ctx.workspaceId },
+      deletedAt: null,
+    },
     select: { id: true },
   });
-  if (!product) throw new Error(`product "${productId}" not found`);
+  if (!product) throw new Error(`product "${productId}" not found in this batch`);
   const rows = await db.flowGeneratedVideo.findMany({
     where: { productId: product.id },
     orderBy: { createdAt: "desc" },

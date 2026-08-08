@@ -1,11 +1,17 @@
 /**
  * /api/generate/stream/[conversationId]
  *
- * Server-Sent Events endpoint for the /generate agent loop.
+ * Server-Sent Events endpoint for the APEX MCP chat agent loop.
+ * The endpoint's URL still lives under /api/generate for backwards
+ * compatibility during the chat-panel refactor — the client-facing
+ * chat now lives inside /prompts as a per-batch panel.
  *
  * Contract:
  *   POST /api/generate/stream/<conversationId>
- *   Body: { text: string }  — the operator's message
+ *   Body: {
+ *     text: string,                    // operator input
+ *     referenceImageUrls?: string[],   // picker attachments
+ *   }
  *
  *   Returns an SSE stream. Events:
  *     event: text_delta      { delta }
@@ -15,12 +21,11 @@
  *     event: done            {}
  *     event: error           { message }
  *
- * Design decision: POST-with-SSE-response (not GET-with-body-in-
- * query-string). Simpler than negotiating EventSource + a separate
- * POST for the input. Client uses fetch() + a ReadableStream reader
- * to consume — EventSource doesn't support POST bodies.
- *
- * Auth: standard workspace-scoped via getCurrentWorkspace.
+ * Auth: workspace boundary is enforced inside runAgentTurn (which
+ * joins the conversation → batch → workspace). We STILL do a
+ * lightweight ownership check here so an unauthenticated caller
+ * gets a 401/404 up-front rather than through the SSE error
+ * channel — cheaper for the caller.
  */
 
 import { NextRequest } from "next/server";
@@ -28,12 +33,9 @@ import { db } from "@/lib/db";
 import { getCurrentWorkspace } from "@/lib/workspace";
 import { runAgentTurn, type AgentEvent } from "@/lib/generate/agent-runner";
 
-// Long-running SSE — disable static optimization and set a
-// generous max duration. Node.js runtime, not edge (we call
-// Prisma).
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 600; // 10 min; a video-heavy turn can go long
+export const maxDuration = 600;
 
 export async function POST(
   req: NextRequest,
@@ -45,8 +47,16 @@ export async function POST(
   if (!conversationId) {
     return sseErrorResponse("missing conversationId", 400);
   }
+  // Confirm the conversation belongs to this workspace (via its
+  // batch). runAgentTurn re-checks internally; this pre-check
+  // gives the client an HTTP-status-shaped error before the SSE
+  // stream opens.
   const conv = await db.conversation.findFirst({
-    where: { id: conversationId, workspaceId: workspace.id, deletedAt: null },
+    where: {
+      id: conversationId,
+      deletedAt: null,
+      batch: { workspaceId: workspace.id },
+    },
     select: { id: true },
   });
   if (!conv) {
@@ -54,7 +64,7 @@ export async function POST(
   }
 
   const body = (await req.json().catch(() => null)) as
-    | { text?: string }
+    | { text?: string; referenceImageUrls?: unknown }
     | null;
   const text = (body?.text ?? "").trim();
   if (!text) {
@@ -64,35 +74,12 @@ export async function POST(
     return sseErrorResponse("text too long (max 20k chars)", 400);
   }
 
-  // Persist the user message FIRST — even if the agent bails,
-  // the operator's input shouldn't be lost. Rehydrated into the
-  // conversation history that runAgentTurn loads.
-  await db.message.create({
-    data: {
-      conversationId: conv.id,
-      role:    "user",
-      content: text,
-    },
-  });
-  // Auto-derive title on first user message (mirror sendUserMessage).
-  const convWithCount = await db.conversation.findUnique({
-    where: { id: conv.id },
-    select: { title: true, _count: { select: { messages: true } } },
-  });
-  if (
-    convWithCount &&
-    convWithCount.title === "New chat" &&
-    convWithCount._count.messages === 1
-  ) {
-    const autoTitle =
-      text.length <= 60
-        ? text
-        : text.slice(0, 60).replace(/\s+\S*$/, "") + "…";
-    await db.conversation.update({
-      where: { id: conv.id },
-      data:  { title: autoTitle },
-    });
-  }
+  const referenceImageUrls = Array.isArray(body?.referenceImageUrls)
+    ? (body!.referenceImageUrls as unknown[])
+        .filter((u): u is string => typeof u === "string")
+        .map((u) => u.trim())
+        .filter(Boolean)
+    : [];
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
@@ -105,8 +92,9 @@ export async function POST(
       };
       try {
         for await (const event of runAgentTurn({
-          workspaceId: workspace.id,
           conversationId: conv.id,
+          userText: text,
+          referenceImageUrls,
         })) {
           write(event);
         }
@@ -120,10 +108,9 @@ export async function POST(
       }
     },
     cancel() {
-      // Client disconnected mid-stream. The generator will halt
-      // on its next yield attempt. Nothing else to clean up
-      // because we don't hold any long-lived resources here —
-      // MCP connections are per-tool-call.
+      // Client disconnected mid-stream. The generator halts on its
+      // next yield attempt. No long-lived resources here — MCP
+      // connections are per-tool-call.
     },
   });
 
@@ -133,15 +120,14 @@ export async function POST(
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive",
-      // Prevent proxies (Caddy, nginx) from buffering the
-      // stream — critical for SSE to actually stream.
+      // Prevent Caddy / nginx buffering — critical for SSE.
       "X-Accel-Buffering": "no",
     },
   });
 }
 
-/** For pre-stream validation errors, return SSE-shaped error
- *  so the client can consume uniformly. */
+/** Pre-stream validation errors returned as SSE-shaped body so
+ *  the client's consumer can handle them uniformly. */
 function sseErrorResponse(message: string, status: number): Response {
   const body =
     `event: error\ndata: ${JSON.stringify({ type: "error", message })}\n\n` +

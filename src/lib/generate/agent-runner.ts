@@ -1,29 +1,39 @@
 /**
- * /generate agent runner — Anthropic Messages API tool-use loop
- * bridged to the APEX MCP server.
+ * APEX MCP chat agent runner — Anthropic Messages API tool-use
+ * loop bridged to the APEX MCP server.
  *
- * Called by the /api/generate/stream/[id] SSE endpoint. Runs the
- * full turn:
- *   1. Load conversation history from DB
- *   2. Load MCP tool schemas via JWT-authenticated listTools
- *   3. Loop:
- *      a. Stream Anthropic response
- *      b. Emit text deltas to the client via yielded events
- *      c. If Anthropic emits tool_use blocks, call each via MCP,
- *         yield tool_call / tool_result events, feed results back
- *         in the next messages[] as user turns per the API contract
- *      d. Break when stop_reason === "end_turn" (or safety cap)
- *   4. Persist the assistant + tool_result turns to DB
+ * Called by the SSE endpoint at
+ *   /api/generate/stream/[conversationId]
+ * with the caller's user turn text + any reference-image URLs
+ * the operator selected in the chat panel's image picker. The
+ * conversation is batch-scoped (see the /prompts chat-panel
+ * refactor); this runner looks up the conversation, joins to its
+ * Batch → Workspace to authorize, then runs the loop:
  *
- * Emits events as an async generator so the SSE endpoint can just
- * for-await and pipe. Never throws mid-stream — errors turn into
+ *   1. Persist the user turn (text + attached images)
+ *   2. Load history + rehydrate into Anthropic MessageParam[]
+ *   3. Load MCP tool schemas via JWT-authenticated listTools
+ *   4. Loop:
+ *      a. Send messages[] to Anthropic
+ *      b. Emit text + tool_call events to the client
+ *      c. Dispatch tool calls: local_* → runLocalTool, else MCP
+ *      d. Persist assistant + tool_result rows, feed back
+ *      e. Break when stop_reason !== "tool_use" or safety cap
+ *
+ * Emits events as an async generator so the SSE endpoint can
+ * for-await + pipe. Never throws mid-stream — errors turn into
  * "error" events with a message.
  *
- * This is Commit 4 of the MCP integration. Commit 5 layers in the
- * SOP-trained system prompt + our custom tools (get_product_context,
- * save_generated_video, etc). This file's SYSTEM_PROMPT is a
- * placeholder that names the MCP tools available but doesn't have
- * SOP-specific instructions yet.
+ * Reference images:
+ *   The picker on the chat panel lets the operator attach one or
+ *   more image URLs per user turn. We persist them under
+ *   Message.attachedImagesJson and, when building the outgoing
+ *   MessageParam, prepend a short "[Reference images: ...]"
+ *   text block. Real multimodal image content blocks are a
+ *   follow-up — the current setup keeps the API surface
+ *   provider-agnostic (works via OpenRouter too) and gives the
+ *   agent enough context to fetch the URLs via
+ *   google_flow_generate_image's reference_images array.
  */
 
 import Anthropic from "@anthropic-ai/sdk";
@@ -44,35 +54,19 @@ import {
   runLocalTool,
 } from "@/lib/generate/local-tools";
 
-/** Anthropic model when calling Anthropic directly. Sonnet 5 is
- *  the picked default — best tool-use balance for the price.
- *  Overridable via WorkspaceSettings.anthropicModel. */
+/** Default Anthropic model when hitting the Anthropic API
+ *  directly. Overridable via WorkspaceSettings.anthropicModel. */
 const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5";
 
 /** Default model when routing through OpenRouter. OpenRouter
- *  uses prefixed model IDs (`<provider>/<name>`); we default to
- *  the newest Sonnet variant they typically carry. Overridable
- *  via WorkspaceSettings.openrouterModel — if OpenRouter hasn't
- *  yet added a model, the operator can set the exact id there.
- *  We deliberately DON'T default to openrouter/auto because
- *  auto-routing can land on a model without tool-use support. */
+ *  uses prefixed model IDs (`<provider>/<name>`). Deliberately
+ *  NOT openrouter/auto — auto can land on a model without
+ *  tool-use support. */
 const DEFAULT_OPENROUTER_MODEL = "anthropic/claude-sonnet-4.5";
 
-/** Hard cap on the agent loop. Prevents runaway tool-call chains
- *  from a hallucinating model. Real Style-1 flows should finish
- *  in ~10 tool calls (4 Flow ops + polling). 30 leaves headroom
- *  for retries but bounds cost. */
 const MAX_LOOP_ITERATIONS = 30;
-
-/** Max output tokens per Anthropic call. Sonnet 5 default is
- *  usually plenty for a conversational agent — but tool-heavy
- *  turns can be long. 4096 is a safe ceiling. */
 const MAX_TOKENS = 4096;
 
-/**
- * Events yielded by runAgentTurn. The SSE endpoint serialises
- * these as `event: <type>\ndata: <json>\n\n`.
- */
 export type AgentEvent =
   | { type: "text_delta"; delta: string }
   | { type: "message_saved"; messageId: string; role: string }
@@ -86,17 +80,24 @@ export type AgentEvent =
       type: "tool_result";
       toolUseId: string;
       isError: boolean;
-      /** Compact preview of the result for the UI — full content
-       *  lives in the persisted message. */
       preview: string;
     }
   | { type: "done" }
   | { type: "error"; message: string };
 
-export async function* runAgentTurn(input: {
-  workspaceId: string;
+export interface RunAgentTurnInput {
   conversationId: string;
-}): AsyncGenerator<AgentEvent, void, void> {
+  /** Freeform text for the user turn (from the chat input box). */
+  userText: string;
+  /** Absolute or app-relative URLs of images the operator
+   *  attached to THIS turn via the reference-image picker.
+   *  Empty array = no attachments. */
+  referenceImageUrls: string[];
+}
+
+export async function* runAgentTurn(
+  input: RunAgentTurnInput,
+): AsyncGenerator<AgentEvent, void, void> {
   try {
     yield* runAgentTurnInner(input);
   } catch (err) {
@@ -108,17 +109,30 @@ export async function* runAgentTurn(input: {
   }
 }
 
-async function* runAgentTurnInner(input: {
-  workspaceId: string;
-  conversationId: string;
-}): AsyncGenerator<AgentEvent, void, void> {
-  const settings = await loadOrCreateSettings(input.workspaceId);
-  // Provider selection: prefer a direct Anthropic key when set;
-  // fall back to OpenRouter routed through Anthropic's SDK via
-  // baseURL override. OpenRouter's /api/v1/messages endpoint is
-  // Anthropic-Messages-API-compatible and passes tool_use /
-  // tool_result blocks through to the underlying model, so the
-  // rest of the agent loop is provider-agnostic.
+async function* runAgentTurnInner(
+  input: RunAgentTurnInput,
+): AsyncGenerator<AgentEvent, void, void> {
+  // Look up the conversation + join batch → workspace. This is
+  // the sole ownership check — any subsequent DB writes for the
+  // turn are keyed off conv.id / batch.workspaceId, so a stolen
+  // conversationId can't cross tenants.
+  const conv = await db.conversation.findFirst({
+    where: { id: input.conversationId, deletedAt: null },
+    select: {
+      id: true,
+      batchId: true,
+      currentProductId: true,
+      batch: { select: { id: true, workspaceId: true, market: true, name: true } },
+    },
+  });
+  if (!conv) {
+    yield { type: "error", message: "Conversation not found" };
+    return;
+  }
+  const workspaceId = conv.batch.workspaceId;
+  const batchId = conv.batch.id;
+
+  const settings = await loadOrCreateSettings(workspaceId);
   const anthropicKey  = (settings.anthropicApiKey  ?? "").trim();
   const openrouterKey = (settings.openrouterApiKey ?? "").trim();
 
@@ -136,15 +150,12 @@ async function* runAgentTurnInner(input: {
     providerLabel = "Anthropic";
   } else if (openrouterKey) {
     apiKey = openrouterKey;
-    // Anthropic SDK appends "/v1/messages" internally, so baseURL
-    // must NOT already end in /v1 — otherwise you get a double
-    // /v1/v1/messages that OpenRouter returns as a 404 HTML page.
+    // Anthropic SDK appends "/v1/messages"; baseURL must NOT end
+    // in /v1 or you get /v1/v1/messages → 404 HTML from OpenRouter.
     baseURL = "https://openrouter.ai/api";
     modelName =
       (settings.openrouterModel ?? "").trim() || DEFAULT_OPENROUTER_MODEL;
     providerLabel = "OpenRouter";
-    // OpenRouter's per-app leaderboard headers. Optional but a
-    // nice signal on their dashboard about which app is calling.
     const headers: Record<string, string> = {};
     if (settings.openrouterSiteUrl)
       headers["HTTP-Referer"] = settings.openrouterSiteUrl;
@@ -169,18 +180,56 @@ async function* runAgentTurnInner(input: {
     return;
   }
 
-  // Load conversation history and re-hydrate into Anthropic's
-  // MessageParam[] shape. We only pass user + assistant turns to
-  // Anthropic — never system messages (system prompt is built
-  // fresh per request from workspace context).
-  const conv = await db.conversation.findFirst({
-    where: { id: input.conversationId, workspaceId: input.workspaceId, deletedAt: null },
+  // Normalize attachments: dedupe, strip empty, cap at 8 (past
+  // that the reference blob would swamp the prompt and Flow
+  // itself only takes a handful of refs per generation).
+  const cleanImages = Array.from(
+    new Set(
+      (input.referenceImageUrls ?? [])
+        .map((u) => (typeof u === "string" ? u.trim() : ""))
+        .filter(Boolean),
+    ),
+  ).slice(0, 8);
+  const userText = (input.userText ?? "").trim();
+
+  // Persist the user turn FIRST so the transcript reflects what
+  // the operator sent even if the agent loop errors below.
+  const userRow = await db.message.create({
+    data: {
+      conversationId: conv.id,
+      role: "user",
+      content: userText,
+      attachedImagesJson:
+        cleanImages.length > 0 ? JSON.stringify(cleanImages) : null,
+    },
     select: { id: true },
   });
-  if (!conv) {
-    yield { type: "error", message: "Conversation not found" };
-    return;
+  yield { type: "message_saved", messageId: userRow.id, role: "user" };
+
+  // Auto-derive the title from the first user message when the
+  // conversation is still on the "New chat" default. Also bumps
+  // updatedAt via @updatedAt so the batch's conversation list
+  // sorts this thread to the top.
+  const convForTitle = await db.conversation.findUnique({
+    where: { id: conv.id },
+    select: { title: true },
+  });
+  if (convForTitle?.title === "New chat" && userText) {
+    const derived = userText.slice(0, 60).replace(/\s+/g, " ").trim();
+    await db.conversation.update({
+      where: { id: conv.id },
+      data:  { title: derived || "New chat" },
+    });
+  } else {
+    // No title change — still poke the row so updatedAt refreshes.
+    await db.conversation.update({
+      where: { id: conv.id },
+      data:  { title: convForTitle?.title ?? "New chat" },
+    });
   }
+
+  // Load full history AFTER persisting the fresh user turn so
+  // the model sees it in the messages[] payload.
   const stored = await db.message.findMany({
     where: { conversationId: conv.id },
     orderBy: { createdAt: "asc" },
@@ -189,18 +238,16 @@ async function* runAgentTurnInner(input: {
       content: true,
       toolCallsJson: true,
       toolResultJson: true,
+      attachedImagesJson: true,
     },
   });
   const messages: MessageParam[] = stored.map(rehydrateMessage);
 
-  // Load MCP tools once at loop start. If the JWT expires
-  // mid-loop we mint a fresh one for each callMcpTool below —
-  // the tool schemas don't change between calls, so this list
-  // stays valid for the whole turn.
+  // Load MCP tools once at loop start.
   let anthropicTools: Tool[];
   try {
     const mcpTools = await listMcpTools({
-      sub: input.workspaceId,
+      sub: workspaceId,
       flowEmail,
     });
     const mcpAsTools: Tool[] = mcpTools.map((t) => ({
@@ -211,10 +258,8 @@ async function* runAgentTurnInner(input: {
         properties: {},
       },
     }));
-    // Union: local tools (product context / video save) + MCP
-    // tools (19 Google Flow tools). Anthropic sees them as one
-    // flat tools[] and picks whichever fits the ask; we
-    // dispatch by name below.
+    // Union: local tools (batch products / video save) + MCP
+    // tools (Google Flow). Dispatch is by name below.
     anthropicTools = [...LOCAL_TOOLS, ...mcpAsTools];
   } catch (err) {
     yield {
@@ -230,21 +275,17 @@ async function* runAgentTurnInner(input: {
     ...(defaultHeaders ? { defaultHeaders } : {}),
   });
   console.log(
-    `[agent-runner] provider=${providerLabel} model=${modelName} workspace=${input.workspaceId}`,
+    `[agent-runner] provider=${providerLabel} model=${modelName} workspace=${workspaceId} batch=${batchId}`,
   );
-  const systemPrompt = buildSystemPrompt();
+  const systemPrompt = buildSystemPrompt({
+    batchName: conv.batch.name,
+    market: conv.batch.market,
+    currentProductId: conv.currentProductId,
+  });
 
-  // Tool-use loop. Each iteration: send messages[] to Anthropic,
-  // stream the response, if it ends with tool_use — call each
-  // tool and append a paired user tool_result message. Break
-  // when Anthropic stops for end_turn.
   for (let iter = 0; iter < MAX_LOOP_ITERATIONS; iter += 1) {
     let finalMessage: Message;
     try {
-      // Non-streaming for now — simpler to persist + emit atomic
-      // events after each turn. Streaming deltas is a nice-to-have
-      // for perceived speed but adds complexity around handling
-      // partial tool_use blocks. Can retrofit later.
       finalMessage = await anthropic.messages.create({
         model: modelName,
         max_tokens: MAX_TOKENS,
@@ -260,10 +301,6 @@ async function* runAgentTurnInner(input: {
       return;
     }
 
-    // Extract text blocks + tool_use blocks from the assistant
-    // response. We emit the text as a single delta (no streaming
-    // yet — see comment above) so the client can render it as
-    // one bubble.
     const textParts: string[] = [];
     const toolUses: ToolUseBlock[] = [];
     for (const block of finalMessage.content) {
@@ -275,8 +312,6 @@ async function* runAgentTurnInner(input: {
     }
     const textContent = textParts.join("\n\n");
 
-    // Emit text to the client BEFORE persisting so the UI updates
-    // as fast as possible.
     if (textContent) {
       yield { type: "text_delta", delta: textContent };
     }
@@ -289,7 +324,6 @@ async function* runAgentTurnInner(input: {
       };
     }
 
-    // Persist the assistant turn (text + tool_use blocks).
     const assistantRow = await db.message.create({
       data: {
         conversationId: conv.id,
@@ -307,33 +341,26 @@ async function* runAgentTurnInner(input: {
       messageId: assistantRow.id,
       role: "assistant",
     };
-    // Add to in-memory conversation for the next iteration.
     messages.push({
       role: "assistant",
       content: finalMessage.content,
     });
 
-    // Loop exit: Anthropic finished without asking for more tools.
     if (finalMessage.stop_reason !== "tool_use") {
       break;
     }
     if (toolUses.length === 0) {
-      // Defensive: stop_reason says tool_use but no blocks
-      // present. Bail rather than infinite-loop.
       break;
     }
 
-    // Execute each tool_use in parallel — Anthropic can request
-    // multiple tools in one turn. Dispatch by name: local_* →
-    // runLocalTool, everything else → callMcpTool. Order the
-    // results the same way for stable transcripts.
     const toolResults: ToolResultBlockParam[] = await Promise.all(
       toolUses.map(async (tu) => {
         const args = (tu.input as Record<string, unknown>) ?? {};
         try {
           if (LOCAL_TOOL_NAMES.has(tu.name)) {
             const local = await runLocalTool({
-              workspaceId: input.workspaceId,
+              workspaceId,
+              batchId,
               name: tu.name,
               args,
             });
@@ -344,17 +371,12 @@ async function* runAgentTurnInner(input: {
               is_error: local.isError,
             };
           }
-          // MCP tool.
           const result = await callMcpTool({
-            sub: input.workspaceId,
+            sub: workspaceId,
             flowEmail,
             name: tu.name,
             args,
           });
-          // Anthropic's tool_result content is a string (or a
-          // content-block array). We stringify the MCP result's
-          // content or structuredContent so the model has
-          // something to reason about.
           const resultText =
             result.structuredContent !== undefined
               ? JSON.stringify(result.structuredContent).slice(0, 20_000)
@@ -384,8 +406,6 @@ async function* runAgentTurnInner(input: {
       }),
     );
 
-    // Emit each result to the client + persist as its own user-role
-    // message with toolResultJson populated.
     for (const tr of toolResults) {
       const preview =
         typeof tr.content === "string"
@@ -409,7 +429,6 @@ async function* runAgentTurnInner(input: {
       yield { type: "message_saved", messageId: row.id, role: "user" };
     }
 
-    // Feed results back to Anthropic for the next iteration.
     messages.push({
       role: "user",
       content: toolResults,
@@ -419,15 +438,19 @@ async function* runAgentTurnInner(input: {
   yield { type: "done" };
 }
 
-/** Rebuild an Anthropic MessageParam from a persisted row. */
+/** Rebuild an Anthropic MessageParam from a persisted row.
+ *  When the user row has attached reference images, we prepend a
+ *  short "[Reference images: ...]" text so the model has the URL
+ *  available (it can then pass them to google_flow_generate_image
+ *  or reference them in a Style 1 plan). */
 function rehydrateMessage(row: {
   role: string;
   content: string;
   toolCallsJson: string | null;
   toolResultJson: string | null;
+  attachedImagesJson: string | null;
 }): MessageParam {
   if (row.role === "assistant") {
-    // Assistant turn may carry text + tool_use blocks.
     const parts: (TextBlock | ToolUseBlock)[] = [];
     if (row.content) {
       parts.push({
@@ -441,7 +464,7 @@ function rehydrateMessage(row: {
         const decoded = JSON.parse(row.toolCallsJson) as ToolUseBlock[];
         if (Array.isArray(decoded)) parts.push(...decoded);
       } catch {
-        // ignore — malformed row, skip the tool_use portion
+        // malformed row — skip tool_use portion
       }
     }
     return { role: "assistant", content: parts };
@@ -452,43 +475,56 @@ function rehydrateMessage(row: {
       const decoded = JSON.parse(row.toolResultJson) as ToolResultBlockParam;
       return { role: "user", content: [decoded] };
     } catch {
-      // fall through to plain-text user message
+      // fall through
     }
   }
-  return { role: "user", content: row.content };
+  const imageUrls = parseAttachedImages(row.attachedImagesJson);
+  if (imageUrls.length === 0) {
+    return { role: "user", content: row.content };
+  }
+  const preamble =
+    `[Reference images the operator attached to this turn — pass these to google_flow_generate_image's reference_images array when generating scene images for the picked product]:\n` +
+    imageUrls.map((u, i) => `${i + 1}. ${u}`).join("\n");
+  const text = row.content ? `${preamble}\n\n${row.content}` : preamble;
+  return { role: "user", content: text };
 }
 
-/**
- * System prompt — SOP-trained (Commit 5).
- *
- * Teaches the agent the Style 1 (Store Discovery) workflow so
- * "make a Style 1 for this product" Just Works. Bakes in:
- *   - The 2-scene structure (store walk-up → product at home)
- *   - Universal image + motion prompts verbatim from the SOP
- *     (the exact phrasing is tuned for Veo output — regen would
- *     drift)
- *   - Category → setting mapping for Scene 2
- *   - Tool-usage guidance (workflow order, when to poll, when
- *     to save, when to stop)
- *   - Rules of the road (never fabricate, 596 recovery, cost)
- *   - Formatting: no markdown (the UI renders plain-text now)
- *
- * Not per-product — general SOP + tool guidance. The agent
- * pulls product-specific context via local_get_product_context.
- */
-function buildSystemPrompt(): string {
-  return SYSTEM_PROMPT;
+function parseAttachedImages(json: string | null): string[] {
+  if (!json) return [];
+  try {
+    const decoded = JSON.parse(json);
+    if (Array.isArray(decoded)) {
+      return decoded.filter((u): u is string => typeof u === "string");
+    }
+  } catch {
+    // ignore
+  }
+  return [];
 }
 
-const SYSTEM_PROMPT = `You are the video-generation agent for APEX Initiative's TikTok
+function buildSystemPrompt(ctx: {
+  batchName: string;
+  market: string;
+  currentProductId: string | null;
+}): string {
+  const marketLabel = ctx.market === "us" ? "US" : "UK";
+  const focus = ctx.currentProductId
+    ? `The operator is currently focused on product id "${ctx.currentProductId}". Call local_get_product_context on that id first unless they've asked about a different product by name.`
+    : `No product is focused yet. If the operator names a product, call local_list_workspace_products with search=<their words> to find its id, then local_get_product_context.`;
+  return `You are the video-generation agent for APEX Initiative's TikTok
 Shop content system. You help operators create Style 1 (Store
 Discovery) videos by planning + executing Google Flow tool
 calls, then saving the results back to products so they appear
 on the mobile posting page.
 
+You are scoped to ONE batch:
+  Batch: "${ctx.batchName}"
+  Market: ${marketLabel}
+${focus}
+
 You have two families of tools:
-  - local_*: read this workspace's products / copy / settings
-    and persist generated videos back to a product.
+  - local_*: read this batch's products / copy / settings and
+    persist generated videos back to a product.
   - google_flow_*: 19 tools that wrap the useapi.net Google
     Flow API (Veo 3.1 video, Nano Banana images, jobs).
 
@@ -500,7 +536,7 @@ Style 1 is TWO scenes, ~16 seconds total:
     A retail-shelf shot of the product; camera walks toward it;
     a hand pokes it at the end. No faces.
     IMAGE PROMPT (verbatim, swap "UK" for "US" if market=US):
-      "Put a display setup for this product inside of a UK retail store, no price tags"
+      "Put a display setup for this product inside of a ${marketLabel} retail store, no price tags"
     MOTION PROMPT (universal, verbatim):
       "Bring the camera closer to the product and have a hand poke the product as if the person recording touched it"
 
@@ -524,65 +560,64 @@ in your response so the operator can override.
 
 # Standard workflow for "generate Style 1 for product X"
 
-1. local_list_workspace_products with search="X" (or just filter
-   by status=approved) to find the productId.
-2. local_get_product_context(productId) — pull the product's
-   name, market, category, referenceImageUrl (absolute URL, use
-   this as the Flow reference).
-3. local_list_saved_videos_for_product(productId) — check
-   what's already been generated. Don't regenerate a scene that
-   already exists unless the operator explicitly asks.
+1. If no product is focused, call local_list_workspace_products
+   with search="X" to find the productId.
+2. local_get_product_context(productId) — pull name, market,
+   category, referenceImageUrl (absolute URL for Flow).
+3. local_list_saved_videos_for_product(productId) — check what
+   already exists. Don't regenerate a scene unless asked.
 4. Scene 1 image: google_flow_generate_image with the store
-   prompt (adjusted for market) and the reference_images array
-   set to [referenceImageUrl]. Model: nano-banana-2-lite for
-   cheap; nano-banana-2 for higher quality.
-5. Scene 1 motion: google_flow_generate_video with the
-   universal store motion prompt, image=<image url from step 4>,
-   model=veo-3.1-lite (10 credits). It's async — poll
-   google_flow_get_job every 10-15 seconds until the job
-   completes.
+   prompt + reference_images=[referenceImageUrl, ...attached
+   reference images from the operator this turn]. Prefer
+   nano-banana-2-lite; use nano-banana-2 when the operator asks
+   for higher fidelity.
+5. Scene 1 motion: google_flow_generate_video with the universal
+   store motion prompt, image=<image url from step 4>,
+   model=veo-3.1-lite (10 credits). Async — poll
+   google_flow_get_job every 10-15s until COMPLETED / FAILED.
 6. local_save_generated_video(productId, sceneLabel="scene_1_store",
    mediaGenerationId=<from the completed job>, prompt=<motion prompt used>).
-7. Repeat 4-6 for Scene 2 with the home prompt (with the right
-   [SETTING] substituted) and sceneLabel="scene_2_home".
+7. Repeat 4-6 for Scene 2 with the home prompt (correct
+   [SETTING]) and sceneLabel="scene_2_home".
 8. Confirm to the operator: name each saved video and remind
-   them to check the mobile posting page for the product.
+   them to open the mobile posting page.
 
 # Rules
 
 - NEVER fabricate a jobId, mediaGenerationId, or URL. If a tool
   call fails or times out, say what happened and stop.
-- Videos take 60-180 seconds. Polling frequency: every 10-15s.
-- Poll a job that's still "PENDING" or "RUNNING"; STOP polling
-  the moment a job goes to "COMPLETED" or "FAILED".
+- Videos take 60-180 seconds. Poll every 10-15s.
+- Poll a job that's "PENDING" or "RUNNING"; STOP the moment it
+  goes "COMPLETED" or "FAILED".
 - If any tool returns a 596 error, the operator's Google session
   is broken — tell them to visit Settings → Google Flow account
   and reconnect via useapi.net's automated setup. Never retry
   a 596; it doesn't recover on its own.
 - Cost discipline: default to veo-3.1-lite (10 credits per
   video). Only use veo-3.1-fast (20) or veo-3.1-quality (100)
-  when the operator explicitly asks or when a previous lite
-  attempt was clearly unusable (warped label / face artifacts).
-- Reference image: ALWAYS attach the product's referenceImageUrl
-  when generating scene images so the product stays identical.
-  If the product has no reference image (rare), warn the
-  operator before spending credits — the output won't match
-  their real product.
-- If the operator asks for something that isn't Style 1
-  (a one-off image, testing a prompt, generating a different
-  video style), just follow their instruction — the workflow
-  above is the default, not a hard constraint.
+  when explicitly asked or when a lite attempt was clearly
+  unusable (warped label / face artifacts).
+- Reference images: ALWAYS attach the product's referenceImageUrl
+  (from local_get_product_context) AND any URLs the operator
+  attached this turn to google_flow_generate_image's
+  reference_images array so the product stays identical.
+  If the product has no reference image and no attachments,
+  warn the operator before spending credits.
+- If the operator asks for something that isn't Style 1 (a
+  one-off image, testing a prompt, a different style), just
+  follow their instruction — the workflow above is the default,
+  not a hard constraint.
 
 # Formatting
 
-Reply in PLAIN TEXT. The UI does not render markdown right now,
-so headings (# ##), tables (| ... |), and bold/italic (**...**
-_..._) appear as literal characters in the chat and look
-broken. Use short paragraphs and bulleted lists made of hyphen
-prefixes only, e.g.:
+Reply in PLAIN TEXT. The UI does not render markdown, so
+headings (# ##), tables (| ... |), and bold/italic (**...**
+_..._) render as literal characters. Use short paragraphs and
+bulleted lists made of hyphen prefixes only, e.g.:
 
   - Scene 1 image generated (nano-banana-2-lite).
   - Scene 1 video job kicked off, polling.
 
-Emojis are fine but sparingly. No links unless the tool
-returned an actual URL — never guess or construct a URL.`;
+Emojis fine but sparingly. No links unless a tool returned one —
+never guess or construct a URL.`;
+}

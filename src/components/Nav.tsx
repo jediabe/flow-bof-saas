@@ -36,12 +36,12 @@ const PRIMARY: NavItem[] = [
   { href: "/discover",  label: "Discover",         icon: "◎" },
   // /prompts is the Style 1 video-kit surface — Kalodata import,
   // mobile review + posting handoff, per-product Flow agent
-  // scripts + copy options.
+  // scripts + copy options. Also home to the per-batch APEX MCP
+  // chat panel (side-drawer inside the active-batch view) — the
+  // former workspace-level /generate page was folded in here so
+  // each conversation is scoped to the batch the operator is
+  // actually working on.
   { href: "/prompts",   label: "Hooks & Prompts",  icon: "✎" },
-  // /generate is the APEX MCP video-agent chat — workspace-level
-  // LLM tool-use loop against Google Flow (scaffold in Commit 3;
-  // agent wired in Commit 4).
-  { href: "/generate",  label: "Generate",         icon: "▶" },
 ];
 
 // The old TOOLS group (Image Gen / Runner Setup / Jobs) was

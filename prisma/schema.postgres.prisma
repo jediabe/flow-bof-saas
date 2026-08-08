@@ -79,36 +79,38 @@ model Workspace {
   // Workspace-scoped API token for programmatic access. See
   // SQLite schema for full rationale.
   apiToken       String? @unique
-  // MCP /generate chat conversations — see SQLite schema for docs.
-  conversations  Conversation[]
+  // NOTE: Conversation moved from Workspace to Batch scope in the
+  // /prompts chat-panel refactor — see Batch.conversations below.
 }
 
 // ---------------------------------------------------------------------------
-// /generate agent chat — see SQLite schema for full docs.
+// Batch-scoped LLM chat — see SQLite schema for full docs.
 
 model Conversation {
-  id          String    @id @default(cuid())
-  workspaceId String
-  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  title       String    @default("New chat")
-  deletedAt   DateTime?
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
+  id               String    @id @default(cuid())
+  batchId          String
+  batch            Batch     @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  title            String    @default("New chat")
+  currentProductId String?
+  deletedAt        DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
-  messages    Message[]
+  messages         Message[]
 
-  @@index([workspaceId, updatedAt(sort: Desc)])
+  @@index([batchId, updatedAt(sort: Desc)])
 }
 
 model Message {
-  id             String       @id @default(cuid())
-  conversationId String
-  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  role           String
-  content        String       @default("")
-  toolCallsJson  String?
-  toolResultJson String?
-  createdAt      DateTime     @default(now())
+  id                 String       @id @default(cuid())
+  conversationId     String
+  conversation       Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  role               String
+  content            String       @default("")
+  toolCallsJson      String?
+  toolResultJson     String?
+  attachedImagesJson String?
+  createdAt          DateTime     @default(now())
 
   @@index([conversationId, createdAt])
 }
@@ -255,6 +257,8 @@ model Batch {
   jobs      Job[]
   // Phase 6 — Flow items scoped to this batch.
   flowItems FlowItem[]
+  // Chat-panel refactor: batch-scoped LLM chat conversations.
+  conversations Conversation[]
 
   @@index([workspaceId])
 }

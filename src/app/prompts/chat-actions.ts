@@ -1,17 +1,15 @@
 "use server";
 
 /**
- * /generate — server actions for the LLM agent chat.
+ * /prompts chat panel — server actions for the batch-scoped LLM
+ * agent chat. Replaces the deleted workspace-level /generate page:
+ * conversations now belong to a Batch, so each batch has its own
+ * transcript history and the "which product am I working on" state
+ * is remembered per-conversation.
  *
- * This file is the SCAFFOLD half (Commit 3): CRUD for conversations
- * + user-message persistence. Actually running the Anthropic tool-
- * use loop, calling MCP tools, streaming assistant responses over
- * SSE — that's Commit 4. Send actions in this file only persist
- * the user turn and return the conversation state; no assistant
- * response is generated yet.
- *
- * All actions are workspace-scoped via getCurrentWorkspace(). A
- * stolen conversationId can't leak cross-tenant.
+ * All actions are gated on getCurrentWorkspace() + a batch-owns-
+ * workspace check. A stolen conversationId can't leak cross-tenant
+ * because we always join through Batch.workspaceId.
  */
 
 import { revalidatePath } from "next/cache";
@@ -27,6 +25,7 @@ export interface ConversationSummary {
   title: string;
   updatedAt: string;
   messageCount: number;
+  currentProductId: string | null;
 }
 
 export interface ChatMessage {
@@ -35,6 +34,7 @@ export interface ChatMessage {
   content: string;
   toolCallsJson: string | null;
   toolResultJson: string | null;
+  attachedImagesJson: string | null;
   createdAt: string;
 }
 
@@ -43,22 +43,41 @@ export interface ConversationDetail {
   message?: string;
   id?: string;
   title?: string;
+  currentProductId?: string | null;
   messages?: ChatMessage[];
+}
+
+/* ------------------------------------------------------------------
+ * Ownership helper
+ * ---------------------------------------------------------------- */
+
+async function assertBatchOwned(batchId: string) {
+  const { workspace } = await getCurrentWorkspace();
+  const batch = await db.batch.findFirst({
+    where: { id: batchId, workspaceId: workspace.id },
+    select: { id: true, workspaceId: true },
+  });
+  if (!batch) throw new Error("batch not found");
+  return { workspace, batch };
 }
 
 /* ------------------------------------------------------------------
  * List / read
  * ---------------------------------------------------------------- */
 
-export async function listConversations(): Promise<ConversationSummary[]> {
-  const { workspace } = await getCurrentWorkspace();
+export async function listBatchConversations(
+  batchId: string,
+): Promise<ConversationSummary[]> {
+  if (!batchId) return [];
+  await assertBatchOwned(batchId);
   const rows = await db.conversation.findMany({
-    where: { workspaceId: workspace.id, deletedAt: null },
+    where: { batchId, deletedAt: null },
     orderBy: { updatedAt: "desc" },
     select: {
       id: true,
       title: true,
       updatedAt: true,
+      currentProductId: true,
       _count: { select: { messages: true } },
     },
     take: 100,
@@ -68,6 +87,7 @@ export async function listConversations(): Promise<ConversationSummary[]> {
     title: r.title,
     updatedAt: r.updatedAt.toISOString(),
     messageCount: r._count.messages,
+    currentProductId: r.currentProductId,
   }));
 }
 
@@ -81,8 +101,8 @@ export async function getConversationDetail(
   const conv = await db.conversation.findFirst({
     where: {
       id: conversationId,
-      workspaceId: workspace.id,
       deletedAt: null,
+      batch: { workspaceId: workspace.id },
     },
     include: {
       messages: {
@@ -95,12 +115,14 @@ export async function getConversationDetail(
     ok: true,
     id: conv.id,
     title: conv.title,
+    currentProductId: conv.currentProductId,
     messages: conv.messages.map((m) => ({
       id: m.id,
       role: m.role,
       content: m.content,
       toolCallsJson: m.toolCallsJson,
       toolResultJson: m.toolResultJson,
+      attachedImagesJson: m.attachedImagesJson,
       createdAt: m.createdAt.toISOString(),
     })),
   };
@@ -110,18 +132,22 @@ export async function getConversationDetail(
  * Create / delete / rename
  * ---------------------------------------------------------------- */
 
-export async function createConversation(input?: {
+export async function createBatchConversation(input: {
+  batchId: string;
   title?: string;
+  currentProductId?: string | null;
 }): Promise<{ ok: boolean; id?: string; message?: string }> {
-  const { workspace } = await getCurrentWorkspace();
+  if (!input.batchId) return { ok: false, message: "missing batchId" };
+  await assertBatchOwned(input.batchId);
   const conv = await db.conversation.create({
     data: {
-      workspaceId: workspace.id,
-      title: input?.title?.trim() || "New chat",
+      batchId: input.batchId,
+      title: input.title?.trim() || "New chat",
+      currentProductId: input.currentProductId ?? null,
     },
     select: { id: true },
   });
-  revalidatePath("/generate");
+  revalidatePath("/prompts");
   return { ok: true, id: conv.id };
 }
 
@@ -130,20 +156,19 @@ export async function deleteConversation(
 ): Promise<{ ok: boolean; message?: string }> {
   if (!conversationId) return { ok: false, message: "missing conversationId" };
   const { workspace } = await getCurrentWorkspace();
-  // Verify ownership before touching. Prevents a stolen id from
-  // deleting another workspace's data.
   const conv = await db.conversation.findFirst({
-    where: { id: conversationId, workspaceId: workspace.id },
+    where: {
+      id: conversationId,
+      batch: { workspaceId: workspace.id },
+    },
     select: { id: true },
   });
   if (!conv) return { ok: false, message: "conversation not found" };
-  // Soft-delete so we can undo later if needed. Hard cleanup is a
-  // cron / manual decision, not this action's problem.
   await db.conversation.update({
     where: { id: conv.id },
     data:  { deletedAt: new Date() },
   });
-  revalidatePath("/generate");
+  revalidatePath("/prompts");
   return { ok: true };
 }
 
@@ -161,7 +186,11 @@ export async function renameConversation(input: {
   }
   const { workspace } = await getCurrentWorkspace();
   const conv = await db.conversation.findFirst({
-    where: { id: input.conversationId, workspaceId: workspace.id, deletedAt: null },
+    where: {
+      id: input.conversationId,
+      deletedAt: null,
+      batch: { workspaceId: workspace.id },
+    },
     select: { id: true },
   });
   if (!conv) return { ok: false, message: "conversation not found" };
@@ -169,13 +198,48 @@ export async function renameConversation(input: {
     where: { id: conv.id },
     data:  { title },
   });
-  revalidatePath("/generate");
+  revalidatePath("/prompts");
   return { ok: true };
 }
 
-// sendUserMessage removed in Commit 4 — the SSE endpoint at
-// /api/generate/stream/[conversationId] now handles the user
-// message persistence + auto-title derivation as part of the
-// same request that runs the agent loop. This keeps the "user
-// input → agent turn → persisted history" happening in one
-// atomic-ish flow instead of two round-trips.
+/**
+ * Persist which product the operator has focused in the chat
+ * panel. Called on product-picker change so switching back to a
+ * conversation later restores the same context. Silently no-ops
+ * on unknown conversation or product outside this workspace.
+ */
+export async function setConversationProduct(input: {
+  conversationId: string;
+  productId: string | null;
+}): Promise<{ ok: boolean; message?: string }> {
+  if (!input.conversationId) {
+    return { ok: false, message: "missing conversationId" };
+  }
+  const { workspace } = await getCurrentWorkspace();
+  const conv = await db.conversation.findFirst({
+    where: {
+      id: input.conversationId,
+      deletedAt: null,
+      batch: { workspaceId: workspace.id },
+    },
+    select: { id: true, batchId: true },
+  });
+  if (!conv) return { ok: false, message: "conversation not found" };
+  if (input.productId) {
+    // The picked product MUST belong to the same batch — otherwise
+    // the tool calls would fetch cross-batch context the operator
+    // didn't intend.
+    const product = await db.product.findFirst({
+      where: { id: input.productId, batchId: conv.batchId, deletedAt: null },
+      select: { id: true },
+    });
+    if (!product) {
+      return { ok: false, message: "product not in this batch" };
+    }
+  }
+  await db.conversation.update({
+    where: { id: conv.id },
+    data:  { currentProductId: input.productId },
+  });
+  return { ok: true };
+}
