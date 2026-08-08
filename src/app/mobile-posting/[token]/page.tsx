@@ -72,6 +72,21 @@ export default async function MobilePostingPage({
           chosenCopyPart1: true,
           chosenCopyPart2: true,
           chosenCopyPart3: true,
+          // Commit 7 — videos the /generate agent saved for this
+          // product. mediaGenerationId is stable; we mint a
+          // fresh signed URL below via MCP get_asset (URLs expire
+          // in ~6h).
+          flowGeneratedVideos: {
+            orderBy: { createdAt: "desc" },
+            select: {
+              id: true,
+              sceneLabel: true,
+              mediaGenerationId: true,
+              prompt: true,
+              notes: true,
+              createdAt: true,
+            },
+          },
         },
         orderBy: [
           { postingStatus: "asc" },
@@ -107,6 +122,55 @@ export default async function MobilePostingPage({
     capCutTemplateUrl: ws?.capCutTemplateUrl ?? null,
   };
 
+  // ── Fresh-URL fanout for /generate-produced videos ────────────
+  // Flow signed URLs expire in ~6h; the mediaGenerationId is
+  // stable. On every page load we re-mint fresh URLs via MCP so
+  // the operator never sees a broken link.
+  //
+  // Runs only when the workspace has both a bound flowEmail AND
+  // at least one product with saved videos — no wasted MCP calls
+  // for workspaces that haven't started using /generate.
+  const flowEmail = (
+    await db.workspaceSettings.findUnique({
+      where: { workspaceId: batch.workspaceId },
+      select: { flowEmail: true },
+    })
+  )?.flowEmail ?? null;
+
+  const allVideos = batch.products.flatMap((p) => p.flowGeneratedVideos);
+  const urlByMediaId = new Map<string, string | null>();
+  if (flowEmail && allVideos.length > 0) {
+    const { mcpGetAssetUrl } = await import("@/lib/apex-mcp");
+    // Parallel with a reasonable concurrency cap. 8 in flight
+    // covers a typical 30-product batch with 2 videos/product
+    // fast without hammering the MCP. Bumps to full parallel
+    // for smaller batches.
+    const uniqueIds = Array.from(
+      new Set(allVideos.map((v) => v.mediaGenerationId)),
+    );
+    const CONCURRENCY = 8;
+    let cursor = 0;
+    async function worker() {
+      while (true) {
+        const i = cursor;
+        cursor += 1;
+        if (i >= uniqueIds.length) return;
+        const id = uniqueIds[i];
+        const url = await mcpGetAssetUrl({
+          sub: batch!.workspaceId,
+          flowEmail: flowEmail!,
+          mediaGenerationId: id,
+        });
+        urlByMediaId.set(id, url);
+      }
+    }
+    await Promise.all(
+      Array.from({ length: Math.min(CONCURRENCY, uniqueIds.length) }, () =>
+        worker(),
+      ),
+    );
+  }
+
   const products: MobilePostingProduct[] = batch.products.map((p) => ({
     id:                p.id,
     productName:       p.productName,
@@ -132,6 +196,19 @@ export default async function MobilePostingPage({
     chosenCopyPart1:   p.chosenCopyPart1 ?? null,
     chosenCopyPart2:   p.chosenCopyPart2 ?? null,
     chosenCopyPart3:   p.chosenCopyPart3 ?? null,
+    generatedVideos:   p.flowGeneratedVideos.map((v) => ({
+      id:                v.id,
+      sceneLabel:        v.sceneLabel,
+      mediaGenerationId: v.mediaGenerationId,
+      prompt:            v.prompt,
+      notes:             v.notes,
+      createdAt:         v.createdAt.toISOString(),
+      // Fresh signed URL from the parallel fanout above; null
+      // when MCP couldn't resolve it (asset deleted, MCP down,
+      // 596 broken session). The UI renders an "URL unavailable
+      // — retry" affordance for null entries.
+      url:               urlByMediaId.get(v.mediaGenerationId) ?? null,
+    })),
   }));
 
   return (

@@ -48,6 +48,19 @@ export interface Style1ChecklistProduct {
   chosenCopyPart1: string | null;
   chosenCopyPart2: string | null;
   chosenCopyPart3: string | null;
+  /** Videos the /generate agent saved for this product with
+   *  freshly-resolved signed URLs. Empty when no videos have been
+   *  generated (agent hasn't been run OR the operator hasn't
+   *  reached that product yet). */
+  generatedVideos: Array<{
+    id: string;
+    sceneLabel: string;
+    mediaGenerationId: string;
+    prompt: string | null;
+    notes: string | null;
+    createdAt: string;
+    url: string | null;
+  }>;
 }
 
 export default function Style1PostingChecklist({
@@ -97,8 +110,31 @@ export default function Style1PostingChecklist({
 
   return (
     <section className="px-4 pt-4 space-y-4">
-      {/* 1. Caption 1 — Part 1 hook, on-screen Scene 1 */}
-      <ChecklistCard title="1 · Caption 1 (Scene 1 hook)" accent="blue">
+      {/* 1. Videos — anything the /generate agent produced for this
+          product. Rendered ONLY when generatedVideos has entries so
+          products the operator hasn't run through /generate yet
+          don't get an empty section screaming at them. */}
+      {product.generatedVideos.length > 0 && (
+        <ChecklistCard title="1 · Videos (from /generate agent)" accent="blue">
+          <p className="text-[11px] text-zinc-400 leading-relaxed">
+            Tap a scene to play. Download from the player&apos;s menu,
+            then bring into CapCut for assembly. Signed URLs are
+            fresh (valid ~6h); reload this page if a video stops
+            loading.
+          </p>
+          <div className="space-y-3">
+            {product.generatedVideos.map((v) => (
+              <VideoRow key={v.id} video={v} />
+            ))}
+          </div>
+        </ChecklistCard>
+      )}
+
+      {/* 2. Caption 1 — Part 1 hook, on-screen Scene 1 */}
+      <ChecklistCard
+        title={`${sectionNumber(product, 1)} · Caption 1 (Scene 1 hook)`}
+        accent="blue"
+      >
         <p className="text-[11px] text-zinc-400 leading-relaxed">
           Shown on Scene 1 AND read by ElevenLabs. Tap one to copy
           + pick.
@@ -118,8 +154,11 @@ export default function Style1PostingChecklist({
         />
       </ChecklistCard>
 
-      {/* 2. Caption 2 — Part 3 sale text, on-screen Scene 2 */}
-      <ChecklistCard title="2 · Caption 2 (Scene 2 sale text)" accent="red">
+      {/* 3. Caption 2 — Part 3 sale text, on-screen Scene 2 */}
+      <ChecklistCard
+        title={`${sectionNumber(product, 2)} · Caption 2 (Scene 2 sale text)`}
+        accent="red"
+      >
         <p className="text-[11px] text-zinc-400 leading-relaxed">
           On-screen only over Scene 2. Not spoken.
         </p>
@@ -138,8 +177,11 @@ export default function Style1PostingChecklist({
         />
       </ChecklistCard>
 
-      {/* 3. ElevenLabs script */}
-      <ChecklistCard title="3 · ElevenLabs script" accent="blue">
+      {/* 4. ElevenLabs script */}
+      <ChecklistCard
+        title={`${sectionNumber(product, 3)} · ElevenLabs script`}
+        accent="blue"
+      >
         {voiceId && voiceLabel ? (
           <p className="text-[11px] text-zinc-400 leading-relaxed">
             Paste into voice{" "}
@@ -185,8 +227,11 @@ export default function Style1PostingChecklist({
         </details>
       </ChecklistCard>
 
-      {/* 4. Hashtags */}
-      <ChecklistCard title="4 · Hashtags" accent="blue">
+      {/* 5. Hashtags */}
+      <ChecklistCard
+        title={`${sectionNumber(product, 4)} · Hashtags`}
+        accent="blue"
+      >
         <CopyPill
           label="Copy hashtag block"
           value={kit.hashtags.join(" ")}
@@ -197,8 +242,11 @@ export default function Style1PostingChecklist({
         </p>
       </ChecklistCard>
 
-      {/* 5. Product description */}
-      <ChecklistCard title="5 · Product description (caption lead-in)" accent="blue">
+      {/* 6. Product description */}
+      <ChecklistCard
+        title={`${sectionNumber(product, 5)} · Product description (caption lead-in)`}
+        accent="blue"
+      >
         {kit.productDescription ? (
           <CopyPill
             label="Copy product description"
@@ -220,6 +268,101 @@ export default function Style1PostingChecklist({
 /* --------------------------------------------------------------
  * Sub-components
  * ------------------------------------------------------------ */
+
+/** Section-number derivation. Videos section is dynamic — it
+ *  only renders when there are videos. If it's rendered, it's
+ *  section 1 and everything else shifts +1. If not, nothing
+ *  shifts. Called with the "canonical" number a section had
+ *  before Commit 7 (Caption 1 was 1, Caption 2 was 2, etc.);
+ *  returns the number to actually display. */
+function sectionNumber(
+  product: Style1ChecklistProduct,
+  canonical: number,
+): number {
+  const videosPresent = product.generatedVideos.length > 0;
+  return videosPresent ? canonical + 1 : canonical;
+}
+
+/** One row in the Videos section — inline player + label +
+ *  metadata. Handles the "url resolve failed" fallback gracefully
+ *  with a retry hint (page reload). */
+function VideoRow({
+  video,
+}: {
+  video: Style1ChecklistProduct["generatedVideos"][number];
+}) {
+  const label = sceneLabelToHuman(video.sceneLabel);
+  return (
+    <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-3 space-y-2">
+      <div className="flex items-baseline justify-between gap-2">
+        <div className="text-[12px] font-semibold text-zinc-100">
+          {label}
+        </div>
+        <div className="text-[10px] text-zinc-500">
+          {new Date(video.createdAt).toLocaleString()}
+        </div>
+      </div>
+      {video.url ? (
+        <video
+          src={video.url}
+          controls
+          playsInline
+          preload="metadata"
+          className="w-full max-h-96 rounded-lg bg-black"
+        />
+      ) : (
+        <div className="rounded-lg border border-orange-500/40 bg-orange-500/10 p-3 text-[11px] text-orange-300 leading-relaxed">
+          Couldn&apos;t resolve a fresh URL for this video. Reload the
+          page to retry; if it keeps failing, the MCP server may be
+          down or the Google Flow session may have broken (Settings
+          → Google Flow account).
+        </div>
+      )}
+      {(video.prompt || video.notes) && (
+        <details className="text-[10px] text-zinc-500">
+          <summary className="cursor-pointer hover:text-zinc-300">
+            Prompt / notes
+          </summary>
+          {video.prompt && (
+            <div className="mt-1.5">
+              <span className="text-zinc-400 font-semibold">prompt:</span>{" "}
+              <span className="whitespace-pre-wrap">{video.prompt}</span>
+            </div>
+          )}
+          {video.notes && (
+            <div className="mt-1.5">
+              <span className="text-zinc-400 font-semibold">notes:</span>{" "}
+              <span className="whitespace-pre-wrap">{video.notes}</span>
+            </div>
+          )}
+        </details>
+      )}
+    </div>
+  );
+}
+
+/** Human-friendly scene label. Falls back to a titlecased
+ *  version of the raw label for unknown values (e.g. "combined",
+ *  "other", or future style labels). */
+function sceneLabelToHuman(raw: string): string {
+  switch (raw) {
+    case "scene_1_store":
+      return "Scene 1 · Store walk-up";
+    case "scene_2_home":
+      return "Scene 2 · Product at home";
+    case "combined":
+      return "Combined (stitched)";
+    case "other":
+      return "Adhoc";
+    default:
+      // Fallback: replace underscores with spaces, capitalize
+      // first letter of each word.
+      return raw
+        .split("_")
+        .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+        .join(" ");
+  }
+}
 
 function ChecklistCard({
   title,

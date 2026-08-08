@@ -338,3 +338,43 @@ export async function callMcpTool(input: {
     await client.close().catch(() => {});
   }
 }
+
+/**
+ * Convenience wrapper — resolve a FlowGeneratedVideo's
+ * mediaGenerationId into a fresh signed URL via
+ * google_flow_get_asset.
+ *
+ * Signed URLs are valid for ~6 hours; the id itself is stable
+ * indefinitely. We call this every time the mobile posting page
+ * renders so operators never see a stale/expired URL.
+ *
+ * Returns null when the MCP call fails OR the response doesn't
+ * carry a url (deleted asset, unknown id, MCP down). Callers
+ * render an "URL unavailable" affordance and can prompt a retry.
+ */
+export async function mcpGetAssetUrl(input: {
+  sub: string;
+  flowEmail: string;
+  mediaGenerationId: string;
+}): Promise<string | null> {
+  try {
+    const result = await callMcpTool({
+      sub: input.sub,
+      flowEmail: input.flowEmail,
+      name: "google_flow_get_asset",
+      args: { media_generation_id: input.mediaGenerationId },
+    });
+    if (result.isError) return null;
+    const structured = result.structuredContent as
+      | { url?: unknown }
+      | undefined;
+    const url = structured?.url;
+    return typeof url === "string" && url.length > 0 ? url : null;
+  } catch (err) {
+    console.warn(
+      `[apex-mcp] get_asset failed for ${input.mediaGenerationId}:`,
+      err,
+    );
+    return null;
+  }
+}

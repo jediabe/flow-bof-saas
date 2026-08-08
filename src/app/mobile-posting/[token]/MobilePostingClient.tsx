@@ -60,6 +60,20 @@ export interface MobilePostingProduct {
   chosenCopyPart1: string | null;
   chosenCopyPart2: string | null;
   chosenCopyPart3: string | null;
+  /** Videos the /generate agent saved for this product. Fresh
+   *  signed URLs are resolved server-side per page load via
+   *  MCP get_asset (URLs expire in ~6h; the mediaGenerationId
+   *  is stable). url=null means the resolve failed — UI shows
+   *  a retry affordance. */
+  generatedVideos: Array<{
+    id: string;
+    sceneLabel: string;
+    mediaGenerationId: string;
+    prompt: string | null;
+    notes: string | null;
+    createdAt: string;
+    url: string | null;
+  }>;
 }
 
 /** Hard limit for productLinkDescription. TikTok truncates the
@@ -269,6 +283,7 @@ export default function MobilePostingClient({
             chosenCopyPart1: current.chosenCopyPart1,
             chosenCopyPart2: current.chosenCopyPart2,
             chosenCopyPart3: current.chosenCopyPart3,
+            generatedVideos: current.generatedVideos,
           }}
           voices={voices}
           onLocalChosenUpdate={(part, text) => {
