@@ -131,7 +131,10 @@ async function* runAgentTurnInner(input: {
     providerLabel = "Anthropic";
   } else if (openrouterKey) {
     apiKey = openrouterKey;
-    baseURL = "https://openrouter.ai/api/v1";
+    // Anthropic SDK appends "/v1/messages" internally, so baseURL
+    // must NOT already end in /v1 — otherwise you get a double
+    // /v1/v1/messages that OpenRouter returns as a 404 HTML page.
+    baseURL = "https://openrouter.ai/api";
     modelName =
       (settings.openrouterModel ?? "").trim() || DEFAULT_OPENROUTER_MODEL;
     providerLabel = "OpenRouter";
