@@ -38,6 +38,10 @@ const PRIMARY: NavItem[] = [
   // mobile review + posting handoff, per-product Flow agent
   // scripts + copy options.
   { href: "/prompts",   label: "Hooks & Prompts",  icon: "✎" },
+  // /generate is the APEX MCP video-agent chat — workspace-level
+  // LLM tool-use loop against Google Flow (scaffold in Commit 3;
+  // agent wired in Commit 4).
+  { href: "/generate",  label: "Generate",         icon: "▶" },
 ];
 
 // The old TOOLS group (Image Gen / Runner Setup / Jobs) was
