@@ -20,9 +20,9 @@
   a {
     @apply text-text hover:text-accent transition-colors;
   }
-  /* Selection: APEX blue tint. */
+  /* Selection: APEX blue tint (new #2AB8F5). */
   ::selection {
-    background: rgba(51, 143, 234, 0.25);
+    background: rgba(42, 184, 245, 0.25);
     color: theme("colors.text");
   }
   /* Scrollbars (webkit) — thin + dark so they don't compete with the
@@ -100,29 +100,38 @@
   .chip-accent{ @apply text-accent border-accent/40 bg-accent/[0.06]; }
   .chip-red   { @apply text-accent-red border-accent-red/40 bg-accent-red/[0.08]; }
 
-  /* Numbered section chips — the "01", "02" markers from the APEX
-     curriculum PDF. Sits at the head of a section title. */
+  /* Numbered section chips — "01", "02" markers at the head of a
+     section title. Per v2 spec, blue is the default (accent-blue
+     is the token for numbered labels). Red variant retained as
+     opt-in for urgency sections. */
   .chip-num {
     @apply inline-flex items-center justify-center font-mono
            text-[10px] tracking-[0.06em] w-7 h-5 rounded-md
-           text-accent-red bg-accent-red/[0.08]
-           border border-accent-red/40;
+           text-accent bg-accent/[0.10]
+           border border-accent/40;
   }
   .chip-num-blue {
+    /* Alias — same as default now. Kept so old callsites keep
+       working without a rename pass across the codebase. */
     @apply text-accent bg-accent/[0.10] border-accent/40;
   }
+  .chip-num-red {
+    @apply text-accent-red bg-accent-red/[0.08] border-accent-red/40;
+  }
 
-  /* APEX card variants — left-border colored bar plus tinted
-     background wash, matching the curriculum PDF's callout cards.
-     Use .card-accent-blue for informational blocks, .card-accent-red
-     for urgency / important-notice blocks. */
+  /* APEX card variants — 4px left-edge accent bar per the v2
+     design spec. The tinted wash is retained but toned down —
+     borders do the real separation work now, not shadows or
+     heavy background tints.
+     Use .card-accent-blue for informational / active blocks,
+     .card-accent-red for urgency / destructive notices. */
   .card-accent-blue {
     @apply panel relative overflow-hidden;
-    border-left: 3px solid theme("colors.accent");
+    border-left: 4px solid theme("colors.accent");
   }
   .card-accent-red {
     @apply panel relative overflow-hidden;
-    border-left: 3px solid theme("colors.accent-red");
+    border-left: 4px solid theme("colors.accent-red");
   }
   .card-accent-blue::before,
   .card-accent-red::before {
@@ -133,15 +142,48 @@
     z-index: 0;
   }
   .card-accent-blue::before {
-    background: linear-gradient(90deg, rgba(51,143,234,0.05), transparent 40%);
+    background: linear-gradient(90deg, rgba(42,184,245,0.04), transparent 45%);
   }
   .card-accent-red::before {
-    background: linear-gradient(90deg, rgba(233,52,65,0.05), transparent 40%);
+    background: linear-gradient(90deg, rgba(228,64,95,0.04), transparent 45%);
   }
   .card-accent-blue > *,
   .card-accent-red > * {
     position: relative;
     z-index: 1;
+  }
+
+  /* --------------------------------------------------------------
+   * v2 design-system utilities (added Commit: design foundation)
+   * -------------------------------------------------------------- */
+
+  /* Eyebrow / label — sits above every section header per spec.
+     Small caps, wide letter-spacing, muted gray. */
+  .eyebrow {
+    @apply text-[10px] uppercase tracking-[0.18em] text-muted font-medium;
+  }
+
+  /* Display font — Kanit bold italic. Loaded via next/font in
+     layout.tsx as --font-kanit. Use for hero headlines and one
+     "accent word" per section (paired with .text-gradient). */
+  .font-display {
+    @apply font-display font-bold italic;
+    font-stretch: 90%;
+  }
+
+  /* Gradient text — the brand gradient (cyan → purple → red)
+     applied as a text fill via background-clip. Use ONLY on:
+     wordmark, one headline word per section, small icon accents.
+     Never on body text or full paragraphs.
+
+     Fallback: browsers that don't support background-clip: text
+     render as solid accent-blue. */
+  .text-gradient {
+    background: theme("backgroundImage.brand-gradient");
+    -webkit-background-clip: text;
+            background-clip: text;
+    color: theme("colors.accent");
+    -webkit-text-fill-color: transparent;
   }
 
   /* Section headings */
@@ -151,19 +193,28 @@
   .section-title {
     @apply text-xs uppercase tracking-[0.14em] text-muted font-medium;
   }
-  /* Page-level heading — bolder + a hair looser tracking, taking
-     cue from the PDF's chunky display headers. */
+  /* Page-level heading — bolder + a hair looser tracking. Kept
+     as Inter (sans) since it's a title-of-page not a hero
+     headline. Hero headlines use .h-display below. */
   .h-page {
     @apply text-2xl font-bold tracking-tight;
   }
-  /* APEX-style dual-tone display header — first span uses white,
-     second span uses accent-blue like "UK Hooks & Hashtags" in
-     the PDF. Wrap two spans and this class applies to the parent. */
+  /* Hero display headline — uses the display font (Kanit bold
+     italic). Wrap the accent word in <span class="text-gradient">
+     to paint it with the brand gradient per the "one gradient
+     word per section" rule. */
+  .h-display {
+    @apply font-display font-bold italic text-3xl md:text-4xl
+           tracking-tight leading-[1.05];
+    font-stretch: 90%;
+  }
+  /* Retained for back-compat — some pages import .h-apex from
+     an earlier iteration. Now a thin alias over .h-display. */
   .h-apex {
-    @apply text-3xl font-bold tracking-tight italic;
+    @apply h-display;
   }
   .h-apex > .apex-accent {
-    @apply text-accent not-italic;
+    @apply text-gradient not-italic;
   }
 
   /* Mono / ID styling */
@@ -182,7 +233,7 @@
   }
   .timeline-dot-bad   {
     background: theme("colors.bad");
-    box-shadow: 0 0 0 3px rgba(233,52,65,0.20), 0 0 12px rgba(233,52,65,0.50);
+    box-shadow: 0 0 0 3px rgba(228,64,95,0.20), 0 0 12px rgba(228,64,95,0.50);
   }
   .timeline-dot-warn  {
     background: theme("colors.warn");
@@ -194,7 +245,7 @@
   }
   .timeline-dot-accent {
     background: theme("colors.accent");
-    box-shadow: 0 0 0 3px rgba(51,143,234,0.20), 0 0 12px rgba(51,143,234,0.55);
+    box-shadow: 0 0 0 3px rgba(42,184,245,0.20), 0 0 12px rgba(42,184,245,0.55);
   }
 
   /* Pulse animation for the "running" dot on Job detail. */

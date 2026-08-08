@@ -1,7 +1,39 @@
 import "./globals.css";
 import type { Metadata } from "next";
+import { Inter, Kanit } from "next/font/google";
 import Nav from "@/components/Nav";
 import { getCurrentUser } from "@/lib/workspace";
+
+/**
+ * Body font — Inter. Self-hosted via next/font so no external
+ * request at runtime + no layout shift as the font loads.
+ * Exposed as CSS var --font-inter (consumed by
+ * tailwind.config → fontFamily.sans).
+ */
+const inter = Inter({
+  subsets: ["latin"],
+  variable: "--font-inter",
+  display: "swap",
+});
+
+/**
+ * Display font — Kanit bold italic. The closest Google Fonts
+ * match to the APEX wordmark's bold-italic-condensed impact
+ * style. Used for hero headlines + the wordmark itself. Loaded
+ * only in the weights we actually use (400 body + 700 display)
+ * to keep the payload small.
+ *
+ * Exposed as --font-kanit; tailwind.config maps it to
+ * fontFamily.display, and .h-display / .font-display in
+ * globals.css consume it.
+ */
+const kanit = Kanit({
+  subsets: ["latin"],
+  weight: ["500", "700"],
+  style: ["normal", "italic"],
+  variable: "--font-kanit",
+  display: "swap",
+});
 
 export const metadata: Metadata = {
   title: "APEX — TikTok Shop hub",
@@ -28,7 +60,10 @@ export default async function RootLayout({
   const authed = !!user;
 
   return (
-    <html lang="en">
+    <html
+      lang="en"
+      className={`${inter.variable} ${kanit.variable}`}
+    >
       <body>
         <Nav />
         <main
