@@ -190,6 +190,17 @@ model WorkspaceSettings {
   // Null when unset — mobile posting shows a Settings nudge.
   capCutTemplateUrl String?
 
+  // Google Flow account connected to this workspace via the APEX
+  // MCP server. Populated after a successful cookie-blob upload
+  // to /admin/accounts on the MCP. Used as the `flow_email` claim
+  // on every JWT the app mints for /mcp tool calls, so the MCP
+  // knows which of the (up to 50) Google Flow accounts on the
+  // shared useapi.net subscription to act as.
+  //
+  // Null = no account connected yet. The /generate page and any
+  // Flow-driven feature refuses to run until this is set.
+  flowEmail String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }

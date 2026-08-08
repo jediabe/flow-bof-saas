@@ -7,6 +7,7 @@ import AiPromptOverrides from "./AiPromptOverrides";
 import WorkspaceApiTokenPanel from "./WorkspaceApiTokenPanel";
 import WorkspaceVoicePanel from "./WorkspaceVoicePanel";
 import WorkspaceCapCutPanel from "./WorkspaceCapCutPanel";
+import WorkspaceGoogleFlowPanel from "./WorkspaceGoogleFlowPanel";
 import {
   getMaskedAiSettings,
   setIpRiskChecksEnabled,
@@ -15,6 +16,7 @@ import {
   getWorkspaceApiTokenStatus,
   getWorkspaceVoiceSettings,
   getWorkspaceCapCutTemplateUrl,
+  getGoogleFlowAccountStatus,
 } from "./actions";
 import { loadOrCreateSettings } from "@/lib/workspace-settings";
 import { UK_SYSTEM_PROMPT } from "@/lib/ai/uk-retail-prompts";
@@ -42,6 +44,7 @@ export default async function SettingsPage() {
   const apiTokenStatus = await getWorkspaceApiTokenStatus();
   const voiceSettings = await getWorkspaceVoiceSettings();
   const capCutSettings = await getWorkspaceCapCutTemplateUrl();
+  const googleFlowStatus = await getGoogleFlowAccountStatus();
 
   // Cooldown derivation: how much longer until the gate releases?
   const cooldownMs = settingsRow.cooldownHours * 60 * 60 * 1000;
@@ -87,6 +90,10 @@ export default async function SettingsPage() {
 
       <Panel title="CapCut template">
         <WorkspaceCapCutPanel initialUrl={capCutSettings.url} />
+      </Panel>
+
+      <Panel title="Google Flow account (via APEX MCP)">
+        <WorkspaceGoogleFlowPanel initial={googleFlowStatus} />
       </Panel>
 
       <Panel title="AI Providers">

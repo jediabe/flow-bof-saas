@@ -407,3 +407,170 @@ export async function saveWorkspaceCapCutTemplateUrl(
     message: toSave ? "CapCut template URL saved." : "CapCut template URL cleared.",
   };
 }
+
+/* ------------------------------------------------------------------
+ * Google Flow account (via APEX MCP)
+ *
+ * Onboarding for the useapi.net-backed video generation. Operator
+ * uploads a Google-Flow-session cookie blob captured from their
+ * browser DevTools; we forward to the MCP server's /admin/accounts
+ * which validates against Google, opens the session, and returns the
+ * connected email. We persist the email on WorkspaceSettings.flowEmail
+ * — from then on it's the flow_email claim on every JWT the app
+ * mints for MCP tool calls.
+ *
+ * Cookies themselves are NEVER persisted here (or by the MCP). The
+ * server discards them after handshake; useapi.net owns the refresh
+ * cycle from that point.
+ * ---------------------------------------------------------------- */
+
+export interface GoogleFlowStatus {
+  /** True when a flowEmail is persisted for this workspace. */
+  connected: boolean;
+  /** The connected Google Flow account email (or null when not yet
+   *  connected). */
+  email: string | null;
+  /** Health as reported by useapi.net: "OK" | ... others. Only
+   *  populated when connected AND the MCP status call succeeded. */
+  health: string | null;
+  /** True when health === "OK". Convenience flag for the UI. */
+  healthy: boolean;
+  /** Live-check error message when the status call itself failed
+   *  (MCP down, credentials mismatch, etc). Distinct from `health`
+   *  which is a semantic state reported by a successful status call. */
+  liveError: string | null;
+}
+
+export async function getGoogleFlowAccountStatus(): Promise<GoogleFlowStatus> {
+  const { workspace } = await getCurrentWorkspace();
+  const row = await loadOrCreateSettings(workspace.id);
+  const email = row.flowEmail?.trim() || null;
+  if (!email) {
+    return {
+      connected: false,
+      email: null,
+      health: null,
+      healthy: false,
+      liveError: null,
+    };
+  }
+  // Live-check the account against the MCP — catches broken
+  // sessions (596 upstream) before the operator hits them mid-
+  // generation.
+  try {
+    const { mcpGetAccountStatus } = await import("@/lib/apex-mcp");
+    const status = await mcpGetAccountStatus(email);
+    return {
+      connected: true,
+      email,
+      health: status.health,
+      healthy: status.healthy,
+      liveError: null,
+    };
+  } catch (err) {
+    const { ApexMcpError } = await import("@/lib/apex-mcp");
+    const message =
+      err instanceof ApexMcpError
+        ? `${err.status || "?"} · ${err.message}`
+        : (err as Error).message || "unknown MCP error";
+    return {
+      connected: true,
+      email,
+      health: null,
+      healthy: false,
+      liveError: message.slice(0, 300),
+    };
+  }
+}
+
+export async function connectGoogleFlowAccount(
+  formData: FormData,
+): Promise<{ ok: boolean; message: string; email?: string }> {
+  const cookies = String(formData.get("cookies") ?? "").trim();
+  if (cookies.length < 50) {
+    return {
+      ok: false,
+      message:
+        "Paste the full cookie table (tab-separated) copied from DevTools on accounts.google.com — the field looks empty or too short.",
+    };
+  }
+  const { workspace } = await getCurrentWorkspace();
+  try {
+    const { mcpConnectGoogleFlowAccount } = await import("@/lib/apex-mcp");
+    const resp = await mcpConnectGoogleFlowAccount({ cookies });
+    if (!resp.email) {
+      return {
+        ok: false,
+        message:
+          "MCP accepted the cookies but didn't return an email. Check the MCP logs — this is unexpected.",
+      };
+    }
+    await loadOrCreateSettings(workspace.id);
+    await db.workspaceSettings.update({
+      where: { workspaceId: workspace.id },
+      data:  { flowEmail: resp.email },
+    });
+    revalidatePath("/settings");
+    return {
+      ok: true,
+      message: `Connected ${resp.email} (health: ${resp.health}).`,
+      email: resp.email,
+    };
+  } catch (err) {
+    const { ApexMcpError } = await import("@/lib/apex-mcp");
+    if (err instanceof ApexMcpError) {
+      // The MCP maps upstream 400 to a specific "invalid_cookies"
+      // code — surface a helpful message pointing at the most
+      // common cause (missed 2FA "don't ask again" checkbox).
+      if (err.code === "invalid_cookies") {
+        return {
+          ok: false,
+          message:
+            "Google rejected those cookies. Common causes: the 2FA \"Don't ask again on this device\" checkbox wasn't ticked when signing in, or the cookies came from the wrong domain (must be accounts.google.com). Re-capture and retry.",
+        };
+      }
+      return {
+        ok: false,
+        message: `MCP returned ${err.status || "?"}: ${err.message}`,
+      };
+    }
+    return {
+      ok: false,
+      message: `Connect failed: ${(err as Error).message.slice(0, 300)}`,
+    };
+  }
+}
+
+export async function disconnectGoogleFlowAccount(): Promise<{
+  ok: boolean;
+  message: string;
+}> {
+  const { workspace } = await getCurrentWorkspace();
+  const row = await loadOrCreateSettings(workspace.id);
+  const email = row.flowEmail?.trim();
+  if (!email) {
+    return { ok: false, message: "No Google Flow account is connected." };
+  }
+  // Try the MCP delete, but don't block clearing the local flowEmail
+  // even if the remote delete fails — the operator's intent is to
+  // stop using this account here. Log the remote failure so it's
+  // visible in docker logs; local state is what matters for the UI.
+  try {
+    const { mcpDisconnectGoogleFlowAccount } = await import("@/lib/apex-mcp");
+    await mcpDisconnectGoogleFlowAccount(email);
+  } catch (err) {
+    console.warn(
+      `[settings] MCP disconnect for ${email} threw, clearing local flowEmail anyway:`,
+      err,
+    );
+  }
+  await db.workspaceSettings.update({
+    where: { workspaceId: workspace.id },
+    data:  { flowEmail: null },
+  });
+  revalidatePath("/settings");
+  return {
+    ok: true,
+    message: `Disconnected ${email}. Re-connect via the panel when you're ready.`,
+  };
+}
