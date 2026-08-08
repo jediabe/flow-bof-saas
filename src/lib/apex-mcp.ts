@@ -121,6 +121,30 @@ export async function mcpAdminRequest<T>(
  * Typed helpers for the specific admin routes we call from the app
  * ---------------------------------------------------------------- */
 
+export interface ListedAccount {
+  email: string;
+  health: string;
+  created: unknown;
+  sessionExpires: unknown;
+  nextRefresh: unknown;
+}
+
+export interface ListAccountsResponse {
+  count: number;
+  accounts: ListedAccount[];
+}
+
+/** GET /admin/accounts — every Google Flow account already
+ *  connected to the useapi.net subscription (whether via our
+ *  cookie-paste form OR useapi.net's own automated browser
+ *  setup at useapi.net/assets/setup-browser/google-flow).
+ *
+ *  We show these as pickable options so operators who already
+ *  connected via useapi.net don't have to re-capture cookies. */
+export async function mcpListAccounts(): Promise<ListAccountsResponse> {
+  return mcpAdminRequest<ListAccountsResponse>("/admin/accounts");
+}
+
 export interface ConnectedAccountResponse {
   email: string | null;
   name: string | null;

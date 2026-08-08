@@ -424,63 +424,157 @@ export async function saveWorkspaceCapCutTemplateUrl(
  * cycle from that point.
  * ---------------------------------------------------------------- */
 
+export interface AvailableFlowAccount {
+  email: string;
+  health: string;
+  /** True when health === "OK". */
+  healthy: boolean;
+}
+
 export interface GoogleFlowStatus {
   /** True when a flowEmail is persisted for this workspace. */
-  connected: boolean;
-  /** The connected Google Flow account email (or null when not yet
-   *  connected). */
+  bound: boolean;
+  /** The bound Google Flow account email (or null when this
+   *  workspace hasn't picked one yet). */
   email: string | null;
-  /** Health as reported by useapi.net: "OK" | ... others. Only
-   *  populated when connected AND the MCP status call succeeded. */
+  /** Health of the BOUND account. Populated when bound AND the
+   *  MCP status call succeeded. */
   health: string | null;
-  /** True when health === "OK". Convenience flag for the UI. */
+  /** True when health === "OK". */
   healthy: boolean;
-  /** Live-check error message when the status call itself failed
-   *  (MCP down, credentials mismatch, etc). Distinct from `health`
-   *  which is a semantic state reported by a successful status call. */
+  /** Live-check error for the bound account (distinct from a
+   *  semantic health value). */
   liveError: string | null;
+  /** Every Google Flow account currently connected to the
+   *  useapi.net subscription — includes accounts hooked up via
+   *  useapi.net's own automated setup, not just ones connected
+   *  through our cookie-paste form. Operators bind one of these
+   *  to the workspace with a click; no re-capture needed. Null
+   *  when the list call itself failed (MCP down, service key
+   *  mismatch, etc). */
+  availableAccounts: AvailableFlowAccount[] | null;
+  /** Error message when the availableAccounts list call failed. */
+  listError: string | null;
 }
 
 export async function getGoogleFlowAccountStatus(): Promise<GoogleFlowStatus> {
   const { workspace } = await getCurrentWorkspace();
   const row = await loadOrCreateSettings(workspace.id);
   const email = row.flowEmail?.trim() || null;
-  if (!email) {
-    return {
-      connected: false,
-      email: null,
-      health: null,
-      healthy: false,
-      liveError: null,
-    };
+
+  // Fire both MCP calls in parallel — bound-account status +
+  // full list of available accounts. Each one's failure is
+  // independent; the panel can render partial info if the list
+  // works but the status doesn't (or vice versa).
+  const { mcpGetAccountStatus, mcpListAccounts, ApexMcpError } = await import(
+    "@/lib/apex-mcp"
+  );
+
+  const [statusResult, listResult] = await Promise.allSettled([
+    email ? mcpGetAccountStatus(email) : Promise.resolve(null),
+    mcpListAccounts(),
+  ]);
+
+  let health: string | null = null;
+  let healthy = false;
+  let liveError: string | null = null;
+  if (email) {
+    if (statusResult.status === "fulfilled" && statusResult.value) {
+      health = statusResult.value.health;
+      healthy = statusResult.value.healthy;
+    } else if (statusResult.status === "rejected") {
+      const err = statusResult.reason;
+      liveError = (err instanceof ApexMcpError
+        ? `${err.status || "?"} · ${err.message}`
+        : (err as Error).message || "unknown MCP error"
+      ).slice(0, 300);
+    }
   }
-  // Live-check the account against the MCP — catches broken
-  // sessions (596 upstream) before the operator hits them mid-
-  // generation.
+
+  let availableAccounts: AvailableFlowAccount[] | null = null;
+  let listError: string | null = null;
+  if (listResult.status === "fulfilled") {
+    availableAccounts = listResult.value.accounts.map((a) => ({
+      email: a.email,
+      health: String(a.health || "unknown"),
+      healthy: String(a.health || "").toUpperCase() === "OK",
+    }));
+  } else {
+    const err = listResult.reason;
+    listError = (err instanceof ApexMcpError
+      ? `${err.status || "?"} · ${err.message}`
+      : (err as Error).message || "unknown MCP error"
+    ).slice(0, 300);
+  }
+
+  return {
+    bound: !!email,
+    email,
+    health,
+    healthy,
+    liveError,
+    availableAccounts,
+    listError,
+  };
+}
+
+/**
+ * Bind an already-connected Google Flow account (visible in the
+ * MCP's /admin/accounts list) to this workspace. Doesn't touch
+ * the useapi.net side at all — just persists the email that
+ * becomes the flow_email JWT claim on every future /mcp call.
+ *
+ * The email must be one the MCP knows about; we look it up first
+ * to catch typos and stale UI state.
+ */
+export async function bindGoogleFlowAccount(input: {
+  email: string;
+}): Promise<{ ok: boolean; message: string }> {
+  const email = input.email?.trim();
+  if (!email) {
+    return { ok: false, message: "Pick an account from the list first." };
+  }
+  const { workspace } = await getCurrentWorkspace();
+
+  // Look up the account to confirm it's still connected. Prevents
+  // binding to a stale email the UI held from before a disconnect.
   try {
     const { mcpGetAccountStatus } = await import("@/lib/apex-mcp");
     const status = await mcpGetAccountStatus(email);
-    return {
-      connected: true,
-      email,
-      health: status.health,
-      healthy: status.healthy,
-      liveError: null,
-    };
+    if (!status.healthy) {
+      // Warn but still let them bind — they might be about to fix
+      // the session. Not a hard block.
+      console.warn(
+        `[settings] binding ${email} to workspace=${workspace.id} despite health=${status.health}`,
+      );
+    }
   } catch (err) {
     const { ApexMcpError } = await import("@/lib/apex-mcp");
-    const message =
-      err instanceof ApexMcpError
-        ? `${err.status || "?"} · ${err.message}`
-        : (err as Error).message || "unknown MCP error";
-    return {
-      connected: true,
-      email,
-      health: null,
-      healthy: false,
-      liveError: message.slice(0, 300),
-    };
+    if (err instanceof ApexMcpError && err.status === 404) {
+      return {
+        ok: false,
+        message: `${email} isn't connected on the MCP anymore. Refresh and pick another account.`,
+      };
+    }
+    // Non-404 error — could be MCP down. Let them bind anyway;
+    // the /generate flow will re-check health when actually
+    // firing tool calls.
+    console.warn(
+      `[settings] pre-bind status check for ${email} failed non-fatally:`,
+      err,
+    );
   }
+
+  await loadOrCreateSettings(workspace.id);
+  await db.workspaceSettings.update({
+    where: { workspaceId: workspace.id },
+    data:  { flowEmail: email },
+  });
+  revalidatePath("/settings");
+  return {
+    ok: true,
+    message: `Bound ${email} to this workspace. It'll be the flow_email on every /generate call.`,
+  };
 }
 
 export async function connectGoogleFlowAccount(
