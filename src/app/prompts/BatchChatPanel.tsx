@@ -316,7 +316,7 @@ function BatchChatPanelInner({
       />
       {/* Drawer */}
       <aside
-        className="fixed top-0 right-0 z-40 h-screen w-full sm:w-[460px] bg-panel border-l border-border shadow-2xl flex flex-col"
+        className="fixed top-0 right-0 z-40 h-screen w-full sm:w-[560px] bg-panel border-l border-border shadow-2xl flex flex-col"
         role="dialog"
         aria-label={`Chat for batch ${batchName}`}
       >
@@ -410,7 +410,7 @@ function BatchChatPanelInner({
         </div>
 
         {/* Composer */}
-        <div className="border-t border-border p-3 space-y-2">
+        <div className="border-t border-border p-4 space-y-3">
           <ProductPicker
             products={products}
             value={currentProductId}
@@ -433,7 +433,7 @@ function BatchChatPanelInner({
 
           <div className="flex gap-2 items-end">
             <textarea
-              rows={2}
+              rows={5}
               value={text}
               onChange={(e) => setText(e.target.value)}
               onKeyDown={(e) => {
@@ -448,13 +448,13 @@ function BatchChatPanelInner({
                   : "Ask the agent…"
               }
               disabled={sending || !convId}
-              className="flex-1 bg-panel2 border border-border rounded-md px-2 py-1.5 text-sm text-text resize-none focus:outline-none focus:border-accent"
+              className="flex-1 min-h-[112px] bg-panel2 border border-border rounded-md px-3 py-2 text-sm text-text resize-y focus:outline-none focus:border-accent"
             />
             <button
               type="button"
               onClick={submitTurn}
               disabled={sending || !convId || !text.trim()}
-              className="btn btn-sm"
+              className="btn"
             >
               {sending ? "…" : "Send"}
             </button>
@@ -640,7 +640,7 @@ function ImagePicker({
           )}
         </div>
       </div>
-      <div className="flex gap-1 overflow-x-auto pb-1">
+      <div className="flex gap-2 overflow-x-auto pb-2">
         {images.map((url) => {
           const isOn = selected.has(url);
           return (
@@ -649,7 +649,7 @@ function ImagePicker({
               type="button"
               onClick={() => onToggle(url)}
               className={
-                "shrink-0 w-14 h-14 rounded-md border overflow-hidden relative transition-all " +
+                "shrink-0 w-24 h-24 rounded-lg border overflow-hidden relative transition-all " +
                 (isOn
                   ? "border-accent ring-2 ring-accent/60"
                   : "border-border opacity-70 hover:opacity-100")
@@ -663,7 +663,7 @@ function ImagePicker({
                 className="w-full h-full object-cover"
               />
               {isOn && (
-                <span className="absolute top-0.5 right-0.5 bg-accent text-black text-[9px] rounded-full w-4 h-4 flex items-center justify-center font-bold">
+                <span className="absolute top-1 right-1 bg-accent text-black text-[10px] rounded-full w-5 h-5 flex items-center justify-center font-bold">
                   ✓
                 </span>
               )}
