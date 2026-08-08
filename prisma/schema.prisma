@@ -560,6 +560,11 @@ model Product {
   // (e.g. one image variant + one animated video) — the relation
   // is one-to-many.
   flowItems               FlowItem[]
+  // Videos the /generate agent produced via APEX MCP for this
+  // product. Each row is a stable Flow mediaGenerationId we can
+  // re-mint fresh signed URLs against on demand (they expire in
+  // 6h; the id doesn't). See FlowGeneratedVideo below.
+  flowGeneratedVideos     FlowGeneratedVideo[]
 
   @@index([batchId])
   @@index([reviewStatus])
@@ -569,6 +574,44 @@ model Product {
   // index, each render scans the whole products table on a busy
   // workspace.
   @@index([ipRiskStatus])
+}
+
+// ---------------------------------------------------------------------------
+// FlowGeneratedVideo — one row per video the /generate agent
+// produced for a product via the APEX MCP tool loop.
+//
+// We store the mediaGenerationId (TikHub's stable handle) rather
+// than a download URL because signed URLs from useapi.net expire
+// in ~6h. The id resolves via google_flow_get_asset to a fresh
+// URL on demand — cheap, no persistence of the actual video bytes
+// needed on our side.
+//
+// sceneLabel maps this row to its slot in the Style 1 structure
+// so mobile posting knows which video is "Scene 1 · store" vs
+// "Scene 2 · home". Free-form "other" values allowed for future
+// styles / one-off generations.
+
+model FlowGeneratedVideo {
+  id                String   @id @default(cuid())
+  productId         String
+  product           Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  // Style-1 slot: "scene_1_store" | "scene_2_home" | "combined"
+  //             (full stitched video) | "other" (adhoc / test).
+  sceneLabel        String
+  // Stable Flow mediaGenerationId. Use google_flow_get_asset to
+  // mint a fresh signed URL when needed. Never treat this as a
+  // download link.
+  mediaGenerationId String
+  // Prompt the agent used to generate this video. Useful for
+  // debugging + regenerate-with-tweak flows.
+  prompt            String?
+  // Free-form notes from the agent OR operator (e.g. "first
+  // attempt, may regenerate for better lighting"). Rendered as
+  // hover text in the mobile posting page's videos section.
+  notes             String?
+  createdAt         DateTime @default(now())
+
+  @@index([productId, createdAt(sort: Desc)])
 }
 
 // Phase 3 — additional reference images for a Product. Up to three

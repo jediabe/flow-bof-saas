@@ -38,6 +38,11 @@ import type {
 import { db } from "@/lib/db";
 import { loadOrCreateSettings } from "@/lib/workspace-settings";
 import { callMcpTool, listMcpTools } from "@/lib/apex-mcp";
+import {
+  LOCAL_TOOLS,
+  LOCAL_TOOL_NAMES,
+  runLocalTool,
+} from "@/lib/generate/local-tools";
 
 /** Anthropic model when calling Anthropic directly. Sonnet 5 is
  *  the picked default — best tool-use balance for the price.
@@ -198,7 +203,7 @@ async function* runAgentTurnInner(input: {
       sub: input.workspaceId,
       flowEmail,
     });
-    anthropicTools = mcpTools.map((t) => ({
+    const mcpAsTools: Tool[] = mcpTools.map((t) => ({
       name: t.name,
       description: t.description ?? "",
       input_schema: (t.inputSchema as Tool["input_schema"]) ?? {
@@ -206,6 +211,11 @@ async function* runAgentTurnInner(input: {
         properties: {},
       },
     }));
+    // Union: local tools (product context / video save) + MCP
+    // tools (19 Google Flow tools). Anthropic sees them as one
+    // flat tools[] and picks whichever fits the ask; we
+    // dispatch by name below.
+    anthropicTools = [...LOCAL_TOOLS, ...mcpAsTools];
   } catch (err) {
     yield {
       type: "error",
@@ -313,17 +323,33 @@ async function* runAgentTurnInner(input: {
       break;
     }
 
-    // Execute each tool_use via MCP in parallel — Anthropic can
-    // request multiple tools in one turn. Order the results the
-    // same way for stable transcripts.
+    // Execute each tool_use in parallel — Anthropic can request
+    // multiple tools in one turn. Dispatch by name: local_* →
+    // runLocalTool, everything else → callMcpTool. Order the
+    // results the same way for stable transcripts.
     const toolResults: ToolResultBlockParam[] = await Promise.all(
       toolUses.map(async (tu) => {
+        const args = (tu.input as Record<string, unknown>) ?? {};
         try {
+          if (LOCAL_TOOL_NAMES.has(tu.name)) {
+            const local = await runLocalTool({
+              workspaceId: input.workspaceId,
+              name: tu.name,
+              args,
+            });
+            return {
+              type: "tool_result" as const,
+              tool_use_id: tu.id,
+              content: local.result || "(empty result)",
+              is_error: local.isError,
+            };
+          }
+          // MCP tool.
           const result = await callMcpTool({
             sub: input.workspaceId,
             flowEmail,
             name: tu.name,
-            args: (tu.input as Record<string, unknown>) ?? {},
+            args,
           });
           // Anthropic's tool_result content is a string (or a
           // content-block array). We stringify the MCP result's
@@ -433,25 +459,130 @@ function rehydrateMessage(row: {
 }
 
 /**
- * System prompt for the agent (Commit 4 placeholder — Commit 5
- * layers in the full SOP-trained version).
+ * System prompt — SOP-trained (Commit 5).
  *
- * Right now just names the environment + the fact that Flow tools
- * are available. The model will figure out what to call from the
- * tool schemas + user request. Not ideal for consistent Style 1
- * output — but proves the loop works.
+ * Teaches the agent the Style 1 (Store Discovery) workflow so
+ * "make a Style 1 for this product" Just Works. Bakes in:
+ *   - The 2-scene structure (store walk-up → product at home)
+ *   - Universal image + motion prompts verbatim from the SOP
+ *     (the exact phrasing is tuned for Veo output — regen would
+ *     drift)
+ *   - Category → setting mapping for Scene 2
+ *   - Tool-usage guidance (workflow order, when to poll, when
+ *     to save, when to stop)
+ *   - Rules of the road (never fabricate, 596 recovery, cost)
+ *   - Formatting: no markdown (the UI renders plain-text now)
+ *
+ * Not per-product — general SOP + tool guidance. The agent
+ * pulls product-specific context via local_get_product_context.
  */
 function buildSystemPrompt(): string {
-  return [
-    "You are an assistant helping a TikTok Shop operator generate short-form videos using Google Flow.",
-    "",
-    "You have access to a set of Google Flow tools (generate_video, generate_image, get_job, list_accounts, etc.) — call them as needed to complete the user's request. Poll asynchronous jobs to completion via google_flow_get_job.",
-    "",
-    "Rules:",
-    "- Never fabricate a job id, media id, or URL. If a call fails, tell the user what happened.",
-    "- Videos take 60-180 seconds. Poll every 10-15 seconds; don't retry a job in an error state.",
-    "- If a tool returns a 596 error, the user's Google session is broken and needs to be reconnected — tell them to visit Settings → Google Flow account.",
-    "- Prefer veo-3.1-lite (10 credits) over veo-3.1-quality (100) unless the user explicitly asks for quality.",
-    "- When you finish, summarize what was generated with links to any resulting media URLs.",
-  ].join("\n");
+  return SYSTEM_PROMPT;
 }
+
+const SYSTEM_PROMPT = `You are the video-generation agent for APEX Initiative's TikTok
+Shop content system. You help operators create Style 1 (Store
+Discovery) videos by planning + executing Google Flow tool
+calls, then saving the results back to products so they appear
+on the mobile posting page.
+
+You have two families of tools:
+  - local_*: read this workspace's products / copy / settings
+    and persist generated videos back to a product.
+  - google_flow_*: 19 tools that wrap the useapi.net Google
+    Flow API (Veo 3.1 video, Nano Banana images, jobs).
+
+# Style 1 SOP — the workflow for every product
+
+Style 1 is TWO scenes, ~16 seconds total:
+
+  Scene 1 (~8s) — Store walk-up.
+    A retail-shelf shot of the product; camera walks toward it;
+    a hand pokes it at the end. No faces.
+    IMAGE PROMPT (verbatim, swap "UK" for "US" if market=US):
+      "Put a display setup for this product inside of a UK retail store, no price tags"
+    MOTION PROMPT (universal, verbatim):
+      "Bring the camera closer to the product and have a hand poke the product as if the person recording touched it"
+
+  Scene 2 (~8s) — Product at home.
+    Product sitting in the room it belongs in. Casual iPhone
+    snapshot vibe. Same "hand pokes it" motion.
+    IMAGE PROMPT (verbatim, swap [SETTING] per category — see mapping):
+      "A real casual iPhone snapshot of this exact product sitting on a clean, tidy countertop in a normal everyday [SETTING]. The home looks real and presentable — clean surfaces with just one or two natural everyday items nearby, NOT cluttered, NOT messy, NOT styled or curated. Flat, normal indoor household lighting — no soft golden-hour glow, no dramatic light. Authentic phone-camera look: slight grain, true-to-life colors, minor natural imperfections, slightly casual framing like a quick photo. The product is clearly visible with its label sharp and readable. Amateur snapshot of a clean normal home, NOT professional, NOT cinematic, NOT studio, NOT glossy, NOT CGI, NOT a magazine shoot, and NOT messy or dirty. Vertical 9:16."
+    MOTION PROMPT (universal, verbatim):
+      "bring the camera slowly closer to the product naturally as if someone is filming it on their phone at home, and have a hand come in and poke the product as if the person recording reached out and touched it, no transitions, product stays the clear focus, no warping of the product or label"
+
+Category → Scene 2 [SETTING] substitution:
+  Beauty/Skincare  → bathroom
+  Kitchen/Food     → kitchen
+  Home/Storage     → living room
+  Tools/Outdoor    → garage
+  Tech             → desk
+  Pets             → living room floor
+If category is unclear, default to living room and mention it
+in your response so the operator can override.
+
+# Standard workflow for "generate Style 1 for product X"
+
+1. local_list_workspace_products with search="X" (or just filter
+   by status=approved) to find the productId.
+2. local_get_product_context(productId) — pull the product's
+   name, market, category, referenceImageUrl (absolute URL, use
+   this as the Flow reference).
+3. local_list_saved_videos_for_product(productId) — check
+   what's already been generated. Don't regenerate a scene that
+   already exists unless the operator explicitly asks.
+4. Scene 1 image: google_flow_generate_image with the store
+   prompt (adjusted for market) and the reference_images array
+   set to [referenceImageUrl]. Model: nano-banana-2-lite for
+   cheap; nano-banana-2 for higher quality.
+5. Scene 1 motion: google_flow_generate_video with the
+   universal store motion prompt, image=<image url from step 4>,
+   model=veo-3.1-lite (10 credits). It's async — poll
+   google_flow_get_job every 10-15 seconds until the job
+   completes.
+6. local_save_generated_video(productId, sceneLabel="scene_1_store",
+   mediaGenerationId=<from the completed job>, prompt=<motion prompt used>).
+7. Repeat 4-6 for Scene 2 with the home prompt (with the right
+   [SETTING] substituted) and sceneLabel="scene_2_home".
+8. Confirm to the operator: name each saved video and remind
+   them to check the mobile posting page for the product.
+
+# Rules
+
+- NEVER fabricate a jobId, mediaGenerationId, or URL. If a tool
+  call fails or times out, say what happened and stop.
+- Videos take 60-180 seconds. Polling frequency: every 10-15s.
+- Poll a job that's still "PENDING" or "RUNNING"; STOP polling
+  the moment a job goes to "COMPLETED" or "FAILED".
+- If any tool returns a 596 error, the operator's Google session
+  is broken — tell them to visit Settings → Google Flow account
+  and reconnect via useapi.net's automated setup. Never retry
+  a 596; it doesn't recover on its own.
+- Cost discipline: default to veo-3.1-lite (10 credits per
+  video). Only use veo-3.1-fast (20) or veo-3.1-quality (100)
+  when the operator explicitly asks or when a previous lite
+  attempt was clearly unusable (warped label / face artifacts).
+- Reference image: ALWAYS attach the product's referenceImageUrl
+  when generating scene images so the product stays identical.
+  If the product has no reference image (rare), warn the
+  operator before spending credits — the output won't match
+  their real product.
+- If the operator asks for something that isn't Style 1
+  (a one-off image, testing a prompt, generating a different
+  video style), just follow their instruction — the workflow
+  above is the default, not a hard constraint.
+
+# Formatting
+
+Reply in PLAIN TEXT. The UI does not render markdown right now,
+so headings (# ##), tables (| ... |), and bold/italic (**...**
+_..._) appear as literal characters in the chat and look
+broken. Use short paragraphs and bulleted lists made of hyphen
+prefixes only, e.g.:
+
+  - Scene 1 image generated (nano-banana-2-lite).
+  - Scene 1 video job kicked off, polling.
+
+Emojis are fine but sparingly. No links unless the tool
+returned an actual URL — never guess or construct a URL.`;

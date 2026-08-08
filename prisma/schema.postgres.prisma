@@ -400,6 +400,9 @@ model Product {
   // Phase 6 — Flow items bound to this product (generated images
   // / videos the user has approved for this product).
   flowItems          FlowItem[]
+  // Videos the /generate agent produced via APEX MCP — see
+  // FlowGeneratedVideo below.
+  flowGeneratedVideos FlowGeneratedVideo[]
 
   @@index([batchId])
   @@index([reviewStatus])
@@ -409,6 +412,21 @@ model Product {
   // index, each render scans the whole products table on a busy
   // workspace.
   @@index([ipRiskStatus])
+}
+
+// /generate agent's saved videos per product. See SQLite schema
+// for full docs on why mediaGenerationId (not URL) is stored.
+model FlowGeneratedVideo {
+  id                String   @id @default(cuid())
+  productId         String
+  product           Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  sceneLabel        String
+  mediaGenerationId String
+  prompt            String?
+  notes             String?
+  createdAt         DateTime @default(now())
+
+  @@index([productId, createdAt(sort: Desc)])
 }
 
 // Phase 3 — additional reference images for a Product. Up to three
