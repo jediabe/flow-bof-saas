@@ -1,0 +1,47 @@
+{
+  "name": "google-flow-mcp-server",
+  "version": "1.0.0",
+  "description": "APEX MCP \u2014 remote MCP server exposing the useapi.net Google Flow v1 API (Veo 3.1, Gemini Omni Flash, Nano Banana) with per-user credential storage.",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "google-flow-mcp-server": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node --env-file-if-exists=.env dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "typecheck": "tsc --noEmit",
+    "mock": "node test/mock-useapi.mjs 4010",
+    "test:e2e": "node test/run-e2e.mjs",
+    "test:live": "node --env-file-if-exists=.env test/live-smoke.mjs",
+    "jwt": "node --env-file-if-exists=.env test/mint-jwt.mjs",
+    "call": "node --env-file-if-exists=.env test/call.mjs",
+    "secrets": "node test/gen-secrets.mjs",
+    "connect": "node --env-file-if-exists=.env test/admin.mjs connect",
+    "accounts": "node --env-file-if-exists=.env test/admin.mjs accounts",
+    "disconnect": "node --env-file-if-exists=.env test/admin.mjs disconnect",
+    "demo": "node --env-file-if-exists=.env examples/web-app-client.mjs",
+    "dev:mock": "node test/dev-mock.mjs",
+    "prebuild": "node test/check-deps.mjs",
+    "check:features": "node --env-file-if-exists=.env test/feature-check.mjs",
+    "diag:characters": "node --env-file-if-exists=.env test/diag-characters.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.20.0",
+    "express": "^4.21.2",
+    "jsonwebtoken": "^9.0.2",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/jsonwebtoken": "^9.0.7",
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

@@ -126,6 +126,47 @@ services:
     depends_on:
       - app
 
+  # APEX MCP server — remote MCP wrapping useapi.net's Google Flow
+  # API. Stateless service (no DB) — one useapi.net subscription
+  # (USEAPI_TOKEN) covers the whole deployment; end users are
+  # distinguished by the flow_email JWT claim the Next.js app mints
+  # per request.
+  #
+  # Reachable at http://apex-mcp:3000 inside the compose network.
+  # Never exposed to the public — Caddy has no route to it, and no
+  # host port is published. The Next.js app calls it as a
+  # server-to-server MCP client.
+  #
+  # Required env vars (set in .env.production):
+  #   USEAPI_TOKEN        — your useapi.net API token (keeps the
+  #                          "user:" prefix)
+  #   APEX_JWT_SECRET     — HS256 secret the Next.js app also uses
+  #                          to sign JWTs; >= 32 chars. Generate
+  #                          with `openssl rand -base64 32`.
+  #   APEX_SERVICE_KEY    — shared secret guarding /admin/* routes
+  #                          (Google Flow account connect / list /
+  #                          disconnect). Never sent from browsers.
+  #                          Generate with `openssl rand -base64 32`.
+  apex-mcp:
+    build:
+      context: ./apex-mcp
+      dockerfile: Dockerfile
+    container_name: flow-bof-apex-mcp
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    environment:
+      AUTH_MODE: jwt
+      TRANSPORT: http
+      HOST: 0.0.0.0
+      PORT: "3000"
+      # No ALLOWED_ORIGINS: this service is only ever called
+      # server-to-server from the app container, which never sends
+      # an Origin header. Setting an allowlist would just add a
+      # foot-gun.
+    expose:
+      - "3000"
+
 volumes:
   postgres_data:
   caddy_data:
