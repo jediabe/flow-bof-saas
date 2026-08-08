@@ -165,9 +165,13 @@
 
   /* Display font — Kanit bold italic. Loaded via next/font in
      layout.tsx as --font-kanit. Use for hero headlines and one
-     "accent word" per section (paired with .text-gradient). */
+     "accent word" per section (paired with .text-gradient).
+     Uses theme() directly instead of @apply font-display —
+     PostCSS treats "@apply font-display" as self-referential
+     when this rule is itself .font-display. */
   .font-display {
-    @apply font-display font-bold italic;
+    font-family: theme("fontFamily.display");
+    @apply font-bold italic;
     font-stretch: 90%;
   }
 
@@ -202,9 +206,13 @@
   /* Hero display headline — uses the display font (Kanit bold
      italic). Wrap the accent word in <span class="text-gradient">
      to paint it with the brand gradient per the "one gradient
-     word per section" rule. */
+     word per section" rule.
+     Same theme() dodge as .font-display above so nested @apply
+     with a class name that matches a Tailwind utility (font-display)
+     doesn't self-reference. */
   .h-display {
-    @apply font-display font-bold italic text-3xl md:text-4xl
+    font-family: theme("fontFamily.display");
+    @apply font-bold italic text-3xl md:text-4xl
            tracking-tight leading-[1.05];
     font-stretch: 90%;
   }
