@@ -123,6 +123,19 @@ Poll `GET /admin/accounts/:email` on a schedule. Catching a broken session befor
 | `google_flow_list_characters` / `get` / `create` / `delete` | Reusable characters for consistent subjects |
 | `google_flow_list_voices` / `get` / `create` / `delete` | System presets and custom voices |
 
+### Apex Style 2 workflow tools
+
+Encode the Apex Style 2 (MOF AI Avatar) SOP as a set of deterministic tools plus one MCP prompt. The SOP itself lives at [`docs/STYLE-2-SOP.md`](docs/STYLE-2-SOP.md); rotation menus, prompt templates and compliance rules are transcribed verbatim in `src/tools/style2/*`.
+
+| Tool | What it does |
+|---|---|
+| `apex_style2_roll_scene` | Pick the room from the product type, roll one value from each rotation menu, hash the combo, and assemble the finished scene-image prompt. Anti-repetition is caller-driven — pass `recent_scene_hashes`. |
+| `apex_style2_build_clip_prompts` | Assemble the Nano/Veo chain from templates. Returns 7 steps for handheld / countertop products, 3-clip mirror try-on for `worn`. Every Veo prompt carries "no talking, no lip movement". `duration_strategy` defaults to `generate_8_and_trim` so it works below Google AI Ultra. |
+| `apex_style2_validate_copy` | SOP §6 compliance gate. Blocks US number leaks, result claims ("lips look fuller"), medical / absolute language, fabricated pricing errors, fake scarcity, profanity, and enforces the 70–75 word voiceover length. Prefers false positives — a missed one gets a video pulled. |
+| `apex_style2_next_step` | Execute one step of the chain — Nano image or Veo video — with the locked avatar attached as identity reference on every step. Veo steps return a jobId immediately; the caller polls `google_flow_get_job` themselves. |
+
+The `style2_copywriter` MCP prompt hands the calling model the SOP §6 authoring rules and feeds its output back to `apex_style2_validate_copy`. Voice / ElevenLabs tools (synth, fit loop, timing map, captions) are a follow-up phase — not in this ship.
+
 Every tool takes `response_format` (`markdown` by default, or `json`) and returns `structuredContent` alongside the text, so your UI can render media cards from the same call the model reads.
 
 ### How the tools differ from the raw API

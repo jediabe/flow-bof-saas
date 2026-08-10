@@ -79,7 +79,7 @@ section("Protocol");
 
   const { body: list } = await rpc("tools/list", {});
   const tools = list.result?.tools ?? [];
-  check(`tools/list returns 19 tools (got ${tools.length})`, tools.length === 19);
+  check(`tools/list returns 23 tools (got ${tools.length})`, tools.length === 23);
   check(
     "no tool exposes an account/email input",
     !tools.some((t) => Object.keys(t.inputSchema?.properties ?? {}).some((k) => /email/i.test(k))),
@@ -451,6 +451,283 @@ section("Auth");
 
   const getMcp = await fetch(MCP_URL, { headers: { Authorization: `Bearer ${token()}` } });
   check("GET /mcp returns 405", getMcp.status === 405);
+}
+
+/* ===================================================================== */
+
+section("Style 2 · roll_scene");
+{
+  // Reproducibility: same seed + same product_type → identical scene.
+  const a = await callTool("apex_style2_roll_scene", {
+    product_type: "skincare_beauty_makeup_haircare",
+    seed: 42,
+    response_format: "json",
+  });
+  const b = await callTool("apex_style2_roll_scene", {
+    product_type: "skincare_beauty_makeup_haircare",
+    seed: 42,
+    response_format: "json",
+  });
+  check("roll_scene: fixed seed is reproducible",
+    a.structured?.scene_hash === b.structured?.scene_hash);
+  check("roll_scene: returns a bathroom for skincare",
+    a.structured?.room === "bathroom");
+  check("roll_scene: returns a filled scene_prompt",
+    typeof a.structured?.scene_prompt === "string"
+      && a.structured.scene_prompt.length > 200);
+  check("roll_scene: scene_prompt contains no promoted product",
+    !/promoted product|the product\b/i.test(a.structured?.scene_prompt ?? "")
+      || /generic props only/i.test(a.structured?.scene_prompt ?? ""));
+
+  // Different seed → different scene.
+  const c = await callTool("apex_style2_roll_scene", {
+    product_type: "skincare_beauty_makeup_haircare",
+    seed: 99,
+    response_format: "json",
+  });
+  check("roll_scene: different seed gives a different scene",
+    a.structured?.scene_hash !== c.structured?.scene_hash);
+
+  // recent_scene_hashes forces a re-roll off the current combo.
+  const d = await callTool("apex_style2_roll_scene", {
+    product_type: "skincare_beauty_makeup_haircare",
+    seed: 42,
+    recent_scene_hashes: [a.structured?.scene_hash],
+    response_format: "json",
+  });
+  check("roll_scene: recent_scene_hashes forces a different combo",
+    d.structured?.scene_hash !== a.structured?.scene_hash);
+
+  // Product-type → room table.
+  const rooms = {
+    skincare_beauty_makeup_haircare: "bathroom",
+    clothing_fashion_shoes: "bedroom",
+    outdoor_garden_fitness: "outdoor",
+    home_kitchen: "kitchen",
+    other: "bathroom",  // fallback with a note
+  };
+  for (const [ptype, expected] of Object.entries(rooms)) {
+    const r = await callTool("apex_style2_roll_scene", {
+      product_type: ptype,
+      seed: 7,
+      response_format: "json",
+    });
+    check(`roll_scene: ${ptype} → ${expected}`, r.structured?.room === expected);
+  }
+
+  const other = await callTool("apex_style2_roll_scene", {
+    product_type: "other",
+    seed: 1,
+    response_format: "json",
+  });
+  check("roll_scene: 'other' emits an override note",
+    Array.isArray(other.structured?.notes)
+      && other.structured.notes.some((n) => /override/i.test(n)));
+}
+
+section("Style 2 · build_clip_prompts");
+{
+  const scene = await callTool("apex_style2_roll_scene", {
+    product_type: "skincare_beauty_makeup_haircare",
+    seed: 42,
+    response_format: "json",
+  });
+  const scenePrompt = scene.structured?.scene_prompt ?? "";
+
+  // Handheld — 7 steps, alternating engines, all Veo prompts silent.
+  const handheld = await callTool("apex_style2_build_clip_prompts", {
+    scene_prompt: scenePrompt,
+    product_name: "Medicube Pink Collagen Balm",
+    product_form: "lip",
+    product_count: 1,
+    response_format: "json",
+  });
+  check("build_clip_prompts: handheld returns 7 steps",
+    handheld.structured?.steps?.length === 7);
+  check("build_clip_prompts: chain_kind=handheld",
+    handheld.structured?.chain_kind === "handheld");
+  check("build_clip_prompts: lip product demo_area=lips",
+    handheld.structured?.demo_area === "lips");
+  check("build_clip_prompts: every Veo step says 'no talking, no lip movement'",
+    handheld.structured?.steps
+      ?.filter((s) => s.engine === "veo")
+      ?.every((s) => /no talking, no lip movement/i.test(s.prompt)));
+  check("build_clip_prompts: N1 intended duration is 4s",
+    handheld.structured?.steps?.[0]?.duration_seconds === 4);
+  check("build_clip_prompts: N2 intended duration is 6s",
+    handheld.structured?.steps?.[1]?.duration_seconds === 6);
+  check("build_clip_prompts: default strategy is generate_8_and_trim",
+    handheld.structured?.duration_strategy === "generate_8_and_trim");
+  check("build_clip_prompts: N1 request_duration is 8 with trim to 4 (default)",
+    handheld.structured?.steps?.[0]?.request_duration_seconds === 8
+      && handheld.structured?.steps?.[0]?.trim_to_seconds === 4);
+  check("build_clip_prompts: N5 contains 'does NOT pick up' (load-bearing)",
+    /does NOT pick up/i.test(handheld.structured?.steps?.[4]?.prompt ?? ""));
+  check("build_clip_prompts: N3 contains 'continue from this exact image' (load-bearing)",
+    /continue from this exact image/i.test(handheld.structured?.steps?.[2]?.prompt ?? ""));
+  check("build_clip_prompts: lip N5 says applied to her LIPS",
+    /her LIPS/i.test(handheld.structured?.steps?.[4]?.prompt ?? ""));
+
+  // native strategy — request 4s/6s directly, no trim.
+  const native = await callTool("apex_style2_build_clip_prompts", {
+    scene_prompt: scenePrompt,
+    product_name: "X",
+    product_form: "cream",
+    product_count: 1,
+    duration_strategy: "native",
+    response_format: "json",
+  });
+  check("build_clip_prompts: native N1 requests 4s, no trim",
+    native.structured?.steps?.[0]?.request_duration_seconds === 4
+      && native.structured?.steps?.[0]?.trim_to_seconds === null);
+
+  // Countertop — never animates the machine.
+  const countertop = await callTool("apex_style2_build_clip_prompts", {
+    scene_prompt: scenePrompt,
+    product_name: "Slushie Maker",
+    product_form: "large_countertop",
+    product_count: 1,
+    response_format: "json",
+  });
+  check("build_clip_prompts: countertop chain_kind=countertop",
+    countertop.structured?.chain_kind === "countertop");
+  check("build_clip_prompts: countertop N5 does not animate the machine",
+    /stays exactly as it is|unchanged and unanimated|does not animate/i
+      .test(countertop.structured?.steps?.[4]?.prompt ?? "")
+      || /finished result/i.test(countertop.structured?.steps?.[4]?.prompt ?? ""));
+  check("build_clip_prompts: countertop N3 says camera does not push in",
+    /no push-in|camera stays exactly where it is/i
+      .test(countertop.structured?.steps?.[2]?.prompt ?? ""));
+
+  // Worn — 3-clip Nano/Veo alternation, requires TWO refs.
+  const worn = await callTool("apex_style2_build_clip_prompts", {
+    scene_prompt: scenePrompt,
+    product_name: "Halara Crossover Leggings",
+    product_form: "worn",
+    product_count: 1,
+    response_format: "json",
+  });
+  check("build_clip_prompts: worn returns 6 steps (3 Nano + 3 Veo)",
+    worn.structured?.steps?.length === 6);
+  check("build_clip_prompts: worn chain_kind=worn",
+    worn.structured?.chain_kind === "worn");
+  check("build_clip_prompts: worn requires 2 reference images",
+    worn.structured?.reference_images_required === 2);
+  check("build_clip_prompts: every worn step has reference_image_count=2",
+    worn.structured?.steps?.every((s) => s.reference_image_count === 2));
+
+  // Spray/pump — trigger note surfaces.
+  const spray = await callTool("apex_style2_build_clip_prompts", {
+    scene_prompt: scenePrompt,
+    product_name: "Some Spray",
+    product_form: "spray",
+    product_count: 1,
+    response_format: "json",
+  });
+  check("build_clip_prompts: spray note mentions the trigger",
+    (spray.structured?.notes ?? []).some((n) => /trigger/i.test(n)));
+  check("build_clip_prompts: spray N5 mentions the finger pressing the trigger",
+    /index finger presses down on the spray trigger/i
+      .test(spray.structured?.steps?.[4]?.prompt ?? ""));
+}
+
+section("Style 2 · validate_copy");
+{
+  // US with a % anywhere → fails.
+  const usBadPct = await callTool("apex_style2_validate_copy", {
+    market: "US",
+    hook_text: "WAIT… 21% off this balm 🚨",
+    benefit_text: "So creamy and cushiony on 👄",
+    cta_text: "Tap the cart before it ends",
+    voiceover: "so this is the balm everyone's been going on about… honestly the texture is unreal, so creamy and cushiony straight on your lips, and it just glides on effortlessly. the tint is that perfect natural rosy shade that looks like your lips but better, kind of dewy without being sticky. it's on sale right now… tap the orange cart before this sale runs out okay you're going to LOVE it!",
+    response_format: "json",
+  });
+  check("validate_copy: US with 21% fails us_no_numbers",
+    usBadPct.structured?.violations?.some((v) => v.rule === "us_no_numbers"));
+
+  // UK with the same 21% → passes.
+  const ukOk = await callTool("apex_style2_validate_copy", {
+    market: "UK",
+    hook_text: "WAIT… 21% off this balm 🚨",
+    benefit_text: "So creamy and cushiony on lips",
+    cta_text: "Tap the basket before it ends",
+    voiceover: "so this is the balm everyone's been going on about… honestly the texture is unreal, so creamy and cushiony straight on your lips, and it just glides on effortlessly. the tint is that perfect natural rosy shade that looks like your lips but better, kind of dewy without being sticky. it's 21% off right now… tap the orange basket before this sale runs out okay you're going to LOVE it!",
+    response_format: "json",
+  });
+  check("validate_copy: UK with 21% off passes",
+    ukOk.structured?.passed === true, JSON.stringify(ukOk.structured?.violations ?? []).slice(0, 200));
+
+  // Voiceover under 65 → hard failure with the word count.
+  const vShort = await callTool("apex_style2_validate_copy", {
+    market: "UK",
+    hook_text: "WAIT… 21% off this balm",
+    benefit_text: "So creamy and cushiony",
+    cta_text: "Tap the basket",
+    voiceover: "the balm is 21% off, tap the basket before it ends",
+    response_format: "json",
+  });
+  check("validate_copy: <65 word voiceover fails voiceover_too_short",
+    vShort.structured?.violations?.some((v) => v.rule === "voiceover_too_short"));
+  check("validate_copy: reports the actual word count",
+    typeof vShort.structured?.voiceover_word_count === "number"
+      && vShort.structured.voiceover_word_count < 20);
+
+  // Result-claim in the benefit — "lips look fuller" is the canonical bad example.
+  const claim = await callTool("apex_style2_validate_copy", {
+    market: "UK",
+    hook_text: "WAIT… 21% off this balm",
+    benefit_text: "lips look fuller instantly",
+    cta_text: "Tap the basket",
+    voiceover: "so this is the balm everyone's been going on about… honestly the texture is unreal, so creamy and cushiony straight on your lips, and it just glides on effortlessly. the tint is that perfect natural rosy shade that looks like your lips but better, kind of dewy without being sticky. it's 21% off right now… tap the orange basket before this sale runs out okay you're going to LOVE it!",
+    response_format: "json",
+  });
+  check("validate_copy: 'lips look fuller' fails result_claim",
+    claim.structured?.violations?.some((v) => v.rule === "result_claim"));
+
+  // Glitch framing — fabricated pricing error.
+  const glitch = await callTool("apex_style2_validate_copy", {
+    market: "UK",
+    hook_text: "TikTok made a mistake — 21% off",
+    benefit_text: "So creamy on lips",
+    cta_text: "Tap the basket",
+    voiceover: "so this is the balm everyone's been going on about… honestly the texture is unreal, so creamy and cushiony straight on your lips, and it just glides on effortlessly. the tint is that perfect natural rosy shade that looks like your lips but better, kind of dewy without being sticky. it's 21% off right now… tap the orange basket before this sale runs out okay you're going to LOVE it!",
+    response_format: "json",
+  });
+  check("validate_copy: 'TikTok made a mistake' fails fake_pricing_error",
+    glitch.structured?.violations?.some((v) => v.rule === "fake_pricing_error"));
+
+  // UK deal missing (no % and no voucher).
+  const noDeal = await callTool("apex_style2_validate_copy", {
+    market: "UK",
+    hook_text: "everyone is grabbing this balm",
+    benefit_text: "So creamy on lips",
+    cta_text: "Tap the basket now",
+    voiceover: "so this is the balm everyone's been going on about… honestly the texture is unreal, so creamy and cushiony straight on your lips, and it just glides on effortlessly. the tint is that perfect natural rosy shade that looks like your lips but better, kind of dewy without being sticky. it's such a treat honestly… tap the orange basket before this sale runs out okay you're going to LOVE it!",
+    response_format: "json",
+  });
+  check("validate_copy: UK with no % and no voucher fails uk_deal_missing",
+    noDeal.structured?.violations?.some((v) => v.rule === "uk_deal_missing"));
+}
+
+section("Style 2 · copywriter prompt");
+{
+  const { body } = await rpc("prompts/list", {});
+  const prompts = body.result?.prompts ?? [];
+  check("prompts/list includes style2_copywriter",
+    prompts.some((p) => p.name === "style2_copywriter"));
+
+  const { body: getP } = await rpc("prompts/get", {
+    name: "style2_copywriter",
+    arguments: {
+      market: "UK",
+      product_name: "Medicube Pink Collagen Balm",
+      discount_percent: "21",
+      product_form: "lip",
+    },
+  });
+  const text = getP.result?.messages?.[0]?.content?.text ?? "";
+  check("prompts/get style2_copywriter returns SOP guidance",
+    text.includes("70-75 words") && text.includes("21% off"));
 }
 
 /* ===================================================================== */
