@@ -692,21 +692,19 @@ function ComposerCard({
         {/* Row 1: product tag + delete-chat action */}
         <div className="px-4 pt-3 pb-2 flex items-center gap-3">
           <span className="eyebrow text-muted shrink-0">Product</span>
-          <select
-            value={currentProduct?.id ?? ""}
-            onChange={(e) => onPickProduct(e.target.value || null)}
-            disabled={disabled}
-            className="flex-1 min-w-0 bg-transparent border-none text-[12.5px] text-text focus:outline-none focus:ring-0 truncate disabled:cursor-not-allowed"
-          >
-            <option value="">
-              {placeholderMode ? "— import a batch to focus a product —" : "— none focused —"}
-            </option>
-            {products.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
+          <div className="flex-1 min-w-0">
+            <ProductDropdown
+              products={products}
+              value={currentProduct?.id ?? null}
+              onChange={onPickProduct}
+              disabled={disabled}
+              placeholder={
+                placeholderMode
+                  ? "— import a batch to focus a product —"
+                  : "— none focused —"
+              }
+            />
+          </div>
           {activeConversationId && !disabled && (
             <button
               type="button"
@@ -806,6 +804,179 @@ function ComposerCard({
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+/* ==================================================================
+ * ProductDropdown — dark themed <select> replacement.
+ *
+ * The native <select>'s open popup is browser-controlled and
+ * paints in the OS's default light colours over our dark panel,
+ * which looks broken. This is a lightweight custom control that:
+ *   - matches the panel's dark aesthetic (bg-panel, hairline
+ *     border, 12px radius)
+ *   - closes on outside click, Escape, or selection
+ *   - supports arrow-key + Enter navigation when open
+ *   - falls back to a plain text trigger when disabled
+ *
+ * Positioned absolutely BELOW the trigger. If the composer is
+ * near the bottom of the viewport the drawer's natural scroll
+ * takes over — we deliberately don't do "flip up" logic because
+ * the panel body is short enough that below always fits.
+ * ================================================================ */
+
+function ProductDropdown({
+  products,
+  value,
+  onChange,
+  disabled,
+  placeholder,
+}: {
+  products: V2Product[];
+  value: string | null;
+  onChange: (id: string | null) => void;
+  disabled: boolean;
+  placeholder: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [activeIdx, setActiveIdx] = useState<number>(-1);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+
+  // Options: a synthetic "none" row at the top plus each product.
+  const options = useMemo(
+    () => [{ id: "", name: placeholder }, ...products.map((p) => ({ id: p.id, name: p.name }))],
+    [products, placeholder],
+  );
+  const currentIdx = options.findIndex((o) => o.id === (value ?? ""));
+  const label =
+    currentIdx > 0 ? options[currentIdx]!.name : placeholder;
+
+  // Close on outside click or Escape.
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (!wrapRef.current) return;
+      if (!wrapRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setOpen(false);
+        return;
+      }
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setActiveIdx((i) => Math.min(options.length - 1, i + 1));
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setActiveIdx((i) => Math.max(0, i - 1));
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        if (activeIdx >= 0) {
+          const opt = options[activeIdx];
+          if (opt) {
+            onChange(opt.id || null);
+            setOpen(false);
+          }
+        }
+      }
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open, options, activeIdx, onChange]);
+
+  // Scroll the active option into view as the user arrow-keys.
+  useEffect(() => {
+    if (!open || activeIdx < 0 || !listRef.current) return;
+    const el = listRef.current.children[activeIdx] as HTMLElement | undefined;
+    if (el) el.scrollIntoView({ block: "nearest" });
+  }, [activeIdx, open]);
+
+  return (
+    <div ref={wrapRef} className="relative">
+      <button
+        type="button"
+        onClick={() => {
+          if (disabled) return;
+          setOpen((v) => !v);
+          // Seed the active row with whatever's already selected
+          // so arrow-down starts from a sensible place.
+          setActiveIdx(currentIdx >= 0 ? currentIdx : 0);
+        }}
+        disabled={disabled}
+        className={
+          "w-full flex items-center gap-2 text-[12.5px] text-left focus:outline-none disabled:cursor-not-allowed " +
+          (disabled ? "text-muted" : "text-text hover:text-text")
+        }
+      >
+        <span className="flex-1 min-w-0 truncate">{label}</span>
+        {!disabled && (
+          <span
+            aria-hidden="true"
+            className={
+              "text-muted2 text-[10px] shrink-0 transition-transform " +
+              (open ? "rotate-180" : "")
+            }
+          >
+            ▾
+          </span>
+        )}
+      </button>
+      {open && (
+        <div
+          role="listbox"
+          className="absolute z-50 mt-2 left-0 right-0 rounded-xl border border-border overflow-hidden shadow-2xl"
+          style={{
+            background:
+              "linear-gradient(180deg, rgba(20,20,22,0.98) 0%, rgba(20,20,22,0.94) 100%)",
+            backdropFilter: "blur(20px) saturate(140%)",
+            WebkitBackdropFilter: "blur(20px) saturate(140%)",
+          }}
+        >
+          <div
+            ref={listRef}
+            className="max-h-64 overflow-y-auto py-1"
+          >
+            {options.map((opt, i) => {
+              const isSelected = opt.id === (value ?? "");
+              const isActive = i === activeIdx;
+              const isNone = i === 0;
+              return (
+                <button
+                  key={opt.id || "__none__"}
+                  type="button"
+                  role="option"
+                  aria-selected={isSelected}
+                  onMouseEnter={() => setActiveIdx(i)}
+                  onClick={() => {
+                    onChange(opt.id || null);
+                    setOpen(false);
+                  }}
+                  className={
+                    "w-full text-left text-[12.5px] leading-snug px-3 py-2 flex items-center gap-2 transition-colors " +
+                    (isNone ? "italic text-muted " : "text-text ") +
+                    (isActive ? "bg-accent/10 " : "hover:bg-accent/[0.06] ")
+                  }
+                >
+                  <span
+                    aria-hidden="true"
+                    className={
+                      "w-1 h-1 rounded-full shrink-0 " +
+                      (isSelected ? "bg-accent" : "bg-transparent")
+                    }
+                  />
+                  <span className="flex-1 min-w-0 truncate">{opt.name}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
