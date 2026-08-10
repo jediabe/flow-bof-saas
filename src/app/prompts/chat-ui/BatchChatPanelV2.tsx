@@ -374,15 +374,13 @@ function groupMessages(messages: V2Message[]): Group[] {
 
   for (const m of messages) {
     if (m.role === "user" && m.toolResultJson) {
-      // The paired tool_result. Extract any media URLs — the
-      // Google Flow response shape stringifies media[] into the
-      // tool_result content field, so a URL scan surfaces them.
-      // Then continue: the tool_use pill covers the "what was
-      // called" side.
-      const urls = extractMediaUrls(m.toolResultJson);
-      // Dedupe against what the tool_use group has already
-      // collected so a mirrored asset (upload → fetch) doesn't
-      // render twice.
+      // Paired tool_result — pull media out of the structured
+      // response. extractMediaFromToolResult trusts the MCP
+      // normalizer's `kind` field, so completed Veo videos on
+      // storage.googleapis.com (no .mp4 extension, signed URLs)
+      // are correctly classified as video rather than misread
+      // as image.
+      const urls = extractMediaFromToolResult(m.toolResultJson);
       for (const u of urls) {
         if (!pendingMedia.some((m0) => m0.url === u.url)) {
           pendingMedia.push(u);
@@ -932,14 +930,126 @@ interface MediaHit {
   kind: "image" | "video";
 }
 
+/**
+ * Extract media from a persisted tool_result row.
+ *
+ * The MCP normalization layer already stamps every returned
+ * media item with a `kind` field ("video" | "image") and a
+ * canonical `url`. We should trust that, not guess from the URL
+ * shape — Google Flow's completed video URLs are signed
+ * storage.googleapis.com paths WITHOUT a .mp4 extension, so
+ * hostname / extension heuristics classify them wrong and the
+ * chat renders a broken <img> tag where the video should be.
+ *
+ * Shape we're walking:
+ *   toolResultJson = { type: "tool_result", tool_use_id, content, is_error }
+ * where `content` is either:
+ *   - a string containing JSON-stringified structuredContent
+ *     (agent-runner does this when structuredContent is set)
+ *   - an array of Anthropic content blocks (rarer for us)
+ *
+ * We recurse through the parsed shape, collecting every object
+ * that looks like a media item ({ kind, url } or { kind,
+ * mediaGenerationId } etc.). Falls back to regex + hostname
+ * extraction if the JSON doesn't parse — that keeps this robust
+ * against future response-shape changes upstream.
+ */
+function extractMediaFromToolResult(toolResultJson: string): MediaHit[] {
+  const out: MediaHit[] = [];
+  const seen = new Set<string>();
+  const push = (url: unknown, kind: unknown): void => {
+    if (typeof url !== "string" || !url) return;
+    if (seen.has(url)) return;
+    // Only accept the canonical `kind` values the normalizer
+    // emits; anything else falls through to the guesser below.
+    if (kind !== "image" && kind !== "video") return;
+    seen.add(url);
+    out.push({ url, kind });
+  };
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(toolResultJson);
+  } catch {
+    parsed = null;
+  }
+  if (parsed && typeof parsed === "object") {
+    // Anthropic's tool_result "content" is either a plain string
+    // (which itself may be JSON) or an array of content blocks.
+    // Recurse through everything.
+    walkForMedia(parsed, push);
+
+    const outer = parsed as { content?: unknown };
+    if (typeof outer.content === "string") {
+      try {
+        walkForMedia(JSON.parse(outer.content), push);
+      } catch {
+        // fall through — regex fallback below handles it
+      }
+    }
+  }
+
+  // Fallback: nothing structural matched, so scan for URLs the
+  // way we do for assistant text bubbles.
+  if (out.length === 0) {
+    for (const hit of extractMediaUrls(toolResultJson)) {
+      if (!seen.has(hit.url)) {
+        seen.add(hit.url);
+        out.push(hit);
+      }
+    }
+  }
+  return out;
+}
+
+/** Depth-limited walker that finds every object with a `kind` +
+ *  `url` pair. Guards against runaway recursion on cycles or
+ *  huge payloads by capping depth — 20 is well past any real
+ *  Google Flow response nesting. */
+function walkForMedia(
+  node: unknown,
+  push: (url: unknown, kind: unknown) => void,
+  depth = 0,
+): void {
+  if (depth > 20 || node == null) return;
+  if (Array.isArray(node)) {
+    for (const item of node) walkForMedia(item, push, depth + 1);
+    return;
+  }
+  if (typeof node !== "object") return;
+  const obj = node as Record<string, unknown>;
+  // Media item shape from src/types.ts MediaItem — { kind, url,
+  // thumbnailUrl?, mediaGenerationId?, ... }. Anything with a
+  // string kind and a string url is a plausible hit.
+  if (typeof obj.kind === "string" && typeof obj.url === "string") {
+    push(obj.url, obj.kind);
+    // Also push a thumbnail if present. Renders as an image
+    // regardless of the parent kind — thumbnails are always
+    // stills.
+    if (typeof obj.thumbnailUrl === "string") {
+      push(obj.thumbnailUrl, "image");
+    }
+  }
+  for (const value of Object.values(obj)) {
+    walkForMedia(value, push, depth + 1);
+  }
+}
+
+/**
+ * Guessing-based URL extractor for assistant TEXT bubbles (where
+ * we don't have a `kind` field). Not used for tool_result rows —
+ * they have structural info we should trust.
+ *
+ * Hostname heuristics are deliberately weak: storage.googleapis.com
+ * hosts both stills and videos, so we don't use hostname alone.
+ * Extension is the primary signal; hostname is a last resort for
+ * clearly image-only hosts. If nothing matches, we skip — better
+ * than mislabeling.
+ */
 const IMAGE_EXT = /\.(png|jpe?g|webp|gif|avif)(\?|#|$)/i;
 const VIDEO_EXT = /\.(mp4|webm|mov|m4v)(\?|#|$)/i;
-const IMAGE_HOSTS = [
-  "googleusercontent.com",
-  "storage.googleapis.com",
-  "useapi.net",
-];
-const VIDEO_HOSTS = ["googlevideo.com"];
+const IMAGE_ONLY_HOSTS = ["googleusercontent.com", "useapi.net"];
+const VIDEO_ONLY_HOSTS = ["googlevideo.com"];
 
 function extractMediaUrls(text: string): MediaHit[] {
   if (!text) return [];
@@ -950,11 +1060,11 @@ function extractMediaUrls(text: string): MediaHit[] {
     const url = raw.replace(/[.,;:!?)\]]+$/, "");
     if (seen.has(url)) continue;
     seen.add(url);
-    if (VIDEO_EXT.test(url) || VIDEO_HOSTS.some((h) => url.includes(h))) {
+    if (VIDEO_EXT.test(url) || VIDEO_ONLY_HOSTS.some((h) => url.includes(h))) {
       out.push({ url, kind: "video" });
     } else if (
       IMAGE_EXT.test(url) ||
-      IMAGE_HOSTS.some((h) => url.includes(h))
+      IMAGE_ONLY_HOSTS.some((h) => url.includes(h))
     ) {
       out.push({ url, kind: "image" });
     }
