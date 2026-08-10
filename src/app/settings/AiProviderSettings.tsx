@@ -329,15 +329,15 @@ function ModelInput({
  * so.
  */
 const OPENROUTER_PRESETS: Array<{ id: string; label: string; note?: string }> = [
-  { id: "",                                     label: "Auto — let OpenRouter pick", note: "openrouter/auto — routes each request to a suitable model" },
-  { id: "anthropic/claude-sonnet-4.5",           label: "Claude Sonnet 4.5",           note: "Anthropic — best balance of tool-use, quality, price" },
-  { id: "anthropic/claude-opus-4.5",             label: "Claude Opus 4.5",             note: "Anthropic — top quality, higher cost" },
-  { id: "anthropic/claude-haiku-4.5",            label: "Claude Haiku 4.5",            note: "Anthropic — fastest and cheapest with tool-use" },
-  { id: "google/gemini-2.5-pro",                 label: "Gemini 2.5 Pro",              note: "Google — strong tool-use, long context" },
-  { id: "openai/gpt-4o",                         label: "GPT-4o",                       note: "OpenAI — mature tool-use" },
-  { id: "openai/gpt-4o-mini",                    label: "GPT-4o mini",                  note: "OpenAI — cheap, fast, tool-use" },
-  { id: "meta-llama/llama-3.3-70b-instruct",     label: "Llama 3.3 70B",                note: "Meta — check tool-use compatibility before relying on it" },
-  { id: "__custom__",                            label: "Custom…",                       note: "Paste any OpenRouter model id" },
+  { id: "anthropic/claude-sonnet-4.5",           label: "Claude Sonnet 4.5 (recommended)", note: "Anthropic — best balance of tool-use, quality, price. Default." },
+  { id: "anthropic/claude-opus-4.5",             label: "Claude Opus 4.5",                  note: "Anthropic — top quality, higher cost" },
+  { id: "anthropic/claude-haiku-4.5",            label: "Claude Haiku 4.5",                 note: "Anthropic — fastest and cheapest with tool-use" },
+  { id: "google/gemini-2.5-pro",                 label: "Gemini 2.5 Pro",                   note: "Google — strong tool-use, long context" },
+  { id: "openai/gpt-4o",                         label: "GPT-4o",                            note: "OpenAI — mature tool-use" },
+  { id: "openai/gpt-4o-mini",                    label: "GPT-4o mini",                       note: "OpenAI — cheap, fast, tool-use" },
+  { id: "meta-llama/llama-3.3-70b-instruct",     label: "Llama 3.3 70B",                     note: "Meta — check tool-use compatibility before relying on it" },
+  { id: "",                                      label: "Auto (advanced)",                   note: "openrouter/auto is NOT supported on OpenRouter's Anthropic-compatible /messages endpoint (which this app uses) — it returns empty responses. Pick a specific model above." },
+  { id: "__custom__",                            label: "Custom…",                            note: "Paste any OpenRouter model id" },
 ];
 
 function OpenrouterModelInput({

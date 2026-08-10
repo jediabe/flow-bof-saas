@@ -58,16 +58,18 @@ import {
  *  directly. Overridable via WorkspaceSettings.anthropicModel. */
 const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5";
 
-/** Default model when routing through OpenRouter. `openrouter/auto`
- *  lets OpenRouter pick a model based on the request (they
- *  usually route tool-use requests to something that supports
- *  it). Set WorkspaceSettings.openrouterModel to pin a specific
- *  model when you want deterministic pricing / behaviour — the
- *  settings UI offers a preset dropdown with common
- *  tool-use-capable models. Any custom model string is accepted;
- *  the caveat is that a model without tool-use support will fail
- *  the moment the agent needs to call a Google Flow tool. */
-const DEFAULT_OPENROUTER_MODEL = "openrouter/auto";
+/** Default model when routing through OpenRouter. Claude Sonnet
+ *  4.5 is picked because it has stable tool-use support on
+ *  OpenRouter's Anthropic-compatible /api/v1/messages endpoint,
+ *  which is what this SDK setup targets. `openrouter/auto` is a
+ *  known bad default: it silently returns empty responses on
+ *  /messages (it works on the OpenAI-compat /chat/completions
+ *  endpoint, which we don't use). Set WorkspaceSettings.
+ *  openrouterModel to pick a different model; the settings UI
+ *  ships a preset dropdown with the common tool-use-capable
+ *  options. Custom strings are accepted but a model without
+ *  tool-use will fail the first time the agent calls a tool. */
+const DEFAULT_OPENROUTER_MODEL = "anthropic/claude-sonnet-4.5";
 
 const MAX_LOOP_ITERATIONS = 30;
 const MAX_TOKENS = 4096;
@@ -323,6 +325,14 @@ async function* runAgentTurnInner(
       return;
     }
 
+    // Log what the provider actually resolved. OpenRouter's meta
+    // models (openrouter/auto, openrouter/nitro) come back with
+    // the routed-to model in finalMessage.model — useful when
+    // debugging "why did this reply come back empty?" scenarios.
+    console.log(
+      `[agent-runner] iter=${iter} model=${finalMessage.model ?? "(unknown)"} stop=${finalMessage.stop_reason ?? "(none)"} blocks=${finalMessage.content?.length ?? 0}`,
+    );
+
     const textParts: string[] = [];
     const toolUses: ToolUseBlock[] = [];
     for (const block of finalMessage.content) {
@@ -333,6 +343,31 @@ async function* runAgentTurnInner(
       }
     }
     const textContent = textParts.join("\n\n");
+
+    // Empty-response guard. OpenRouter's Anthropic-compat
+    // endpoint (/api/v1/messages) does NOT support the
+    // openrouter/auto meta-model — it comes back with zero
+    // content blocks and stop_reason=end_turn, and the loop
+    // would silently break without the user seeing anything.
+    // Also catches the rare case where a tool-use-incapable
+    // model just refuses. Surface it as a clear error and
+    // stop instead of pretending the turn succeeded.
+    if (
+      iter === 0 &&
+      textParts.length === 0 &&
+      toolUses.length === 0
+    ) {
+      const routed = finalMessage.model ?? modelName;
+      yield {
+        type: "error",
+        message:
+          `The provider returned an empty response (routed to "${routed}", stop_reason="${finalMessage.stop_reason ?? "unknown"}"). ` +
+          (modelName === "openrouter/auto" || modelName.includes("/auto")
+            ? "OpenRouter's auto-routing is not supported on the Anthropic-compatible /messages endpoint that this app uses. Pick a specific model in Settings → AI Providers → OpenRouter (Claude Sonnet 4.5 is the safe default)."
+            : "The model may not support tool-use. Try a different model in Settings → AI Providers."),
+      };
+      return;
+    }
 
     if (textContent) {
       yield { type: "text_delta", delta: textContent };
