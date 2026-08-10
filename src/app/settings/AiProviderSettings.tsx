@@ -172,7 +172,7 @@ export default function AiProviderSettingsForm({
         clear={() => save({ clearKeyFor: "openrouter" })}
       >
         <KeyInput value={openrouterKey} setValue={setOpenrouterKey} placeholder="sk-or-..." />
-        <ModelInput value={openrouterModel} setValue={setOpenrouterModel} placeholder="openrouter/auto" />
+        <OpenrouterModelInput value={openrouterModel} setValue={setOpenrouterModel} />
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           <label className="block">
             <span className="label">Site URL (optional)</span>
@@ -310,6 +310,88 @@ function ModelInput({
         onChange={(e) => setValue(e.target.value)}
         placeholder={placeholder}
       />
+    </label>
+  );
+}
+
+/**
+ * OpenRouter model input — preset dropdown of common tool-use-
+ * capable models plus a Custom option that reveals a free-text
+ * box for arbitrary model IDs. Empty (Auto) is the default and
+ * lets the agent runner fall back to `openrouter/auto`.
+ *
+ * The presets are a curated shortlist, not exhaustive — anything
+ * OpenRouter routes to is accepted via Custom. The order
+ * balances quality vs cost so the top few are the safe picks.
+ * The chat agent needs tool-use; a model that doesn't support
+ * function calling will fail the first time the LLM tries to
+ * call a Google Flow tool, so the hint below the selector says
+ * so.
+ */
+const OPENROUTER_PRESETS: Array<{ id: string; label: string; note?: string }> = [
+  { id: "",                                     label: "Auto — let OpenRouter pick", note: "openrouter/auto — routes each request to a suitable model" },
+  { id: "anthropic/claude-sonnet-4.5",           label: "Claude Sonnet 4.5",           note: "Anthropic — best balance of tool-use, quality, price" },
+  { id: "anthropic/claude-opus-4.5",             label: "Claude Opus 4.5",             note: "Anthropic — top quality, higher cost" },
+  { id: "anthropic/claude-haiku-4.5",            label: "Claude Haiku 4.5",            note: "Anthropic — fastest and cheapest with tool-use" },
+  { id: "google/gemini-2.5-pro",                 label: "Gemini 2.5 Pro",              note: "Google — strong tool-use, long context" },
+  { id: "openai/gpt-4o",                         label: "GPT-4o",                       note: "OpenAI — mature tool-use" },
+  { id: "openai/gpt-4o-mini",                    label: "GPT-4o mini",                  note: "OpenAI — cheap, fast, tool-use" },
+  { id: "meta-llama/llama-3.3-70b-instruct",     label: "Llama 3.3 70B",                note: "Meta — check tool-use compatibility before relying on it" },
+  { id: "__custom__",                            label: "Custom…",                       note: "Paste any OpenRouter model id" },
+];
+
+function OpenrouterModelInput({
+  value,
+  setValue,
+}: {
+  value: string;
+  setValue: (v: string) => void;
+}) {
+  // "Custom" is anything that isn't in the preset id list. Auto
+  // (empty) is a real preset, so treat it distinctly from custom.
+  const presetIds = new Set(OPENROUTER_PRESETS.map((p) => p.id));
+  const isCustom = value !== "" && !presetIds.has(value);
+  const [customMode, setCustomMode] = useState(isCustom);
+  const selectValue = customMode ? "__custom__" : isCustom ? "__custom__" : value;
+  const activePreset = OPENROUTER_PRESETS.find((p) => p.id === selectValue);
+
+  return (
+    <label className="block">
+      <span className="label">Model</span>
+      <select
+        className="field mt-1"
+        value={selectValue}
+        onChange={(e) => {
+          const picked = e.target.value;
+          if (picked === "__custom__") {
+            setCustomMode(true);
+            // Keep whatever the user had typed; if it was a preset,
+            // clear it so they know the field is now theirs.
+            if (!isCustom) setValue("");
+          } else {
+            setCustomMode(false);
+            setValue(picked);
+          }
+        }}
+      >
+        {OPENROUTER_PRESETS.map((p) => (
+          <option key={p.id || "auto"} value={p.id}>
+            {p.label}
+          </option>
+        ))}
+      </select>
+      {customMode && (
+        <input
+          className="field mt-2 font-mono"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder="e.g. mistralai/mistral-large-latest"
+        />
+      )}
+      <span className="text-[11px] text-muted mt-1 block">
+        {activePreset?.note ??
+          "Any OpenRouter model id is accepted. The chat agent needs a model that supports tool-use / function calling — non-tool-use models will fail the first time the LLM tries to call a Google Flow tool."}
+      </span>
     </label>
   );
 }

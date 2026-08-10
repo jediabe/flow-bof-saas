@@ -58,11 +58,16 @@ import {
  *  directly. Overridable via WorkspaceSettings.anthropicModel. */
 const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5";
 
-/** Default model when routing through OpenRouter. OpenRouter
- *  uses prefixed model IDs (`<provider>/<name>`). Deliberately
- *  NOT openrouter/auto — auto can land on a model without
- *  tool-use support. */
-const DEFAULT_OPENROUTER_MODEL = "anthropic/claude-sonnet-4.5";
+/** Default model when routing through OpenRouter. `openrouter/auto`
+ *  lets OpenRouter pick a model based on the request (they
+ *  usually route tool-use requests to something that supports
+ *  it). Set WorkspaceSettings.openrouterModel to pin a specific
+ *  model when you want deterministic pricing / behaviour — the
+ *  settings UI offers a preset dropdown with common
+ *  tool-use-capable models. Any custom model string is accepted;
+ *  the caveat is that a model without tool-use support will fail
+ *  the moment the agent needs to call a Google Flow tool. */
+const DEFAULT_OPENROUTER_MODEL = "openrouter/auto";
 
 const MAX_LOOP_ITERATIONS = 30;
 const MAX_TOKENS = 4096;
