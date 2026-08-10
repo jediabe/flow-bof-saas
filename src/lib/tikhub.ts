@@ -2066,13 +2066,22 @@ async function getTikHubShop(
     );
   }
 
-  // Retry the call up to 3 times when TikHub returns a transient
+  // Retry the call up to 4 times when TikHub returns a transient
   // 400 (their own error message asks us to retry) or any 5xx.
-  // Curl users hit this less often because they retry manually;
-  // Node's fetch fails fast by default. 400ms → 1200ms backoff
-  // gives us ~2s worst case before the batch loop moves on.
-  const MAX_ATTEMPTS = 3;
-  const backoffMs = [400, 1200];
+  // TikHub's "Request failed. Please retry." is their generic
+  // upstream-hiccup response — it recovers within a couple of
+  // seconds, but only when we actually wait. Batch enrichment
+  // runs 5-concurrent, so we add a small random jitter to each
+  // backoff to spread retries across the wall clock rather than
+  // hammering TikHub on the same tick.
+  //
+  // Worst-case total: 400 + 1200 + 3000 + up-to-600 jitter × 3
+  // ≈ 6.4s across all attempts, still fast enough that a stuck
+  // enrichment doesn't block the batch loop noticeably.
+  const MAX_ATTEMPTS = 4;
+  const backoffMs = [400, 1200, 3000];
+  const jitter = (ms: number): number =>
+    ms + Math.floor(Math.random() * 600);
   let lastError: TikHubError | null = null;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
     let resp: Response;
@@ -2109,7 +2118,7 @@ async function getTikHubShop(
         { url: maskUrl(url) },
       );
       if (attempt < MAX_ATTEMPTS - 1) {
-        await sleep(backoffMs[attempt] ?? 1200);
+        await sleep(jitter(backoffMs[attempt] ?? 1200));
         continue;
       }
       throw lastError;
@@ -2138,12 +2147,14 @@ async function getTikHubShop(
       { url: maskUrl(url) },
     );
     if (looksTransient && attempt < MAX_ATTEMPTS - 1) {
-      if (process.env.TIKHUB_ENRICH_DEBUG === "1") {
-        console.warn(
-          `[tikhub-shop-get] transient ${resp.status} attempt=${attempt + 1}, retrying in ${backoffMs[attempt] ?? 1200}ms`,
-        );
-      }
-      await sleep(backoffMs[attempt] ?? 1200);
+      const wait = jitter(backoffMs[attempt] ?? 1200);
+      // Log at INFO regardless of DEBUG so production tail
+      // shows whether TikHub is currently flaky. Silent retries
+      // mean we can't tell if the pool is degrading.
+      console.warn(
+        `[tikhub-shop-get] transient ${resp.status} attempt=${attempt + 1}/${MAX_ATTEMPTS}, retrying in ${wait}ms — body: ${bodyText.slice(0, 200)}`,
+      );
+      await sleep(wait);
       continue;
     }
     throw lastError;
