@@ -134,6 +134,14 @@ export default function PromptsHubClient({
 
   return (
     <div className="space-y-6">
+      {/* Chat agent — always at the top. Renders in placeholder
+          mode when no batch is active, otherwise scoped to it. */}
+      <BatchChatPanel
+        batchId={state?.batchId ?? null}
+        batchName={state?.batchName ?? null}
+        products={state?.products ?? []}
+      />
+
       <KalodataImportBar
         onImported={(batchId) => {
           // Preserve state across refresh via URL param — no
@@ -435,7 +443,6 @@ function ActiveBatchView({ state }: { state: BatchPromptsState }) {
   const [regenPending, startRegenTransition] = useTransition();
   const [regenMsg, setRegenMsg] = useState<string | null>(null);
   const [copiedReview, setCopiedReview] = useState(false);
-  const [chatOpen, setChatOpen] = useState(false);
 
   const products = state.products ?? [];
   const counts = state.counts ?? {
@@ -509,23 +516,13 @@ function ActiveBatchView({ state }: { state: BatchPromptsState }) {
       <Panel
         title={state.batchName ?? "Active batch"}
         action={
-          <div className="flex items-center gap-3">
-            <button
-              type="button"
-              onClick={() => setChatOpen(true)}
-              className="text-[11px] text-accent hover:underline"
-              title="Open the APEX chat agent for this batch"
-            >
-              ▶ Chat agent
-            </button>
-            <button
-              type="button"
-              onClick={() => router.replace("/prompts")}
-              className="text-[11px] text-muted hover:text-text transition-colors"
-            >
-              Close batch
-            </button>
-          </div>
+          <button
+            type="button"
+            onClick={() => router.replace("/prompts")}
+            className="text-[11px] text-muted hover:text-text transition-colors"
+          >
+            Close batch
+          </button>
         }
       >
         <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_240px] gap-6 items-start">
@@ -655,18 +652,6 @@ function ActiveBatchView({ state }: { state: BatchPromptsState }) {
           postingQrDataUrl={state.postingQrDataUrl}
           hasHooksCount={counts.hasHooks}
           approvedCount={counts.approved}
-        />
-      )}
-
-      {/* Per-batch chat agent — mounted only when open so the SSE
-          reader isn't holding state in the background. */}
-      {state.batchId && (
-        <BatchChatPanel
-          batchId={state.batchId}
-          batchName={state.batchName ?? "batch"}
-          products={products}
-          open={chatOpen}
-          onClose={() => setChatOpen(false)}
         />
       )}
     </>

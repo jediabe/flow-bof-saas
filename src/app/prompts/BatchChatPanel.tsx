@@ -1,38 +1,27 @@
 "use client";
 
 /**
- * BatchChatPanel — right-side chat drawer that lives inside the
- * active-batch view on /prompts. Replaces the workspace-level
- * /generate page: each Batch owns its own transcript history so
- * the operator's mental model ("I'm working on this batch") maps
- * 1:1 to the conversations they see.
+ * BatchChatPanel — wired-up container that drives the pure
+ * BatchChatPanelV2 with real conversation data + SSE streaming.
  *
- * UX:
- *   - Fixed drawer on the right, slides in when toggled from the
- *     batch header. ~440px wide on desktop, full-width on <sm.
- *   - Conversation list up top (compact), transcript below,
- *     composer at the bottom.
- *   - The composer's product picker sets which product is
- *     "focused" — that drives what images the multi-select image
- *     picker surfaces (referenceImageUrl + sourceImages).
- *   - Selected image URLs ride along on send as
- *     referenceImageUrls; the agent runner rebuilds them into a
- *     "[Reference images: ...]" preamble before hitting Anthropic.
+ * Lives inline at the top of /prompts (APEX Automator). Always
+ * mounted; when no batch is active (`batchId={null}`) the V2 card
+ * renders in placeholder mode with a disabled composer and copy
+ * inviting the operator to import a Kalodata sheet or paste TikTok
+ * URLs below.
  *
- * Streaming:
- *   POSTs to /api/generate/stream/[conversationId] and reads the
- *   SSE stream via fetch()+ReadableStream — EventSource can't do
- *   POST bodies. Optimistic user bubble goes in on submit;
- *   assistant + tool bubbles land as message_saved events arrive.
- *
- * Auth: the server actions and SSE endpoint enforce workspace
- * ownership via getCurrentWorkspace + a conversation → batch →
- * workspace join. This component trusts what it's handed and
- * treats server errors as red inline banners.
+ * Auth: server actions + the SSE endpoint enforce ownership
+ * through getCurrentWorkspace() + a conversation → batch →
+ * workspace join. This container trusts the returned data and
+ * surfaces server errors inline in the V2 card's red banner.
  */
 
-import { useEffect, useMemo, useRef, useState, useTransition } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { BatchPromptsProduct } from "./actions";
+import BatchChatPanelV2, {
+  type V2Message,
+  type V2Product,
+} from "./chat-ui/BatchChatPanelV2";
 import {
   createBatchConversation,
   deleteConversation,
@@ -45,30 +34,21 @@ import {
 } from "./chat-actions";
 
 interface BatchChatPanelProps {
-  batchId: string;
-  batchName: string;
+  /** Null when no batch is active — V2 renders in placeholder
+   *  mode. Everything else on the page keeps working. */
+  batchId: string | null;
+  batchName: string | null;
   products: BatchPromptsProduct[];
-  /** Toggle from the batch header. Panel is fully unmounted when
-   *  closed so we don't hold a stale SSE reader in the background. */
-  open: boolean;
-  onClose: () => void;
 }
 
-export default function BatchChatPanel(props: BatchChatPanelProps) {
-  if (!props.open) return null;
-  return <BatchChatPanelInner {...props} />;
-}
-
-function BatchChatPanelInner({
+export default function BatchChatPanel({
   batchId,
   batchName,
   products,
-  onClose,
 }: BatchChatPanelProps) {
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [convId, setConvId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [currentProductId, setCurrentProductId] = useState<string | null>(null);
 
@@ -79,16 +59,22 @@ function BatchChatPanelInner({
   const [streamText, setStreamText] = useState("");
   const abortRef = useRef<AbortController | null>(null);
 
-  // Load conversation list on mount / batch change
+  // Load conversation list on mount / batch change.
   useEffect(() => {
+    // Placeholder mode — clear all state and skip the network.
+    if (!batchId) {
+      setConversations([]);
+      setConvId(null);
+      setMessages([]);
+      setCurrentProductId(null);
+      return;
+    }
     let cancelled = false;
     (async () => {
-      setLoading(true);
       try {
         const rows = await listBatchConversations(batchId);
         if (cancelled) return;
         setConversations(rows);
-        // Auto-open the most recent, or auto-create if none exist.
         if (rows.length > 0) {
           setConvId(rows[0].id);
         } else {
@@ -101,8 +87,6 @@ function BatchChatPanelInner({
         }
       } catch (err) {
         if (!cancelled) setError((err as Error).message);
-      } finally {
-        if (!cancelled) setLoading(false);
       }
     })();
     return () => {
@@ -111,7 +95,7 @@ function BatchChatPanelInner({
     };
   }, [batchId]);
 
-  // Load transcript when convId changes
+  // Load transcript when convId changes.
   useEffect(() => {
     if (!convId) {
       setMessages([]);
@@ -128,8 +112,6 @@ function BatchChatPanelInner({
       }
       setMessages(r.messages ?? []);
       setCurrentProductId(r.currentProductId ?? null);
-      // Reset image picker when switching conversations — the
-      // previous conversation's selection isn't meaningful here.
       setSelectedImages(new Set());
     })();
     return () => {
@@ -137,31 +119,42 @@ function BatchChatPanelInner({
     };
   }, [convId]);
 
-  const currentProduct = useMemo(() => {
-    if (!currentProductId) return null;
-    return products.find((p) => p.id === currentProductId) ?? null;
-  }, [currentProductId, products]);
+  // Map ChatMessage → V2Message (identity shape today; kept as a
+  // memo so we don't recompute per keystroke).
+  const v2Messages: V2Message[] = useMemo(
+    () =>
+      messages.map((m) => ({
+        id: m.id,
+        role: m.role === "assistant" ? "assistant" : "user",
+        content: m.content,
+        toolCallsJson: m.toolCallsJson,
+        toolResultJson: m.toolResultJson,
+        attachedImagesJson: m.attachedImagesJson,
+        createdAt: m.createdAt,
+      })),
+    [messages],
+  );
 
-  // Union of images available for attachment on the focused
-  // product. referenceImageUrl first (that's the operator's
-  // curated pick from mobile review), then Kalodata imageUrl,
-  // then any TikHub-sourced gallery images. Deduped preserving
-  // order.
-  const availableImages = useMemo(() => {
-    if (!currentProduct) return [] as string[];
-    const seen = new Set<string>();
-    const out: string[] = [];
-    const push = (u: string | null | undefined) => {
-      if (!u) return;
-      if (seen.has(u)) return;
-      seen.add(u);
-      out.push(u);
-    };
-    push(currentProduct.referenceImageUrl);
-    push(currentProduct.imageUrl);
-    for (const u of currentProduct.sourceImages) push(u);
-    return out;
-  }, [currentProduct]);
+  // Map batch products → V2Product with pre-computed available
+  // images (referenceImageUrl + imageUrl + sourceImages, deduped).
+  const v2Products: V2Product[] = useMemo(
+    () =>
+      products.map((p) => {
+        const seen = new Set<string>();
+        const out: string[] = [];
+        const push = (u: string | null | undefined) => {
+          if (!u) return;
+          if (seen.has(u)) return;
+          seen.add(u);
+          out.push(u);
+        };
+        push(p.referenceImageUrl);
+        push(p.imageUrl);
+        for (const u of p.sourceImages) push(u);
+        return { id: p.id, name: p.productName, availableImages: out };
+      }),
+    [products],
+  );
 
   async function pickProduct(id: string | null) {
     setCurrentProductId(id);
@@ -182,6 +175,7 @@ function BatchChatPanelInner({
   }
 
   async function newConversation() {
+    if (!batchId) return;
     const r = await createBatchConversation({ batchId });
     if (!r.ok || !r.id) {
       setError(r.message ?? "Couldn't create conversation");
@@ -193,7 +187,7 @@ function BatchChatPanelInner({
   }
 
   async function removeConversation(id: string) {
-    if (!confirm("Delete this conversation?")) return;
+    if (!batchId) return;
     const r = await deleteConversation(id);
     if (!r.ok) {
       setError(r.message ?? "Delete failed");
@@ -206,11 +200,20 @@ function BatchChatPanelInner({
     }
   }
 
+  async function rename(id: string, title: string) {
+    if (!batchId) return;
+    const r = await renameConversation({ conversationId: id, title });
+    if (!r.ok) {
+      setError(r.message ?? "Rename failed");
+      return;
+    }
+    setConversations(await listBatchConversations(batchId));
+  }
+
   async function submitTurn() {
-    if (!convId) return;
+    if (!convId || !batchId) return;
     const trimmed = text.trim();
-    if (!trimmed) return;
-    if (sending) return;
+    if (!trimmed || sending) return;
     setSending(true);
     setStreamText("");
     setError(null);
@@ -251,7 +254,6 @@ function BatchChatPanelInner({
         const { value, done } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
-        // SSE frames are separated by "\n\n"
         let idx: number;
         while ((idx = buffer.indexOf("\n\n")) !== -1) {
           const frame = buffer.slice(0, idx);
@@ -266,15 +268,12 @@ function BatchChatPanelInner({
     } finally {
       setSending(false);
       abortRef.current = null;
-      // Refresh the transcript from the server so persisted rows
-      // (with real DB ids) replace the optimistic one.
+      // Refresh from server so persisted rows replace the optimistic one.
       const r = await getConversationDetail(convId);
       if (r.ok) {
         setMessages(r.messages ?? []);
         setStreamText("");
       }
-      // Also refresh the conversation list so title auto-derivation
-      // shows up.
       const rows = await listBatchConversations(batchId);
       setConversations(rows);
     }
@@ -298,488 +297,39 @@ function BatchChatPanelInner({
       } else if (evt.type === "error" && evt.message) {
         setError(evt.message);
       }
-      // message_saved / tool_call / tool_result get flushed via the
-      // getConversationDetail refresh at the end of the stream —
-      // simpler than reconciling per-event.
     } catch {
       // ignore malformed frame
     }
   }
 
   return (
-    <>
-      {/* Backdrop */}
-      <div
-        onClick={onClose}
-        className="fixed inset-0 z-30 bg-black/40 backdrop-blur-sm"
-        aria-hidden="true"
-      />
-      {/* Drawer */}
-      <aside
-        className="fixed top-0 right-0 z-40 h-screen w-full sm:w-[560px] bg-panel border-l border-border shadow-2xl flex flex-col"
-        role="dialog"
-        aria-label={`Chat for batch ${batchName}`}
-      >
-        <header className="flex items-center justify-between px-4 py-3 border-b border-border">
-          <div className="min-w-0">
-            <div className="text-[10px] uppercase tracking-[0.14em] text-muted">
-              APEX chat · {batchName}
-            </div>
-            <div className="text-sm text-text truncate">
-              {loading ? "Loading…" : conversations.length > 0
-                ? conversations.find((c) => c.id === convId)?.title ?? "New chat"
-                : "New chat"}
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={newConversation}
-              className="text-[11px] text-accent hover:underline"
-            >
-              + New
-            </button>
-            <button
-              type="button"
-              onClick={onClose}
-              className="text-[11px] text-muted hover:text-text"
-            >
-              Close
-            </button>
-          </div>
-        </header>
-
-        {conversations.length > 1 && (
-          <div className="px-4 py-2 border-b border-border overflow-x-auto whitespace-nowrap flex gap-2">
-            {conversations.map((c) => (
-              <button
-                key={c.id}
-                onClick={() => setConvId(c.id)}
-                onDoubleClick={async () => {
-                  const t = prompt("Rename conversation", c.title);
-                  if (!t) return;
-                  await renameConversation({ conversationId: c.id, title: t });
-                  setConversations(await listBatchConversations(batchId));
-                }}
-                className={
-                  "text-[11px] px-2 py-1 rounded-md border transition-colors " +
-                  (c.id === convId
-                    ? "bg-accent/10 border-accent text-text"
-                    : "bg-transparent border-border text-muted hover:text-text")
-                }
-                title={`${c.messageCount} messages · double-click to rename`}
-              >
-                {c.title}
-              </button>
-            ))}
-          </div>
-        )}
-
-        {/* Transcript */}
-        <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
-          {error && (
-            <div className="text-[11px] text-accent-red border border-accent-red/40 rounded-md px-2 py-1">
-              {error}
-            </div>
-          )}
-          {messages.map((m) => (
-            <ChatBubble key={m.id} message={m} />
-          ))}
-          {streamText && (
-            <ChatBubble
-              message={{
-                id: "stream",
-                role: "assistant",
-                content: streamText,
-                toolCallsJson: null,
-                toolResultJson: null,
-                attachedImagesJson: null,
-                createdAt: new Date().toISOString(),
-              }}
-            />
-          )}
-          {sending && !streamText && (
-            <div className="text-[11px] text-muted italic">Thinking…</div>
-          )}
-          {!loading && messages.length === 0 && !sending && (
-            <div className="text-[11px] text-muted italic">
-              Ask the agent to generate Style 1 videos for a product in this
-              batch. Pick a product below to focus context.
-            </div>
-          )}
-        </div>
-
-        {/* Composer */}
-        <div className="border-t border-border p-4 space-y-3">
-          <ProductPicker
-            products={products}
-            value={currentProductId}
-            onChange={pickProduct}
-          />
-
-          {availableImages.length > 0 && (
-            <ImagePicker
-              images={availableImages}
-              selected={selectedImages}
-              onToggle={toggleImage}
-              onClear={() => setSelectedImages(new Set())}
-              conversationHasDelete={
-                convId
-                  ? () => removeConversation(convId)
-                  : undefined
-              }
-            />
-          )}
-
-          <div className="flex gap-2 items-end">
-            <textarea
-              rows={5}
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey && !sending) {
-                  e.preventDefault();
-                  void submitTurn();
-                }
-              }}
-              placeholder={
-                currentProduct
-                  ? `Ask about ${currentProduct.productName}…`
-                  : "Ask the agent…"
-              }
-              disabled={sending || !convId}
-              className="flex-1 min-h-[112px] bg-panel2 border border-border rounded-md px-3 py-2 text-sm text-text resize-y focus:outline-none focus:border-accent"
-            />
-            <button
-              type="button"
-              onClick={submitTurn}
-              disabled={sending || !convId || !text.trim()}
-              className="btn"
-            >
-              {sending ? "…" : "Send"}
-            </button>
-          </div>
-          {selectedImages.size > 0 && (
-            <div className="text-[10px] text-muted">
-              Attaching {selectedImages.size} image
-              {selectedImages.size === 1 ? "" : "s"} to next turn
-            </div>
-          )}
-        </div>
-      </aside>
-    </>
-  );
-}
-
-/* --------------------------------------------------------------
- * Chat bubble
- * ------------------------------------------------------------ */
-
-function ChatBubble({ message }: { message: ChatMessage }) {
-  const isUser = message.role === "user";
-  // Tool-result rows have no user-visible content — collapse to a
-  // small "🔧 result" chip so the transcript stays readable.
-  if (message.role === "user" && message.toolResultJson) {
-    return (
-      <div className="text-[10px] text-muted italic pl-2">
-        · tool result received
-      </div>
-    );
-  }
-  const attached = safeParseImages(message.attachedImagesJson);
-  const toolCalls = safeParseToolCalls(message.toolCallsJson);
-  const mediaUrls = extractMediaUrls(message.content);
-  return (
-    <div className={isUser ? "flex justify-end" : "flex justify-start"}>
-      <div
-        className={
-          "max-w-[85%] rounded-2xl px-3 py-2 text-[13px] leading-relaxed whitespace-pre-wrap break-words " +
-          (isUser
-            ? "bg-accent/15 border border-accent/40 text-text"
-            : "bg-panel2 border border-border text-text")
-        }
-      >
-        <LinkifiedText text={message.content} />
-        {mediaUrls.length > 0 && (
-          <div className="mt-2 grid grid-cols-2 gap-2">
-            {mediaUrls.map((m) => (
-              <a
-                key={m.url}
-                href={m.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="block rounded-lg overflow-hidden border border-border bg-panel"
-                title={m.url}
-              >
-                {m.kind === "video" ? (
-                  <video
-                    src={m.url}
-                    controls
-                    playsInline
-                    className="w-full h-auto max-h-64 object-contain bg-black"
-                  />
-                ) : (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img
-                    src={m.url}
-                    alt="generated"
-                    className="w-full h-auto max-h-64 object-contain bg-black"
-                  />
-                )}
-              </a>
-            ))}
-          </div>
-        )}
-        {attached.length > 0 && (
-          <div className="mt-2 flex gap-1 flex-wrap">
-            {attached.map((u) => (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                key={u}
-                src={u}
-                alt="attachment"
-                className="w-14 h-14 object-cover rounded-md border border-border"
-              />
-            ))}
-          </div>
-        )}
-        {toolCalls.length > 0 && (
-          <div className="mt-2 space-y-1">
-            {toolCalls.map((tc) => (
-              <div
-                key={tc.id}
-                className="text-[10px] text-muted font-mono border border-border rounded px-1.5 py-0.5"
-                title={JSON.stringify(tc.input, null, 2)}
-              >
-                🔧 {tc.name}
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/**
- * Auto-linkify URLs in plain text. The agent replies in plain
- * text per its SOP so it never renders markdown — this keeps
- * URLs clickable without invoking a full markdown parser.
- * Splits on the URL regex and reinserts anchor tags for matches.
- */
-const URL_REGEX = /(https?:\/\/[^\s<>"']+)/g;
-
-function LinkifiedText({ text }: { text: string }) {
-  if (!text) return null;
-  const parts = text.split(URL_REGEX);
-  return (
-    <>
-      {parts.map((part, i) => {
-        if (i % 2 === 1) {
-          return (
-            <a
-              key={i}
-              href={part}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-accent underline break-all"
-            >
-              {part}
-            </a>
-          );
-        }
-        return <span key={i}>{part}</span>;
-      })}
-    </>
-  );
-}
-
-/**
- * Pick URLs out of the bubble text that look like renderable
- * media. Two heuristics:
- *   1. File extension (image / video).
- *   2. Known Google Flow / useapi asset hosts even when the URL
- *      carries a query string with no visible extension (signed
- *      URLs frequently look like this).
- * Anything else is left as a link in the text body.
- */
-interface MediaHit {
-  url: string;
-  kind: "image" | "video";
-}
-
-const IMAGE_EXT = /\.(png|jpe?g|webp|gif|avif)(\?|#|$)/i;
-const VIDEO_EXT = /\.(mp4|webm|mov|m4v)(\?|#|$)/i;
-const IMAGE_HOSTS = [
-  "googleusercontent.com",
-  "storage.googleapis.com",
-  "useapi.net",
-];
-const VIDEO_HOSTS = ["googlevideo.com"];
-
-function extractMediaUrls(text: string): MediaHit[] {
-  if (!text) return [];
-  const seen = new Set<string>();
-  const out: MediaHit[] = [];
-  const matches = text.match(URL_REGEX) ?? [];
-  for (const raw of matches) {
-    // Trim common trailing punctuation the regex greedy-grabs.
-    const url = raw.replace(/[.,;:!?)\]]+$/, "");
-    if (seen.has(url)) continue;
-    seen.add(url);
-    if (VIDEO_EXT.test(url) || VIDEO_HOSTS.some((h) => url.includes(h))) {
-      out.push({ url, kind: "video" });
-    } else if (
-      IMAGE_EXT.test(url) ||
-      IMAGE_HOSTS.some((h) => url.includes(h))
-    ) {
-      out.push({ url, kind: "image" });
-    }
-  }
-  return out;
-}
-
-function safeParseImages(json: string | null): string[] {
-  if (!json) return [];
-  try {
-    const v = JSON.parse(json);
-    return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
-  } catch {
-    return [];
-  }
-}
-
-function safeParseToolCalls(json: string | null): Array<{
-  id: string;
-  name: string;
-  input: unknown;
-}> {
-  if (!json) return [];
-  try {
-    const v = JSON.parse(json);
-    if (!Array.isArray(v)) return [];
-    return v
-      .filter((x) => x && typeof x === "object" && typeof x.name === "string")
-      .map((x) => ({
-        id: String(x.id ?? Math.random()),
-        name: String(x.name),
-        input: x.input,
-      }));
-  } catch {
-    return [];
-  }
-}
-
-/* --------------------------------------------------------------
- * Product picker
- * ------------------------------------------------------------ */
-
-function ProductPicker({
-  products,
-  value,
-  onChange,
-}: {
-  products: BatchPromptsProduct[];
-  value: string | null;
-  onChange: (id: string | null) => void;
-}) {
-  return (
-    <div className="flex items-center gap-2">
-      <label className="text-[10px] uppercase tracking-[0.14em] text-muted shrink-0">
-        Product
-      </label>
-      <select
-        value={value ?? ""}
-        onChange={(e) => onChange(e.target.value || null)}
-        className="flex-1 bg-panel2 border border-border rounded-md px-2 py-1 text-[12px] text-text focus:outline-none focus:border-accent"
-      >
-        <option value="">— none —</option>
-        {products.map((p) => (
-          <option key={p.id} value={p.id}>
-            {p.productName}
-          </option>
-        ))}
-      </select>
-    </div>
-  );
-}
-
-/* --------------------------------------------------------------
- * Image picker
- * ------------------------------------------------------------ */
-
-function ImagePicker({
-  images,
-  selected,
-  onToggle,
-  onClear,
-  conversationHasDelete,
-}: {
-  images: string[];
-  selected: Set<string>;
-  onToggle: (url: string) => void;
-  onClear: () => void;
-  conversationHasDelete?: () => void;
-}) {
-  return (
-    <div className="space-y-1">
-      <div className="flex items-center justify-between">
-        <div className="text-[10px] uppercase tracking-[0.14em] text-muted">
-          Reference images
-        </div>
-        <div className="flex gap-2">
-          {selected.size > 0 && (
-            <button
-              type="button"
-              onClick={onClear}
-              className="text-[10px] text-muted hover:text-text"
-            >
-              Clear
-            </button>
-          )}
-          {conversationHasDelete && (
-            <button
-              type="button"
-              onClick={conversationHasDelete}
-              className="text-[10px] text-muted hover:text-accent-red"
-              title="Delete this conversation"
-            >
-              Delete chat
-            </button>
-          )}
-        </div>
-      </div>
-      <div className="flex gap-2 overflow-x-auto pb-2">
-        {images.map((url) => {
-          const isOn = selected.has(url);
-          return (
-            <button
-              key={url}
-              type="button"
-              onClick={() => onToggle(url)}
-              className={
-                "shrink-0 w-24 h-24 rounded-lg border overflow-hidden relative transition-all " +
-                (isOn
-                  ? "border-accent ring-2 ring-accent/60"
-                  : "border-border opacity-70 hover:opacity-100")
-              }
-              title={url}
-            >
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={url}
-                alt="ref"
-                className="w-full h-full object-cover"
-              />
-              {isOn && (
-                <span className="absolute top-1 right-1 bg-accent text-black text-[10px] rounded-full w-5 h-5 flex items-center justify-center font-bold">
-                  ✓
-                </span>
-              )}
-            </button>
-          );
-        })}
-      </div>
-    </div>
+    <BatchChatPanelV2
+      batchName={batchName}
+      conversations={conversations.map((c) => ({
+        id: c.id,
+        title: c.title,
+        messageCount: c.messageCount,
+      }))}
+      activeConversationId={convId}
+      onSelectConversation={setConvId}
+      onNewConversation={newConversation}
+      onDeleteConversation={removeConversation}
+      onRenameConversation={rename}
+      messages={v2Messages}
+      streamingText={streamText}
+      agentWorking={sending}
+      products={v2Products}
+      currentProductId={currentProductId}
+      onPickProduct={pickProduct}
+      selectedImages={selectedImages}
+      onToggleImage={toggleImage}
+      onClearImages={() => setSelectedImages(new Set())}
+      text={text}
+      onTextChange={setText}
+      onSubmit={submitTurn}
+      sending={sending}
+      error={error}
+      onDismissError={() => setError(null)}
+    />
   );
 }

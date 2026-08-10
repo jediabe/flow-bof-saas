@@ -34,11 +34,11 @@ export default async function PromptsPage({
     <div className="space-y-6">
       <header>
         <h1 className="h-page">
-          Hooks <span className="text-accent">&amp; Prompts</span>
+          APEX <span className="text-accent">Automator</span>
         </h1>
         <p className="text-sm text-muted mt-1">
-          Import a Kalodata workbook → review on your phone → hooks and image
-          prompts generate automatically → post from your phone.
+          Chat with the agent, import Kalodata sheets or paste TikTok URLs, and
+          hand off generated videos to your phone — all in one surface.
         </p>
       </header>
 

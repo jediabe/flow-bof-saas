@@ -34,14 +34,12 @@ const PRIMARY: NavItem[] = [
   // Hot / Top Ads / By Category feeds → bulk-import as Style 1
   // batch → drops straight into mobile review.
   { href: "/discover",  label: "Discover",         icon: "◎" },
-  // /prompts is the Style 1 video-kit surface — Kalodata import,
-  // mobile review + posting handoff, per-product Flow agent
-  // scripts + copy options. Also home to the per-batch APEX MCP
-  // chat panel (side-drawer inside the active-batch view) — the
-  // former workspace-level /generate page was folded in here so
-  // each conversation is scoped to the batch the operator is
-  // actually working on.
-  { href: "/prompts",   label: "Hooks & Prompts",  icon: "✎" },
+  // /prompts is APEX Automator — the top-of-page batch-scoped
+  // MCP chat agent + the Kalodata / TikTok URL import bars +
+  // active-batch review below. The single-source-of-truth
+  // surface for taking a Style 1 batch from import → generated
+  // videos → mobile posting handoff.
+  { href: "/prompts",   label: "APEX Automator",  icon: "◈" },
 ];
 
 // The old TOOLS group (Image Gen / Runner Setup / Jobs) was
