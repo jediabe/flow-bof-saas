@@ -536,13 +536,17 @@ function buildSystemPrompt(ctx: {
     : `No product is focused yet. If the operator names a product, call local_list_workspace_products with search=<their words> to find its id, then local_get_product_context.`;
   const videoModelPreamble = ctx.hasVideoBefore
     ? `Video model already picked earlier in this conversation — reuse the SAME model in every google_flow_generate_video call so the whole video stays consistent. Only switch if the operator explicitly asks.`
-    : `**BEFORE your first google_flow_generate_video call in this conversation, ASK the operator which Veo model to use.** Do not fire the tool. Present the three options exactly like this, then wait for their reply:
+    : `**BEFORE your first google_flow_generate_video call in this conversation, ASK the operator which Veo model to use.** Do not fire the tool.
 
-  1. veo-3.1-lite — 10 credits per clip (cheapest, good default for iterating)
-  2. veo-3.1-fast — 20 credits per clip (balanced — slightly better motion / detail)
-  3. veo-3.1-quality — 100 credits per clip (best fidelity; no reference images)
+Step 1: call google_flow_get_account. In the response, look at models.videoModels — this is THE authoritative list of what THIS operator's Google AI subscription can actually run. Only present models whose accessType is "INCLUDED" (skip PAY_AS_YOU_GO / LOCKED / anything they can't use).
 
-Remember their choice for the rest of the conversation and use that model on every subsequent video generation. Only ask again if the operator asks to switch. If they answer with something ambiguous (e.g. "the fast one"), match it to the closest option and confirm.`;
+Step 2: present those Veo models to the operator as a numbered list. For each model, show its key, displayName, and creditCost. If a model's creditCost is 0, mark it as "free (Google AI Ultra tier)" so they know it's the free lane. Common Veo models and what they mean if they appear:
+  - veo-3.1-lite               — cheapest paid tier, good default for iterating
+  - veo-3.1-fast               — balanced quality / cost
+  - veo-3.1-quality            — best fidelity; DOES NOT accept reference images or characters
+  - veo-3.1-lite-low-priority  — FREE (Ultra tier only); slower queue but no credits spent
+
+Step 3: wait for their reply. Remember their choice for the rest of the conversation and use that model on every subsequent google_flow_generate_video call. Only ask again if the operator asks to switch. If they answer with something ambiguous (e.g. "the fast one", "the free one"), match it to the closest option in the account's actual list and confirm before firing.`;
   return `You are the video-generation agent for APEX Initiative's TikTok
 Shop content system. You help operators create Style 1 (Store
 Discovery) videos by planning + executing Google Flow tool
