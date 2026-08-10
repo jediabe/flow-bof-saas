@@ -338,30 +338,56 @@ function ConversationTabs({
 type Group =
   | { key: string; kind: "user"; message: V2Message }
   | { key: string; kind: "assistant-text"; text: string; message: V2Message }
-  | { key: string; kind: "assistant-tools"; labels: string[]; count: number };
+  | {
+      key: string;
+      kind: "assistant-tools";
+      labels: string[];
+      count: number;
+      /** Media URLs surfaced by any tool_result between the tool_use
+       *  events in this group. Rendered as thumbnails right below
+       *  the "Ran N steps" pill so the operator sees the generated
+       *  image the moment the tool returns, without waiting for the
+       *  assistant to type it into a text bubble. */
+      media: MediaHit[];
+    };
 
 function groupMessages(messages: V2Message[]): Group[] {
   const out: Group[] = [];
-  // Pending tool-labels accumulator — flushed the next time we
-  // hit an assistant text block or the end of the list.
+  // Pending accumulators — flushed the next time we hit an
+  // assistant text block or the end of the list.
   let pendingLabels: string[] = [];
+  let pendingMedia: MediaHit[] = [];
   let pendingIdx = 0;
   const flushTools = () => {
-    if (pendingLabels.length === 0) return;
+    if (pendingLabels.length === 0 && pendingMedia.length === 0) return;
     out.push({
-      key: `tools-${pendingIdx}-${pendingLabels.length}`,
+      key: `tools-${pendingIdx}-${pendingLabels.length}-${pendingMedia.length}`,
       kind: "assistant-tools",
       labels: pendingLabels,
       count: pendingLabels.length,
+      media: pendingMedia,
     });
     pendingLabels = [];
+    pendingMedia = [];
     pendingIdx += 1;
   };
 
   for (const m of messages) {
     if (m.role === "user" && m.toolResultJson) {
-      // A "tool_result" rider — already counted via the paired
-      // tool_use in the assistant message. Skip.
+      // The paired tool_result. Extract any media URLs — the
+      // Google Flow response shape stringifies media[] into the
+      // tool_result content field, so a URL scan surfaces them.
+      // Then continue: the tool_use pill covers the "what was
+      // called" side.
+      const urls = extractMediaUrls(m.toolResultJson);
+      // Dedupe against what the tool_use group has already
+      // collected so a mirrored asset (upload → fetch) doesn't
+      // render twice.
+      for (const u of urls) {
+        if (!pendingMedia.some((m0) => m0.url === u.url)) {
+          pendingMedia.push(u);
+        }
+      }
       continue;
     }
     if (m.role === "user") {
@@ -412,7 +438,13 @@ function MessageGroup({ group, isLast }: { group: Group; isLast: boolean }) {
   if (group.kind === "assistant-text") {
     return <AssistantText message={group.message} />;
   }
-  return <AgentWorkingPill labels={group.labels} count={group.count} />;
+  return (
+    <AgentWorkingPill
+      labels={group.labels}
+      count={group.count}
+      media={group.media}
+    />
+  );
 }
 
 /* ------- User bubble --------------------------------------------- */
@@ -495,33 +527,39 @@ function AssistantText({ message }: { message: V2Message }) {
 function AgentWorkingPill({
   labels,
   count,
+  media,
 }: {
   labels: string[];
   count: number;
+  media: MediaHit[];
 }) {
   const [open, setOpen] = useState(false);
   const summary =
-    labels.length === 1
-      ? labels[0]
-      : `${labels[0]} · +${count - 1} more`;
+    labels.length === 0
+      ? "generated media"
+      : labels.length === 1
+        ? labels[0]
+        : `${labels[0]} · +${count - 1} more`;
   return (
-    <div className="chat-appear">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="group inline-flex items-center gap-2 text-[11px] text-muted hover:text-text px-3 py-1.5 rounded-full border border-border bg-panel/60 transition-colors"
-      >
-        <span
-          aria-hidden="true"
-          className="w-1.5 h-1.5 rounded-full"
-          style={{ background: "#2AB8F5" }}
-        />
-        <span className="uppercase tracking-[0.14em]">Ran {count} step{count === 1 ? "" : "s"}</span>
-        <span className="text-muted2">·</span>
-        <span className="text-muted group-hover:text-text">{summary}</span>
-        <span className="text-muted2 text-[9px]">{open ? "▴" : "▾"}</span>
-      </button>
-      {open && (
+    <div className="chat-appear space-y-3">
+      {count > 0 && (
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="group inline-flex items-center gap-2 text-[11px] text-muted hover:text-text px-3 py-1.5 rounded-full border border-border bg-panel/60 transition-colors"
+        >
+          <span
+            aria-hidden="true"
+            className="w-1.5 h-1.5 rounded-full"
+            style={{ background: "#2AB8F5" }}
+          />
+          <span className="uppercase tracking-[0.14em]">Ran {count} step{count === 1 ? "" : "s"}</span>
+          <span className="text-muted2">·</span>
+          <span className="text-muted group-hover:text-text">{summary}</span>
+          <span className="text-muted2 text-[9px]">{open ? "▴" : "▾"}</span>
+        </button>
+      )}
+      {open && count > 0 && (
         <ol className="mt-2 ml-4 space-y-1 text-[11px] text-muted">
           {labels.map((l, i) => (
             <li key={i} className="flex items-center gap-2">
@@ -530,6 +568,36 @@ function AgentWorkingPill({
             </li>
           ))}
         </ol>
+      )}
+      {media.length > 0 && (
+        <div className="grid grid-cols-2 gap-3">
+          {media.map((m) => (
+            <a
+              key={m.url}
+              href={m.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="block rounded-xl overflow-hidden border border-border bg-panel transition-transform duration-150 hover:-translate-y-0.5 hover:border-border-strong"
+              title={m.url}
+            >
+              {m.kind === "video" ? (
+                <video
+                  src={m.url}
+                  controls
+                  playsInline
+                  className="w-full h-auto max-h-72 object-contain bg-black"
+                />
+              ) : (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={m.url}
+                  alt="generated"
+                  className="w-full h-auto max-h-72 object-contain bg-black"
+                />
+              )}
+            </a>
+          ))}
+        </div>
       )}
     </div>
   );

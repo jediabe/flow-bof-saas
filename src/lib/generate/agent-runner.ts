@@ -282,10 +282,27 @@ async function* runAgentTurnInner(
   console.log(
     `[agent-runner] provider=${providerLabel} model=${modelName} workspace=${workspaceId} batch=${batchId}`,
   );
+  // Has the operator picked (or the agent used) a Veo model in
+  // this conversation already? Scan every prior assistant turn's
+  // toolCallsJson for a google_flow_generate_video call. If yes,
+  // the "ask which Veo model" preamble is unnecessary — the
+  // agent should reuse whatever model it (or the operator) settled
+  // on last time. If no, the system prompt tells the agent to
+  // present the options before spending any Veo credits.
+  const hasVideoBefore = stored.some((row) => {
+    if (row.role !== "assistant" || !row.toolCallsJson) return false;
+    try {
+      const arr = JSON.parse(row.toolCallsJson) as Array<{ name?: string }>;
+      return Array.isArray(arr) && arr.some((t) => t?.name === "google_flow_generate_video");
+    } catch {
+      return false;
+    }
+  });
   const systemPrompt = buildSystemPrompt({
     batchName: conv.batch.name,
     market: conv.batch.market,
     currentProductId: conv.currentProductId,
+    hasVideoBefore,
   });
 
   for (let iter = 0; iter < MAX_LOOP_ITERATIONS; iter += 1) {
@@ -511,11 +528,21 @@ function buildSystemPrompt(ctx: {
   batchName: string;
   market: string;
   currentProductId: string | null;
+  hasVideoBefore: boolean;
 }): string {
   const marketLabel = ctx.market === "us" ? "US" : "UK";
   const focus = ctx.currentProductId
     ? `The operator is currently focused on product id "${ctx.currentProductId}". Call local_get_product_context on that id first unless they've asked about a different product by name.`
     : `No product is focused yet. If the operator names a product, call local_list_workspace_products with search=<their words> to find its id, then local_get_product_context.`;
+  const videoModelPreamble = ctx.hasVideoBefore
+    ? `Video model already picked earlier in this conversation — reuse the SAME model in every google_flow_generate_video call so the whole video stays consistent. Only switch if the operator explicitly asks.`
+    : `**BEFORE your first google_flow_generate_video call in this conversation, ASK the operator which Veo model to use.** Do not fire the tool. Present the three options exactly like this, then wait for their reply:
+
+  1. veo-3.1-lite — 10 credits per clip (cheapest, good default for iterating)
+  2. veo-3.1-fast — 20 credits per clip (balanced — slightly better motion / detail)
+  3. veo-3.1-quality — 100 credits per clip (best fidelity; no reference images)
+
+Remember their choice for the rest of the conversation and use that model on every subsequent video generation. Only ask again if the operator asks to switch. If they answer with something ambiguous (e.g. "the fast one"), match it to the closest option and confirm.`;
   return `You are the video-generation agent for APEX Initiative's TikTok
 Shop content system. You help operators create Style 1 (Store
 Discovery) videos by planning + executing Google Flow tool
@@ -526,6 +553,13 @@ You are scoped to ONE batch:
   Batch: "${ctx.batchName}"
   Market: ${marketLabel}
 ${focus}
+
+# Video model — pick once per conversation
+${videoModelPreamble}
+
+# Image + video defaults
+- google_flow_generate_image: default model=nano-banana-pro (highest quality). aspect_ratio: "9:16" ALWAYS (TikTok is vertical). Only fall back to nano-banana-2 or nano-banana-2-lite if the operator explicitly asks for a cheaper/faster generation.
+- google_flow_generate_video: aspect_ratio: "portrait" (that's Veo's 9:16). Model = whatever the operator picked above.
 
 You have two families of tools:
   - local_*: read this batch's products / copy / settings and
@@ -573,13 +607,13 @@ in your response so the operator can override.
    already exists. Don't regenerate a scene unless asked.
 4. Scene 1 image: google_flow_generate_image with the store
    prompt + reference_images=[referenceImageUrl, ...attached
-   reference images from the operator this turn]. Prefer
-   nano-banana-2-lite; use nano-banana-2 when the operator asks
-   for higher fidelity.
+   reference images from the operator this turn]. Use the
+   defaults above (nano-banana-pro, 9:16).
 5. Scene 1 motion: google_flow_generate_video with the universal
    store motion prompt, image=<image url from step 4>,
-   model=veo-3.1-lite (10 credits). Async — poll
-   google_flow_get_job every 10-15s until COMPLETED / FAILED.
+   model=<the Veo model the operator picked at the start>,
+   aspect_ratio=portrait. Async — poll google_flow_get_job every
+   10-15s until COMPLETED / FAILED.
 6. local_save_generated_video(productId, sceneLabel="scene_1_store",
    mediaGenerationId=<from the completed job>, prompt=<motion prompt used>).
 7. Repeat 4-6 for Scene 2 with the home prompt (correct
@@ -598,10 +632,10 @@ in your response so the operator can override.
   is broken — tell them to visit Settings → Google Flow account
   and reconnect via useapi.net's automated setup. Never retry
   a 596; it doesn't recover on its own.
-- Cost discipline: default to veo-3.1-lite (10 credits per
-  video). Only use veo-3.1-fast (20) or veo-3.1-quality (100)
-  when explicitly asked or when a lite attempt was clearly
-  unusable (warped label / face artifacts).
+- Cost discipline: the Veo model was picked at the start of the
+  conversation — stick with it. Do NOT auto-upgrade to a more
+  expensive model on your own; if a clip is unusable, tell the
+  operator what went wrong and ask before switching models.
 - Reference images: ALWAYS attach the product's referenceImageUrl
   (from local_get_product_context) AND any URLs the operator
   attached this turn to google_flow_generate_image's
