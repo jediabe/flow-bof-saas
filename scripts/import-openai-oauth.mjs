@@ -42,6 +42,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { homedir } from "node:os";
 import process from "node:process";
+import { createCipheriv, randomBytes } from "node:crypto";
 
 /* ------------------------------------------------------------------
  * CLI parsing
@@ -165,21 +166,14 @@ async function main() {
     process.exit(1);
   }
 
-  // Import at runtime AFTER we've validated inputs so a broken
-  // .env doesn't fail before the user knows the flags are wrong.
-  // Dynamic imports for tsx-compiled paths inside dist/... don't
-  // work in dev — resolve against the source tree instead.
+  // Import Prisma at runtime AFTER we've validated inputs so a
+  // broken .env doesn't fail before the user knows the flags
+  // are wrong. Encryption uses the inline helper below — kept
+  // in sync with src/lib/llm/crypto.ts's envelope format —
+  // because the .ts source isn't reachable from this .mjs when
+  // it runs inside the one-shot node container.
   const { PrismaClient } = await import("@prisma/client");
-  const { encryptLlmSecret } = await import(
-    "../src/lib/llm/crypto.ts"
-  ).catch(async () => {
-    // Fallback: build the paths manually for a node-only script.
-    // encryptLlmSecret is small; inline it here rather than
-    // adding a compilation step.
-    return {
-      encryptLlmSecret: inlineEncryptLlmSecret,
-    };
-  });
+  const encryptLlmSecret = inlineEncryptLlmSecret;
 
   const db = new PrismaClient();
   try {
@@ -233,8 +227,7 @@ async function main() {
  * mirror or the script fails at import time.
  * ---------------------------------------------------------------- */
 
-async function inlineEncryptLlmSecret(plaintext) {
-  const { createCipheriv, randomBytes } = await import("node:crypto");
+function inlineEncryptLlmSecret(plaintext) {
   const rawKey = (process.env.LLM_CRED_ENC_KEY || "").trim();
   if (!rawKey) {
     console.error(
