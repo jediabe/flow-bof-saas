@@ -200,25 +200,29 @@ async function* runAgentTurnInner(
     // runResponsesLoop hand-off later in this function.
     apiKey = "";
     baseURL = undefined;
-    // The /backend-api/codex/responses endpoint only accepts
-    // Codex-branded models. Plain "gpt-5.2" 400s with
-    // "The 'gpt-5.2' model is not supported when using Codex
-    // with a ChatGPT account." Codex-valid options per
-    // opencode-openai-codex-auth's config:
-    //   gpt-5.2-codex        — newest, may not be enabled for
-    //                          every account
-    //   gpt-5.1-codex-max    — most reasoning power on 5.1
-    //   gpt-5.1-codex        — the safe default (widest availability)
-    //   gpt-5.1-codex-mini   — cheapest / fastest
+    // The /backend-api/codex/responses endpoint has a NARROWER
+    // model whitelist than opencode's config would suggest —
+    // ChatGPT-account auth (as opposed to platform-key auth)
+    // is tier-gated. Operator's Plus plan has already rejected
+    // both "gpt-5.2" and "gpt-5.1-codex" with:
+    //   "The '<x>' model is not supported when using Codex with
+    //   a ChatGPT account."
+    // codex-mini-latest is the entry-level Codex model that
+    // opencode also lists; it should be available to every
+    // Codex-enabled account. If that's ALSO rejected, try the
+    // env-var override with one of these opencode-known ids:
+    //   gpt-5-codex-mini
+    //   gpt-5.1-codex-mini
+    //   gpt-5.1-codex-max
+    //   gpt-5.2-codex
     //
-    // We deliberately DO NOT reuse settings.openrouterModel here.
-    // OpenRouter's model namespace is completely different
-    // ("anthropic/claude-...", "deepseek/deepseek-...") and
-    // dropping any of those into the Codex endpoint 400s. The
-    // override is a dedicated env var so accidentally-configured
-    // workspace-level model IDs never leak into this path.
+    // We deliberately DO NOT reuse settings.openrouterModel
+    // here — OpenRouter's model namespace ("anthropic/...",
+    // "deepseek/...") is incompatible and dropping any of
+    // those into the Codex endpoint 400s.
     modelName =
-      (process.env.LLM_RESPONSES_MODEL ?? "").trim() || "gpt-5.1-codex";
+      (process.env.LLM_RESPONSES_MODEL ?? "").trim() ||
+      "codex-mini-latest";
     providerLabel = "user_oauth/openai_responses";
     credSource = "resolver";
     runMode = "responses";
