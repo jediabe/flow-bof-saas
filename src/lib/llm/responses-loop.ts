@@ -155,51 +155,62 @@ export async function* runResponsesLoop(
     // they arrive, forward text deltas straight to the client
     // for a live-typing effect, and accumulate the finalized
     // output items to drive the tool-dispatch phase after.
+    //
+    // Automatic retry on transient upstream failures:
+    // OpenAI periodically returns "Our servers are currently
+    // overloaded. Please try again later." mid-stream or as
+    // an initial 5xx. We retry up to RETRY_MAX_ATTEMPTS with
+    // jittered exponential backoff, BUT only when we haven't
+    // yielded any text_delta events to the client yet — text
+    // is streamed live so a retry would visibly duplicate it.
+    // If the transient error hits after text has started
+    // arriving, we surface it and let the operator retry
+    // manually.
     let textContent = "";
     const functionCalls: OpenAiFunctionCallOutput[] = [];
-    // Assemble function_call arguments from streamed deltas.
-    // The Codex Responses stream emits arguments piecewise:
-    // response.function_call_arguments.delta events, then a
-    // response.output_item.done event carries the full item.
-    // Both paths accumulate into this map keyed by call_id.
     const fcInProgress = new Map<
       string,
       { name: string; args: string }
     >();
 
     let streamOk = false;
-    try {
-      for await (const evt of streamResponsesApi({
-        cred: input.cred,
-        body: {
-          model: input.model,
-          input: inputItems,
-          tools: openaiTools,
-          store: false,
-          stream: true,
-          // The x-openai-internal-codex-responses-lite header
-          // (always set — see openai-oauth.ts) has three
-          // co-required body fields Codex enforces one at a
-          // time on 400. Set all three up front:
-          //   reasoning.context = "all_turns"
-          //   parallel_tool_calls = false
-          //   (a third may surface — we'll add it here when it
-          //    does)
-          // The parallel_tool_calls constraint just means the
-          // model emits one tool call per turn instead of
-          // batching several; our loop already runs one
-          // Promise.all per iteration, so no behavior change.
-          reasoning: {
-            context: "all_turns",
-            ...(input.reasoningEffort
-              ? { effort: input.reasoningEffort }
-              : {}),
+    let attemptError: Error | null = null;
+    const RETRY_MAX_ATTEMPTS = 4;
+    const RETRY_BASE_MS = 800;
+    for (let attempt = 0; attempt < RETRY_MAX_ATTEMPTS; attempt += 1) {
+      // Reset per-attempt state (nothing yielded yet — see the
+      // guard above the catch block).
+      textContent = "";
+      functionCalls.length = 0;
+      fcInProgress.clear();
+      streamOk = false;
+      attemptError = null;
+
+      try {
+        for await (const evt of streamResponsesApi({
+          cred: input.cred,
+          body: {
+            model: input.model,
+            input: inputItems,
+            tools: openaiTools,
+            store: false,
+            stream: true,
+            // The x-openai-internal-codex-responses-lite header
+            // (always set — see openai-oauth.ts) has co-required
+            // body fields Codex enforces on 400. Set all up front:
+            //   reasoning.context = "all_turns"
+            //   parallel_tool_calls = false
+            reasoning: {
+              context: "all_turns",
+              ...(input.reasoningEffort
+                ? { effort: input.reasoningEffort }
+                : {}),
+            },
+            parallel_tool_calls: false,
           },
-          parallel_tool_calls: false,
-        },
-      })) {
-        streamOk = true;
-        const type = typeof evt.type === "string" ? evt.type : "";
+        })) {
+          streamOk = true;
+          const type = typeof evt.type === "string" ? evt.type : "";
 
         // Text streaming — forward the delta to the client so
         // it renders live, and accumulate for the persisted
@@ -264,18 +275,55 @@ export async function* runResponsesLoop(
           throw new Error(`stream error: ${message}`);
         }
 
-        // response.completed / response.created / lifecycle
-        // events — nothing to do; keep reading until the
-        // stream naturally ends.
+          // response.completed / response.created / lifecycle
+          // events — nothing to do; keep reading until the
+          // stream naturally ends.
+        }
+        // Stream ended cleanly — break out of the retry loop.
+        break;
+      } catch (err) {
+        attemptError = err as Error;
+        const message = attemptError.message ?? String(attemptError);
+        // OpenAI's transient signals across both the initial
+        // HTTP layer and the SSE stream. "overloaded" +
+        // "try again later" cover the model's own capacity
+        // messages; 429/5xx cover the transport layer.
+        const isTransient =
+          /overloaded|try again later|please retry|rate limit|\b(429|500|502|503|504)\b|timeout|econnreset|econnrefused|socket hang up/i
+            .test(message);
+        // Safe to retry only if nothing has streamed to the
+        // client yet — otherwise the client sees text a second
+        // time and it visually duplicates.
+        const canRetry =
+          isTransient &&
+          attempt < RETRY_MAX_ATTEMPTS - 1 &&
+          textContent.length === 0;
+        if (canRetry) {
+          // Jittered exponential backoff: 800ms → 1600 → 3200 →
+          // (+ up to 500ms jitter) so parallel requests don't
+          // thundering-herd retry on the same tick.
+          const wait =
+            RETRY_BASE_MS * 2 ** attempt +
+            Math.floor(Math.random() * 500);
+          console.warn(
+            `[responses-loop] iter=${iter} attempt=${attempt + 1}/${RETRY_MAX_ATTEMPTS} transient (${message.slice(0, 160)}) — retrying in ${wait}ms`,
+          );
+          await new Promise((r) => setTimeout(r, wait));
+          continue;
+        }
+        // Non-transient OR partial progress already yielded —
+        // bail out of the retry loop and surface below.
+        console.warn(
+          `[responses-loop] iter=${iter} attempt=${attempt + 1}/${RETRY_MAX_ATTEMPTS} ${textContent.length > 0 ? "partial-yield giving up" : "non-transient"}: ${message.slice(0, 2000)}`,
+        );
+        break;
       }
-    } catch (err) {
-      const message = (err as Error).message ?? String(err);
-      console.warn(
-        `[responses-loop] iter=${iter} fetch error: ${message.slice(0, 2000)}`,
-      );
+    }
+
+    if (attemptError) {
       yield {
         type: "error",
-        message: `OpenAI Responses error: ${message.slice(0, 400)}`,
+        message: `OpenAI Responses error: ${attemptError.message?.slice(0, 400)}`,
       };
       return;
     }
