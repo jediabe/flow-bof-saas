@@ -200,11 +200,21 @@ async function* runAgentTurnInner(
     // runResponsesLoop hand-off later in this function.
     apiKey = "";
     baseURL = undefined;
-    // Default model per opencode's config — gpt-5.2 is the top
-    // tier available to ChatGPT Plus subs. Workspace-level
-    // override can pin a different variant.
+    // The /backend-api/codex/responses endpoint only accepts
+    // Codex-branded models. Plain "gpt-5.2" 400s with
+    // "The 'gpt-5.2' model is not supported when using Codex
+    // with a ChatGPT account." Codex-valid options per
+    // opencode-openai-codex-auth's config:
+    //   gpt-5.2-codex        — newest, may not be enabled for
+    //                          every account
+    //   gpt-5.1-codex-max    — most reasoning power on 5.1
+    //   gpt-5.1-codex        — the safe default (widest availability)
+    //   gpt-5.1-codex-mini   — cheapest / fastest
+    // Workspace-level openrouterModel override can pin a
+    // different one without a code change; it's the same
+    // free-text field we already surface in Settings.
     modelName =
-      (settings.openrouterModel ?? "").trim() || "gpt-5.2";
+      (settings.openrouterModel ?? "").trim() || "gpt-5.1-codex";
     providerLabel = "user_oauth/openai_responses";
     credSource = "resolver";
     runMode = "responses";
