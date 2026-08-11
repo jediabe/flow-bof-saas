@@ -146,10 +146,66 @@ app.delete("/v1/google-flow/accounts/:email", (req, res) => {
   res.json({ deleted: true, email: decodeURIComponent(req.params.email) });
 });
 
-app.get("/v1/google-flow/accounts/captcha-providers", (_req, res) =>
-  res.json({ capsolver: "CAP-****" }));
-app.get("/v1/google-flow/accounts/captcha-stats", (_req, res) =>
-  res.json({ solved: 412, failed: 9, remainingFreeCredits: 0 }));
+// In-memory captcha-provider state so tests can round-trip
+// POST -> GET the way the real service does. Starts with the
+// 300-free-CapSolver-credits scenario that new accounts see.
+const captchaState = { providers: /** @type {Record<string,string>} */ ({}) };
+
+app.get("/v1/google-flow/accounts/captcha-providers", (_req, res) => {
+  const keys = Object.keys(captchaState.providers);
+  if (keys.length === 0) {
+    return res.json({ freeCaptchaCredits: 300 });
+  }
+  // Masked keys — mirror useapi.net's actual response shape.
+  const masked = {};
+  for (const [k, v] of Object.entries(captchaState.providers)) {
+    masked[k] = `${v.slice(0, 4)}***${v.slice(-3)}`;
+  }
+  res.json(masked);
+});
+
+app.post("/v1/google-flow/accounts/captcha-providers", (req, res) => {
+  const body = req.body ?? {};
+  if (typeof body !== "object" || Array.isArray(body)) {
+    return res.status(400).json({ error: "body must be a JSON object" });
+  }
+  const validKeys = new Set([
+    "CapSolver",
+    "AntiCaptcha",
+    "YesCaptcha",
+    "SolveCaptcha",
+    "2Captcha",
+    "EzCaptcha",
+  ]);
+  for (const k of Object.keys(body)) {
+    if (!validKeys.has(k)) {
+      return res.status(400).json({ error: `unknown provider "${k}"` });
+    }
+  }
+  // Merge (partial updates supported per docs).
+  Object.assign(captchaState.providers, body);
+  const masked = {};
+  for (const [k, v] of Object.entries(captchaState.providers)) {
+    masked[k] = `${String(v).slice(0, 4)}***${String(v).slice(-3)}`;
+  }
+  res.json(masked);
+});
+
+app.get("/v1/google-flow/accounts/captcha-stats", (req, res) => {
+  if (req.query.anonymized === "true") {
+    return res.json({
+      anonymized: true,
+      totalSolves: 10000,
+      overallSuccessRate: 0.94,
+    });
+  }
+  res.json({
+    stats: [
+      { date: "2026-08-11", provider: "CapSolver", successCount: 412, failureCount: 9, successRate: 0.978 },
+    ],
+    remainingFreeCredits: 0,
+  });
+});
 
 /* -------------------------------- images -------------------------------- */
 

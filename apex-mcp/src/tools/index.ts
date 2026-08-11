@@ -9,6 +9,7 @@ import { registerJobTools } from "./jobs.js";
 import { registerVideoTools } from "./videos.js";
 import { registerVoiceTools } from "./voices.js";
 import { registerStyle2Tools } from "./style2.js";
+import { registerCaptchaTools } from "./captcha.js";
 
 export function registerAllTools(server: McpServer): void {
   registerAccountTools(server);
@@ -19,4 +20,5 @@ export function registerAllTools(server: McpServer): void {
   registerCharacterTools(server);
   registerVoiceTools(server);
   registerStyle2Tools(server);
+  registerCaptchaTools(server);
 }

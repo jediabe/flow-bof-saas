@@ -65,11 +65,36 @@ const EnvSchema = z.object({
   PUBLIC_URL: z.string().url().optional(),
 
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
+
+  /**
+   * Application-wide captcha-solver configuration. When set, the
+   * server calls POST /accounts/captcha-providers ONCE on startup
+   * to register these keys with the useapi.net subscription.
+   * Since the captcha config is subscription-wide (not per-account),
+   * ONE call covers every Google Flow account under our token —
+   * users never see or manage captcha themselves.
+   *
+   * Format is a JSON object matching useapi.net's request body
+   * verbatim; include only the providers you want to configure:
+   *
+   *   USEAPI_CAPTCHA_PROVIDERS_JSON='{"CapSolver":"abc...","AntiCaptcha":"def..."}'
+   *
+   * Valid provider keys: CapSolver, AntiCaptcha, YesCaptcha,
+   * SolveCaptcha, 2Captcha, EzCaptcha. The first Flow account
+   * connected ships with 300 free CapSolver credits from useapi
+   * — after that, at least one provider must be configured or
+   * image/video/voice generation 403s on captcha failure.
+   *
+   * Unset → no registration attempt (relies on whatever's already
+   * configured on the useapi.net side, or the free credits).
+   */
+  USEAPI_CAPTCHA_PROVIDERS_JSON: z.string().optional(),
 });
 
 export type Config = z.infer<typeof EnvSchema> & {
   useapiToken: string;
   allowedOrigins: string[] | null;
+  captchaProviders: Record<string, string> | null;
 };
 
 function fail(message: string): never {
@@ -126,11 +151,61 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     fail("stdio mode requires DEFAULT_FLOW_EMAIL — it serves a single account.");
   }
 
+  // Parse the captcha-providers env var into a validated map.
+  // Bad JSON → fail loud at startup (rather than silently 400ing
+  // on the first generation call). Keys are validated against
+  // the useapi.net supported list so a typo like "capsolver"
+  // (lowercase) doesn't silently no-op.
+  let captchaProviders: Record<string, string> | null = null;
+  if (cfg.USEAPI_CAPTCHA_PROVIDERS_JSON) {
+    let parsedProviders: unknown;
+    try {
+      parsedProviders = JSON.parse(cfg.USEAPI_CAPTCHA_PROVIDERS_JSON);
+    } catch (err) {
+      fail(
+        `USEAPI_CAPTCHA_PROVIDERS_JSON is not valid JSON: ${(err as Error).message}`,
+      );
+    }
+    if (!parsedProviders || typeof parsedProviders !== "object" || Array.isArray(parsedProviders)) {
+      fail("USEAPI_CAPTCHA_PROVIDERS_JSON must be a JSON object, e.g. '{\"CapSolver\":\"key\"}'.");
+    }
+    const validKeys = new Set([
+      "CapSolver",
+      "AntiCaptcha",
+      "YesCaptcha",
+      "SolveCaptcha",
+      "2Captcha",
+      "EzCaptcha",
+    ]);
+    const map: Record<string, string> = {};
+    for (const [k, v] of Object.entries(parsedProviders as Record<string, unknown>)) {
+      if (!validKeys.has(k)) {
+        fail(
+          `USEAPI_CAPTCHA_PROVIDERS_JSON has unknown provider "${k}". ` +
+            `Valid keys: ${Array.from(validKeys).join(", ")} (case-sensitive).`,
+        );
+      }
+      if (typeof v !== "string" || !v.trim()) {
+        fail(`USEAPI_CAPTCHA_PROVIDERS_JSON.${k} must be a non-empty string.`);
+      }
+      map[k] = v.trim();
+    }
+    if (Object.keys(map).length === 0) {
+      // Empty object is a legal way to CLEAR providers via POST,
+      // but at startup it's more likely a typo. Warn but allow.
+      console.warn(
+        "[config] USEAPI_CAPTCHA_PROVIDERS_JSON is an empty object — no providers will be registered.",
+      );
+    }
+    captchaProviders = map;
+  }
+
   return {
     ...cfg,
     useapiToken: cfg.USEAPI_TOKEN,
     allowedOrigins: cfg.ALLOWED_ORIGINS
       ? cfg.ALLOWED_ORIGINS.split(",").map((s) => s.trim()).filter(Boolean)
       : null,
+    captchaProviders,
   };
 }

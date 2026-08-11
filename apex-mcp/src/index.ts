@@ -21,6 +21,7 @@ import { buildServer } from "./server.js";
 import { createHttpApp } from "./http.js";
 import { runWithContext } from "./context.js";
 import { setUseapiConfig } from "./tools/shared.js";
+import { registerCaptchaProvidersOnBoot } from "./tools/captcha.js";
 import { API_BASE_URL, SERVER_NAME, SERVER_VERSION } from "./constants.js";
 
 /**
@@ -118,6 +119,19 @@ async function main(): Promise<void> {
   const config = loadConfig();
   if (config.TRANSPORT === "stdio") warnIfMockUpstream(config);
   setUseapiConfig(config.useapiToken, config.USEAPI_BASE_URL);
+
+  // Application-wide captcha registration. Fire-and-log: any
+  // failure is warned about but doesn't block the server from
+  // booting — a broken captcha config surfaces later as a
+  // per-request captcha error, which is a better failure mode
+  // than "server didn't start and no one can generate anything".
+  if (config.captchaProviders) {
+    await registerCaptchaProvidersOnBoot({
+      useapiToken: config.useapiToken,
+      useapiBaseUrl: config.USEAPI_BASE_URL,
+      providers: config.captchaProviders,
+    });
+  }
 
   if (config.TRANSPORT === "stdio") {
     await runStdio(config);

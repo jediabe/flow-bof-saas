@@ -79,7 +79,7 @@ section("Protocol");
 
   const { body: list } = await rpc("tools/list", {});
   const tools = list.result?.tools ?? [];
-  check(`tools/list returns 23 tools (got ${tools.length})`, tools.length === 23);
+  check(`tools/list returns 25 tools (got ${tools.length})`, tools.length === 25);
   check(
     "no tool exposes an account/email input",
     !tools.some((t) => Object.keys(t.inputSchema?.properties ?? {}).some((k) => /email/i.test(k))),
@@ -419,6 +419,65 @@ section("Admin API");
 
   const noAuth = await fetch(`${ADMIN_URL}/admin/accounts`);
   check("unauthenticated admin rejected", noAuth.status === 401);
+}
+
+section("Captcha");
+{
+  // Ensure a known state before exercising the tools: POST to
+  // the mock directly to seed two providers. This is what our
+  // boot-time registration would do; we drive it manually here
+  // because the test server was booted without
+  // USEAPI_CAPTCHA_PROVIDERS_JSON.
+  const provResp = await fetch("http://127.0.0.1:4010/v1/google-flow/accounts/captcha-providers", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: "Bearer user:12345-testtoken",
+    },
+    body: JSON.stringify({ CapSolver: "cap-fullkey-abcdef", AntiCaptcha: "anti-fullkey-uvwxyz" }),
+  });
+  check("mock POST /captcha-providers accepts valid providers",
+    provResp.status === 200);
+  const provBody = await provResp.json();
+  check("mock POST echoes masked keys",
+    typeof provBody?.CapSolver === "string" && provBody.CapSolver.includes("***"));
+
+  const listAfter = await callTool("google_flow_list_captcha_providers", {
+    response_format: "json",
+  });
+  check("list_captcha_providers succeeds",
+    !listAfter.isError, listAfter.text.slice(0, 120));
+  check("list reflects registered providers after POST",
+    Object.keys(listAfter.structured?.providers ?? {}).length === 2);
+
+  // Stats tool works (both plain + anonymized query params).
+  const statsPlain = await callTool("google_flow_get_captcha_stats", {
+    response_format: "json",
+  });
+  check("get_captcha_stats succeeds",
+    !statsPlain.isError, statsPlain.text.slice(0, 120));
+
+  const statsAnon = await callTool("google_flow_get_captcha_stats", {
+    anonymized: true,
+    response_format: "json",
+  });
+  check("get_captcha_stats accepts anonymized filter",
+    !statsAnon.isError, statsAnon.text.slice(0, 120));
+
+  // Deliberately no write MCP tool — the config is
+  // subscription-wide, so a user calling it would change the
+  // whole deployment. Enforce this by inspecting tools/list.
+  const { body: toolsList } = await rpc("tools/list", {});
+  const toolNames = (toolsList.result?.tools ?? []).map((t) => t.name);
+  check("no add/set/post captcha_providers tool is exposed",
+    !toolNames.some((n) => /captcha.*(add|set|post|configure)/i.test(n)));
+  check("google_flow_list_captcha_providers is registered",
+    toolNames.includes("google_flow_list_captcha_providers"));
+  check("google_flow_get_captcha_stats is registered",
+    toolNames.includes("google_flow_get_captcha_stats"));
+  const listTool = toolsList.result?.tools?.find((t) => t.name === "google_flow_list_captcha_providers");
+  check("list tool is flagged readOnlyHint",
+    listTool?.annotations?.readOnlyHint === true);
 }
 
 section("Auth");

@@ -122,6 +122,26 @@ Poll `GET /admin/accounts/:email` on a schedule. Catching a broken session befor
 | `google_flow_get_job` | Poll an async job and collect its results |
 | `google_flow_list_characters` / `get` / `create` / `delete` | Reusable characters for consistent subjects |
 | `google_flow_list_voices` / `get` / `create` / `delete` | System presets and custom voices |
+| `google_flow_list_captcha_providers` | Show which captcha solvers are configured (subscription-wide, keys masked) and whether free credits remain |
+| `google_flow_get_captcha_stats` | Solver success rates + sample sizes per provider; supports anonymized cross-user benchmarks |
+
+### Captcha configuration (app-wide)
+
+Image, video and voice generation require reCAPTCHA solves — the useapi.net worker handles them automatically. The **subscription's** first Google Flow account ships with 300 free CapSolver credits; after that at least one solver provider must be configured or generation calls 403.
+
+Configuration is **subscription-wide** — one config covers every Google Flow account under the useapi.net token, so users never touch captcha. Set the operator's provider key(s) once via env and every user benefits automatically:
+
+```bash
+# .env — JSON object mirroring useapi.net's POST body verbatim.
+# Include only the providers you want to configure.
+USEAPI_CAPTCHA_PROVIDERS_JSON='{"CapSolver":"cap-key-here","AntiCaptcha":"anti-key-here"}'
+```
+
+On boot, the server calls `POST /accounts/captcha-providers` once with this map. Failures log a warning but don't block startup — a captcha config error surfaces on the first generation call rather than crashing the server.
+
+Valid provider names (case-sensitive): `CapSolver`, `AntiCaptcha`, `YesCaptcha`, `SolveCaptcha`, `2Captcha`, `EzCaptcha`. CapSolver has a `useapi` promo for 8% off.
+
+There is deliberately **no** `google_flow_set_captcha_providers` MCP tool. The config is subscription-wide, so an end user calling it would change the deployment's config for everyone else. Write access lives on the env var + restart cycle only.
 
 ### Apex Style 2 workflow tools
 
