@@ -45,6 +45,67 @@ model User {
   updatedAt    DateTime @updatedAt
 
   workspaces Workspace[] @relation("WorkspaceOwner")
+
+  // Per-user LLM credential row backing the three-mode fallback
+  // chain (app_key → user_key → user_oauth). A single row per
+  // user; the mode column decides whether we look at api_key_enc
+  // OR the OAuth trio (access_token_enc / refresh_token_enc /
+  // access_expires_at / chatgpt_account_id). See
+  // src/lib/llm/credentials.ts for the resolver.
+  llmCredential LlmCredential?
+}
+
+// Per-user LLM credential — powers resolveLlmCredential's fallback
+// chain (user_oauth → user_key → app_key). One row per user; the
+// `mode` column decides which credential columns are populated:
+//
+//   mode="user_key"    → apiKeyEnc set (encrypted API key)
+//   mode="user_oauth"  → accessTokenEnc + refreshTokenEnc +
+//                        accessExpiresAt + chatgptAccountId set
+//
+// app_key isn't stored here — that comes from process.env at
+// runtime. The row is missing entirely when the user has neither
+// a personal key nor a linked ChatGPT subscription; the resolver
+// falls straight to app_key in that case.
+//
+// Storage envelope for encrypted columns is
+//   v1.<base64 iv>.<base64 tag>.<base64 ciphertext>
+// See src/lib/llm/crypto.ts.
+//
+// `creditsExhaustedUntil` is set by the exhaustion detector when
+// ChatGPT plan credits hit the daily cap so the resolver skips
+// this credential until the timestamp passes.
+//
+// SECURITY: never SELECT this row into a client-visible response.
+// The API routes must project to (mode, provider, keyPreview,
+// healthy) only.
+model LlmCredential {
+  userId                String    @id
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // "user_key" | "user_oauth"
+  mode                  String
+  // "openai" | "anthropic"
+  provider              String
+
+  // user_key mode only.
+  apiKeyEnc             String?
+
+  // user_oauth mode only (OpenAI's ChatGPT device flow).
+  accessTokenEnc        String?
+  refreshTokenEnc       String?
+  accessExpiresAt       DateTime?
+  chatgptAccountId      String?
+
+  // Set when the exhaustion detector sees a "quota exceeded"
+  // response from the provider. Nullable — cleared once the
+  // window passes.
+  creditsExhaustedUntil DateTime?
+
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@index([mode])
 }
 
 model Workspace {

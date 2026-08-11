@@ -54,6 +54,37 @@ model User {
   updatedAt DateTime @updatedAt
 
   workspaces Workspace[] @relation("WorkspaceOwner")
+
+  // Per-user LLM credential row — see SQLite schema for the
+  // full comment. resolveLlmCredential walks
+  // user_oauth → user_key → app_key.
+  llmCredential LlmCredential?
+}
+
+// Per-user LLM credential. See SQLite schema for the full
+// comment; this is the Postgres mirror. Encrypted columns use
+// the v1.<iv>.<tag>.<ciphertext> envelope from
+// src/lib/llm/crypto.ts.
+model LlmCredential {
+  userId                String    @id
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  mode                  String
+  provider              String
+
+  apiKeyEnc             String?
+
+  accessTokenEnc        String?
+  refreshTokenEnc       String?
+  accessExpiresAt       DateTime?
+  chatgptAccountId      String?
+
+  creditsExhaustedUntil DateTime?
+
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@index([mode])
 }
 
 model Workspace {
