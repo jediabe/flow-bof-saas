@@ -10,10 +10,20 @@
  * inviting the operator to import a Kalodata sheet or paste TikTok
  * URLs below.
  *
+ * State ownership after the 3-state product refactor:
+ *   - Conversation data (list, active id, messages, streaming) is
+ *     OWNED by this component — it's the piece that talks to the
+ *     server.
+ *   - Attached product + selected image URLs are OWNED by the
+ *     PARENT (PromptsHubClient) so the batch grid + this panel
+ *     stay in sync. This component reports its seed values back
+ *     up (onSyncAttached / onSyncActiveConversation) once the
+ *     conversation loads, and defers to whatever the parent
+ *     hands back on subsequent renders.
+ *
  * Auth: server actions + the SSE endpoint enforce ownership
  * through getCurrentWorkspace() + a conversation → batch →
- * workspace join. This container trusts the returned data and
- * surfaces server errors inline in the V2 card's red banner.
+ * workspace join.
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -28,7 +38,6 @@ import {
   getConversationDetail,
   listBatchConversations,
   renameConversation,
-  setConversationProduct,
   type ChatMessage,
   type ConversationSummary,
 } from "./chat-actions";
@@ -39,22 +48,52 @@ interface BatchChatPanelProps {
   batchId: string | null;
   batchName: string | null;
   products: BatchPromptsProduct[];
+  /** Attached product id — driven by the parent. When null the
+   *  chat has no product focus (no pill above the input). */
+  attachedProductId: string | null;
+  /** Reference images the operator picked in the ProductDetailDrawer
+   *  for the NEXT chat turn. Cleared by parent when the product
+   *  changes; cleared by us after a successful send. */
+  selectedImageUrls: Set<string>;
+  /** Called when the operator clicks the attached-product pill so
+   *  the parent can open the product's detail drawer. */
+  onOpenProductDetail: (productId: string) => void;
+  /** Called once when we load the conversation and know its
+   *  persisted currentProductId — the parent uses this to seed
+   *  its own attached-product state. */
+  onSyncAttached: (productId: string | null) => void;
+  /** Called when the loaded conversation's persisted selected
+   *  images change (currently a no-op — selection is ephemeral
+   *  per session). */
+  onSyncSelectedImages: (next: Set<string>) => void;
+  /** Called when the active conversation id changes so the
+   *  parent can drive attach/detach actions against the correct
+   *  conversation. */
+  onSyncActiveConversation: (conversationId: string | null) => void;
+  /** Called after a successful send so the parent can clear the
+   *  drawer's image selection (they were consumed by that turn). */
+  onClearSelectedImages: () => void;
 }
 
 export default function BatchChatPanel({
   batchId,
   batchName,
   products,
+  attachedProductId,
+  selectedImageUrls,
+  onOpenProductDetail,
+  onSyncAttached,
+  onSyncSelectedImages: _onSyncSelectedImages,
+  onSyncActiveConversation,
+  onClearSelectedImages,
 }: BatchChatPanelProps) {
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [convId, setConvId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [currentProductId, setCurrentProductId] = useState<string | null>(null);
 
   // Composer state
   const [text, setText] = useState("");
-  const [selectedImages, setSelectedImages] = useState<Set<string>>(new Set());
   const [sending, setSending] = useState(false);
   const [streamText, setStreamText] = useState("");
   const abortRef = useRef<AbortController | null>(null);
@@ -66,7 +105,7 @@ export default function BatchChatPanel({
       setConversations([]);
       setConvId(null);
       setMessages([]);
-      setCurrentProductId(null);
+      onSyncActiveConversation(null);
       return;
     }
     let cancelled = false;
@@ -76,11 +115,14 @@ export default function BatchChatPanel({
         if (cancelled) return;
         setConversations(rows);
         if (rows.length > 0) {
-          setConvId(rows[0].id);
+          const firstId = rows[0]!.id;
+          setConvId(firstId);
+          onSyncActiveConversation(firstId);
         } else {
           const created = await createBatchConversation({ batchId });
           if (!cancelled && created.ok && created.id) {
             setConvId(created.id);
+            onSyncActiveConversation(created.id);
             const refreshed = await listBatchConversations(batchId);
             if (!cancelled) setConversations(refreshed);
           }
@@ -93,13 +135,15 @@ export default function BatchChatPanel({
       cancelled = true;
       abortRef.current?.abort();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [batchId]);
 
-  // Load transcript when convId changes.
+  // Load transcript when convId changes; seed the parent's
+  // attached-product state from the loaded conversation.
   useEffect(() => {
     if (!convId) {
       setMessages([]);
-      setCurrentProductId(null);
+      onSyncAttached(null);
       return;
     }
     let cancelled = false;
@@ -111,16 +155,14 @@ export default function BatchChatPanel({
         return;
       }
       setMessages(r.messages ?? []);
-      setCurrentProductId(r.currentProductId ?? null);
-      setSelectedImages(new Set());
+      onSyncAttached(r.currentProductId ?? null);
     })();
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [convId]);
 
-  // Map ChatMessage → V2Message (identity shape today; kept as a
-  // memo so we don't recompute per keystroke).
   const v2Messages: V2Message[] = useMemo(
     () =>
       messages.map((m) => ({
@@ -135,16 +177,17 @@ export default function BatchChatPanel({
     [messages],
   );
 
-  // Map batch products → V2Product with pre-computed available
-  // images (referenceImageUrl + imageUrl + sourceImages, deduped).
+  // Products are still handed to V2 so it can look up the attached
+  // product's name + thumbnail for the pill. availableImages is no
+  // longer used inside V2 (image picker moved to the drawer) but
+  // we compute it anyway so the shape stays stable.
   const v2Products: V2Product[] = useMemo(
     () =>
       products.map((p) => {
         const seen = new Set<string>();
         const out: string[] = [];
         const push = (u: string | null | undefined) => {
-          if (!u) return;
-          if (seen.has(u)) return;
+          if (!u || seen.has(u)) return;
           seen.add(u);
           out.push(u);
         };
@@ -156,22 +199,9 @@ export default function BatchChatPanel({
     [products],
   );
 
-  async function pickProduct(id: string | null) {
-    setCurrentProductId(id);
-    setSelectedImages(new Set());
-    if (convId) {
-      const r = await setConversationProduct({ conversationId: convId, productId: id });
-      if (!r.ok) setError(r.message ?? "Couldn't set product");
-    }
-  }
-
-  function toggleImage(url: string) {
-    setSelectedImages((prev) => {
-      const next = new Set(prev);
-      if (next.has(url)) next.delete(url);
-      else next.add(url);
-      return next;
-    });
+  function selectConversation(id: string) {
+    setConvId(id);
+    onSyncActiveConversation(id);
   }
 
   async function newConversation() {
@@ -182,6 +212,7 @@ export default function BatchChatPanel({
       return;
     }
     setConvId(r.id);
+    onSyncActiveConversation(r.id);
     const rows = await listBatchConversations(batchId);
     setConversations(rows);
   }
@@ -196,7 +227,9 @@ export default function BatchChatPanel({
     const rows = await listBatchConversations(batchId);
     setConversations(rows);
     if (convId === id) {
-      setConvId(rows[0]?.id ?? null);
+      const next = rows[0]?.id ?? null;
+      setConvId(next);
+      onSyncActiveConversation(next);
     }
   }
 
@@ -218,7 +251,9 @@ export default function BatchChatPanel({
     setStreamText("");
     setError(null);
 
-    // Optimistic user bubble.
+    // Optimistic user bubble — reads the selectedImageUrls from
+    // the parent so it matches what the operator saw in the drawer.
+    const attachedForThisTurn = [...selectedImageUrls];
     const optimistic: ChatMessage = {
       id: `optimistic-${Date.now()}`,
       role: "user",
@@ -226,13 +261,14 @@ export default function BatchChatPanel({
       toolCallsJson: null,
       toolResultJson: null,
       attachedImagesJson:
-        selectedImages.size > 0 ? JSON.stringify([...selectedImages]) : null,
+        attachedForThisTurn.length > 0
+          ? JSON.stringify(attachedForThisTurn)
+          : null,
       createdAt: new Date().toISOString(),
     };
     setMessages((prev) => [...prev, optimistic]);
-    const attachedForThisTurn = [...selectedImages];
     setText("");
-    setSelectedImages(new Set());
+    onClearSelectedImages();
 
     const ac = new AbortController();
     abortRef.current = ac;
@@ -268,7 +304,6 @@ export default function BatchChatPanel({
     } finally {
       setSending(false);
       abortRef.current = null;
-      // Refresh from server so persisted rows replace the optimistic one.
       const r = await getConversationDetail(convId);
       if (r.ok) {
         setMessages(r.messages ?? []);
@@ -311,7 +346,7 @@ export default function BatchChatPanel({
         messageCount: c.messageCount,
       }))}
       activeConversationId={convId}
-      onSelectConversation={setConvId}
+      onSelectConversation={selectConversation}
       onNewConversation={newConversation}
       onDeleteConversation={removeConversation}
       onRenameConversation={rename}
@@ -319,11 +354,9 @@ export default function BatchChatPanel({
       streamingText={streamText}
       agentWorking={sending}
       products={v2Products}
-      currentProductId={currentProductId}
-      onPickProduct={pickProduct}
-      selectedImages={selectedImages}
-      onToggleImage={toggleImage}
-      onClearImages={() => setSelectedImages(new Set())}
+      attachedProductId={attachedProductId}
+      attachedImageCount={selectedImageUrls.size}
+      onOpenProductDetail={onOpenProductDetail}
       text={text}
       onTextChange={setText}
       onSubmit={submitTurn}

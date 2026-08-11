@@ -85,13 +85,23 @@ export interface BatchChatPanelV2Props {
    *  thinking / tool-calling). */
   agentWorking: boolean;
 
-  /* Composer */
+  /* Composer.
+   * The 3-state product refactor moved the picker + reference-
+   * image strip out of the composer and into the product detail
+   * drawer. The composer only surfaces the CURRENTLY-ATTACHED
+   * product as a small pill above the input, plus the image
+   * count. Clicking the pill body opens the drawer for that
+   * product (via onOpenProductDetail). */
   products: V2Product[];
-  currentProductId: string | null;
-  onPickProduct: (id: string | null) => void;
-  selectedImages: Set<string>;
-  onToggleImage: (url: string) => void;
-  onClearImages: () => void;
+  /** Currently-attached product (from Conversation.currentProductId,
+   *  hoisted to the parent). Null when nothing is attached. */
+  attachedProductId: string | null;
+  /** How many reference images the operator picked in the drawer
+   *  for the NEXT chat turn. Rendered on the pill as a small tail. */
+  attachedImageCount: number;
+  /** Open the ProductDetailDrawer for the given product id.
+   *  Wired to the pill's body click. */
+  onOpenProductDetail: (productId: string) => void;
   text: string;
   onTextChange: (t: string) => void;
   onSubmit: () => void;
@@ -111,11 +121,10 @@ export default function BatchChatPanelV2(props: BatchChatPanelV2Props) {
 }
 
 function PanelBody(props: BatchChatPanelV2Props) {
-  const currentProduct = useMemo(
-    () => props.products.find((p) => p.id === props.currentProductId) ?? null,
-    [props.products, props.currentProductId],
+  const attachedProduct = useMemo(
+    () => props.products.find((p) => p.id === props.attachedProductId) ?? null,
+    [props.products, props.attachedProductId],
   );
-  const availableImages = currentProduct?.availableImages ?? [];
   const isPlaceholder = !props.batchName;
 
   // Auto-scroll the transcript to the bottom whenever new messages
@@ -186,7 +195,7 @@ function PanelBody(props: BatchChatPanelV2Props) {
         ) : (
           <>
             {grouped.length === 0 && !props.agentWorking && (
-              <EmptyState hasProduct={!!currentProduct} />
+              <EmptyState hasProduct={!!attachedProduct} />
             )}
             {grouped.map((g, i) => (
               <MessageGroup key={g.key} group={g} isLast={i === grouped.length - 1} />
@@ -199,19 +208,14 @@ function PanelBody(props: BatchChatPanelV2Props) {
       </div>
 
       <ComposerCard
-        currentProduct={currentProduct}
-        products={props.products}
-        onPickProduct={props.onPickProduct}
-        availableImages={availableImages}
-        selectedImages={props.selectedImages}
-        onToggleImage={props.onToggleImage}
-        onClearImages={props.onClearImages}
+        attachedProduct={attachedProduct}
+        attachedImageCount={props.attachedImageCount}
+        onOpenProductDetail={props.onOpenProductDetail}
         text={props.text}
         onTextChange={props.onTextChange}
         onSubmit={props.onSubmit}
         sending={props.sending}
         activeConversationId={props.activeConversationId}
-        onDeleteConversation={props.onDeleteConversation}
         placeholderMode={isPlaceholder}
       />
     </section>
@@ -645,43 +649,47 @@ function WorkingIndicator({ streamingText }: { streamingText: string }) {
 }
 
 /* ==================================================================
- * Composer — one unified glass card
+ * Composer — attached-product pill above a bare textarea + send.
+ *
+ * The product picker + reference-image strip used to live here.
+ * Post-refactor the picker moved to the batch grid (chips) and
+ * the image strip moved to the ProductDetailDrawer. Only the
+ * ATTACHED product surfaces here, as a small pill above the
+ * input. Clicking the pill body opens the drawer for that
+ * product; clicking the × detaches.
  * ================================================================ */
 
 function ComposerCard({
-  currentProduct,
-  products,
-  onPickProduct,
-  availableImages,
-  selectedImages,
-  onToggleImage,
-  onClearImages,
+  attachedProduct,
+  attachedImageCount,
+  onOpenProductDetail,
   text,
   onTextChange,
   onSubmit,
   sending,
   activeConversationId,
-  onDeleteConversation,
   placeholderMode,
 }: {
-  currentProduct: V2Product | null;
-  products: V2Product[];
-  onPickProduct: (id: string | null) => void;
-  availableImages: string[];
-  selectedImages: Set<string>;
-  onToggleImage: (url: string) => void;
-  onClearImages: () => void;
+  attachedProduct: V2Product | null;
+  attachedImageCount: number;
+  onOpenProductDetail: (productId: string) => void;
   text: string;
   onTextChange: (t: string) => void;
   onSubmit: () => void;
   sending: boolean;
   activeConversationId: string | null;
-  onDeleteConversation: (id: string) => void;
   placeholderMode: boolean;
 }) {
   const disabled = placeholderMode;
   return (
-    <div className="p-4 pt-3">
+    <div className="p-4 pt-3 space-y-2">
+      {attachedProduct && !disabled && (
+        <AttachedProductPill
+          product={attachedProduct}
+          imageCount={attachedImageCount}
+          onOpen={() => onOpenProductDetail(attachedProduct.id)}
+        />
+      )}
       <div
         className={
           "rounded-2xl border overflow-hidden transition-opacity " +
@@ -690,91 +698,7 @@ function ComposerCard({
             : "border-border bg-panel")
         }
       >
-        {/* Row 1: product tag + delete-chat action */}
-        <div className="px-4 pt-3 pb-2 flex items-center gap-3">
-          <span className="eyebrow text-muted shrink-0">Product</span>
-          <div className="flex-1 min-w-0">
-            <ProductDropdown
-              products={products}
-              value={currentProduct?.id ?? null}
-              onChange={onPickProduct}
-              disabled={disabled}
-              placeholder={
-                placeholderMode
-                  ? "— import a batch to focus a product —"
-                  : "— none focused —"
-              }
-            />
-          </div>
-          {activeConversationId && !disabled && (
-            <button
-              type="button"
-              onClick={() => {
-                if (confirm("Delete this conversation?")) {
-                  onDeleteConversation(activeConversationId);
-                }
-              }}
-              className="text-[10px] text-muted hover:text-accent-red transition-colors shrink-0"
-              title="Delete this conversation"
-            >
-              Delete chat
-            </button>
-          )}
-        </div>
-
-        {/* Row 2: reference-image strip with edge fade masks */}
-        {availableImages.length > 0 && (
-          <div className="border-t border-border">
-            <div className="px-4 pt-2 pb-1 flex items-center justify-between">
-              <span className="eyebrow text-muted">Reference images</span>
-              {selectedImages.size > 0 && (
-                <button
-                  type="button"
-                  onClick={onClearImages}
-                  className="text-[10px] text-muted hover:text-text"
-                >
-                  Clear ({selectedImages.size})
-                </button>
-              )}
-            </div>
-            <FadeScroller>
-              <div className="flex gap-2 px-4 pb-3">
-                {availableImages.map((url) => {
-                  const isOn = selectedImages.has(url);
-                  return (
-                    <button
-                      key={url}
-                      type="button"
-                      onClick={() => onToggleImage(url)}
-                      className={
-                        "shrink-0 w-24 h-24 rounded-xl border overflow-hidden relative transition-all duration-150 " +
-                        (isOn
-                          ? "border-accent ring-2 ring-accent/60"
-                          : "border-border opacity-70 hover:opacity-100 hover:-translate-y-0.5")
-                      }
-                      title={url}
-                    >
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img
-                        src={url}
-                        alt="ref"
-                        className="w-full h-full object-cover"
-                      />
-                      {isOn && (
-                        <span className="absolute top-1 right-1 bg-accent text-black text-[10px] rounded-full w-5 h-5 flex items-center justify-center font-bold">
-                          ✓
-                        </span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            </FadeScroller>
-          </div>
-        )}
-
-        {/* Row 3: textarea (bubble-less, integrated) + send button */}
-        <div className="border-t border-border p-3 pt-2 flex items-end gap-2">
+        <div className="p-3 flex items-end gap-2">
           <textarea
             rows={4}
             value={text}
@@ -788,9 +712,9 @@ function ComposerCard({
             placeholder={
               placeholderMode
                 ? "Import a batch below to unlock the agent…"
-                : currentProduct
-                  ? `Ask about ${currentProduct.name}…`
-                  : "Ask the agent…"
+                : attachedProduct
+                  ? `Ask about ${attachedProduct.name}…`
+                  : "Ask the agent — click a product chip below to attach one for context…"
             }
             disabled={disabled || sending || !activeConversationId}
             className="flex-1 min-h-[96px] bg-transparent border-none text-[13.5px] leading-relaxed text-text placeholder:text-muted2 resize-y focus:outline-none focus:ring-0 px-1 disabled:cursor-not-allowed"
@@ -810,198 +734,63 @@ function ComposerCard({
 }
 
 /* ==================================================================
- * ProductDropdown — dark themed <select> replacement.
+ * AttachedProductPill — state 3 of the 3-state product pattern.
  *
- * The native <select>'s open popup is browser-controlled and
- * paints in the OS's default light colours over our dark panel,
- * which looks broken. This is a lightweight custom control that:
- *   - matches the panel's dark aesthetic (bg-panel, hairline
- *     border, 12px radius)
- *   - closes on outside click, Escape, or selection
- *   - supports arrow-key + Enter navigation when open
- *   - falls back to a plain text trigger when disabled
+ * Small pill above the chat input: thumbnail + name + optional
+ * "N images" tail + × detach. Clicking the body (not the ×) opens
+ * the ProductDetailDrawer for the attached product. Detach is
+ * fired via the parent's setConversationProduct(null) — done in
+ * PromptsHubClient, not here — so we just call onDetach.
  *
- * Positioned absolutely BELOW the trigger. If the composer is
- * near the bottom of the viewport the drawer's natural scroll
- * takes over — we deliberately don't do "flip up" logic because
- * the panel body is short enough that below always fits.
+ * The × button also stops propagation so a click on it doesn't
+ * also trigger onOpen.
  * ================================================================ */
 
-function ProductDropdown({
-  products,
-  value,
-  onChange,
-  disabled,
-  placeholder,
+function AttachedProductPill({
+  product,
+  imageCount,
+  onOpen,
 }: {
-  products: V2Product[];
-  value: string | null;
-  onChange: (id: string | null) => void;
-  disabled: boolean;
-  placeholder: string;
+  product: V2Product;
+  imageCount: number;
+  onOpen: () => void;
 }) {
-  const [open, setOpen] = useState(false);
-  const [activeIdx, setActiveIdx] = useState<number>(-1);
-  const wrapRef = useRef<HTMLDivElement>(null);
-  const listRef = useRef<HTMLDivElement>(null);
-
-  // Options: a synthetic "none" row at the top plus each product.
-  const options = useMemo(
-    () => [{ id: "", name: placeholder }, ...products.map((p) => ({ id: p.id, name: p.name }))],
-    [products, placeholder],
-  );
-  const currentIdx = options.findIndex((o) => o.id === (value ?? ""));
-  const label =
-    currentIdx > 0 ? options[currentIdx]!.name : placeholder;
-
-  // Close on outside click or Escape.
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (!wrapRef.current) return;
-      if (!wrapRef.current.contains(e.target as Node)) setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        setOpen(false);
-        return;
-      }
-      if (e.key === "ArrowDown") {
-        e.preventDefault();
-        setActiveIdx((i) => Math.min(options.length - 1, i + 1));
-      } else if (e.key === "ArrowUp") {
-        e.preventDefault();
-        setActiveIdx((i) => Math.max(0, i - 1));
-      } else if (e.key === "Enter") {
-        e.preventDefault();
-        if (activeIdx >= 0) {
-          const opt = options[activeIdx];
-          if (opt) {
-            onChange(opt.id || null);
-            setOpen(false);
-          }
-        }
-      }
-    };
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open, options, activeIdx, onChange]);
-
-  // Scroll the active option into view as the user arrow-keys.
-  useEffect(() => {
-    if (!open || activeIdx < 0 || !listRef.current) return;
-    const el = listRef.current.children[activeIdx] as HTMLElement | undefined;
-    if (el) el.scrollIntoView({ block: "nearest" });
-  }, [activeIdx, open]);
-
   return (
-    <div ref={wrapRef} className="relative">
-      <button
-        type="button"
-        onClick={() => {
-          if (disabled) return;
-          setOpen((v) => !v);
-          // Seed the active row with whatever's already selected
-          // so arrow-down starts from a sensible place.
-          setActiveIdx(currentIdx >= 0 ? currentIdx : 0);
-        }}
-        disabled={disabled}
-        className={
-          "w-full flex items-center gap-2 text-[12.5px] text-left focus:outline-none disabled:cursor-not-allowed " +
-          (disabled ? "text-muted" : "text-text hover:text-text")
-        }
-      >
-        <span className="flex-1 min-w-0 truncate">{label}</span>
-        {!disabled && (
-          <span
-            aria-hidden="true"
-            className={
-              "text-muted2 text-[10px] shrink-0 transition-transform " +
-              (open ? "rotate-180" : "")
-            }
-          >
-            ▾
-          </span>
-        )}
-      </button>
-      {open && (
-        <div
-          role="listbox"
-          className="absolute z-50 mt-2 left-0 right-0 rounded-xl border border-border overflow-hidden shadow-2xl"
-          style={{
-            background:
-              "linear-gradient(180deg, rgba(20,20,22,0.98) 0%, rgba(20,20,22,0.94) 100%)",
-            backdropFilter: "blur(20px) saturate(140%)",
-            WebkitBackdropFilter: "blur(20px) saturate(140%)",
-          }}
-        >
-          <div
-            ref={listRef}
-            className="max-h-64 overflow-y-auto py-1"
-          >
-            {options.map((opt, i) => {
-              const isSelected = opt.id === (value ?? "");
-              const isActive = i === activeIdx;
-              const isNone = i === 0;
-              return (
-                <button
-                  key={opt.id || "__none__"}
-                  type="button"
-                  role="option"
-                  aria-selected={isSelected}
-                  onMouseEnter={() => setActiveIdx(i)}
-                  onClick={() => {
-                    onChange(opt.id || null);
-                    setOpen(false);
-                  }}
-                  className={
-                    "w-full text-left text-[12.5px] leading-snug px-3 py-2 flex items-center gap-2 transition-colors " +
-                    (isNone ? "italic text-muted " : "text-text ") +
-                    (isActive ? "bg-accent/10 " : "hover:bg-accent/[0.06] ")
-                  }
-                >
-                  <span
-                    aria-hidden="true"
-                    className={
-                      "w-1 h-1 rounded-full shrink-0 " +
-                      (isSelected ? "bg-accent" : "bg-transparent")
-                    }
-                  />
-                  <span className="flex-1 min-w-0 truncate">{opt.name}</span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-/* ==================================================================
- * Horizontal fade-scroller — CSS mask that softens the edge cutoff
- * for the reference-image strip.
- * ================================================================ */
-
-function FadeScroller({ children }: { children: React.ReactNode }) {
-  return (
-    <div
-      className="overflow-x-auto"
+    <button
+      type="button"
+      onClick={onOpen}
+      title={`Open ${product.name} detail — click × to detach in the drawer`}
+      className="chat-appear group w-full flex items-center gap-2.5 px-3 py-2 rounded-full border transition-all duration-150 hover:-translate-y-0.5 hover:border-accent/60"
       style={{
-        WebkitMaskImage:
-          "linear-gradient(to right, transparent 0, #000 16px, #000 calc(100% - 16px), transparent 100%)",
-        maskImage:
-          "linear-gradient(to right, transparent 0, #000 16px, #000 calc(100% - 16px), transparent 100%)",
+        background: "rgba(42,184,245,0.08)",
+        borderColor: "rgba(42,184,245,0.35)",
       }}
     >
-      {children}
-    </div>
+      <div className="w-7 h-7 rounded-full overflow-hidden bg-panel2 shrink-0">
+        {product.availableImages[0] ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={product.availableImages[0]}
+            alt=""
+            className="w-full h-full object-cover"
+          />
+        ) : null}
+      </div>
+      <span className="text-[11px] uppercase tracking-[0.14em] text-accent shrink-0">
+        Attached
+      </span>
+      <span className="text-[12.5px] text-text truncate flex-1 min-w-0 text-left">
+        {product.name}
+      </span>
+      {imageCount > 0 && (
+        <span className="text-[10px] text-muted shrink-0">
+          · {imageCount} image{imageCount === 1 ? "" : "s"}
+        </span>
+      )}
+    </button>
   );
 }
+
 
 /* ==================================================================
  * Error banner

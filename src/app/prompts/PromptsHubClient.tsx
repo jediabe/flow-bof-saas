@@ -24,6 +24,7 @@ import {
   type Style1Kit,
 } from "@/lib/ai/style1";
 import BatchChatPanel from "./BatchChatPanel";
+import { setConversationProduct } from "./chat-actions";
 
 /**
  * /prompts hub — redesigned around a product-card grid + mobile
@@ -132,6 +133,68 @@ export default function PromptsHubClient({
     };
   }, [activeBatchId, router]);
 
+  // Hoisted state — the "3-state product card pattern" needs the
+  // drawer target, the attached-to-conversation product, and the
+  // per-turn selected images all available to BOTH the batch grid
+  // AND the chat panel. Living here (topmost /prompts client)
+  // keeps the two surfaces in sync without prop-drilling through
+  // ActiveBatchView's children.
+  const [openProductId, setOpenProductId] = useState<string | null>(null);
+  const [attachedProductId, setAttachedProductId] = useState<string | null>(null);
+  const [selectedImageUrls, setSelectedImageUrls] = useState<Set<string>>(
+    new Set(),
+  );
+  const [importOpen, setImportOpen] = useState(false);
+  const [activeConvId, setActiveConvId] = useState<string | null>(null);
+
+  // When the URL batch changes, reset ephemeral state so we don't
+  // carry an attached product across batches. Server-persisted
+  // attachment (Conversation.currentProductId) is reloaded from
+  // the chat panel on batch change; we defer to that seed value.
+  useEffect(() => {
+    setOpenProductId(null);
+    setAttachedProductId(null);
+    setSelectedImageUrls(new Set());
+    setActiveConvId(null);
+  }, [activeBatchId]);
+
+  const products = state?.products ?? [];
+  const openProduct =
+    openProductId != null
+      ? products.find((p) => p.id === openProductId) ?? null
+      : null;
+
+  // Handlers threaded down. Attach + Detach both call the same
+  // server action (setConversationProduct) via the chat panel's
+  // exposed onSetAttached callback.
+  async function attachProduct(id: string) {
+    if (!activeConvId) return;
+    const r = await setConversationProduct({
+      conversationId: activeConvId,
+      productId: id,
+    });
+    if (r.ok) setAttachedProductId(id);
+  }
+  async function detachProduct() {
+    if (!activeConvId) return;
+    const r = await setConversationProduct({
+      conversationId: activeConvId,
+      productId: null,
+    });
+    if (r.ok) {
+      setAttachedProductId(null);
+      setSelectedImageUrls(new Set());
+    }
+  }
+  function toggleImage(url: string) {
+    setSelectedImageUrls((prev) => {
+      const next = new Set(prev);
+      if (next.has(url)) next.delete(url);
+      else next.add(url);
+      return next;
+    });
+  }
+
   return (
     <div className="space-y-6">
       {/* Chat agent — always at the top. Renders in placeholder
@@ -139,35 +202,79 @@ export default function PromptsHubClient({
       <BatchChatPanel
         batchId={state?.batchId ?? null}
         batchName={state?.batchName ?? null}
-        products={state?.products ?? []}
-      />
-
-      <KalodataImportBar
-        onImported={(batchId) => {
-          // Preserve state across refresh via URL param — no
-          // localStorage drift.
-          router.replace(`/prompts?batch=${batchId}`);
-        }}
-      />
-
-      <PasteUrlsImportBar
-        onImported={(batchId) => {
-          router.replace(`/prompts?batch=${batchId}`);
-        }}
+        products={products}
+        attachedProductId={attachedProductId}
+        selectedImageUrls={selectedImageUrls}
+        onOpenProductDetail={setOpenProductId}
+        onSyncAttached={(id) => setAttachedProductId(id)}
+        onSyncSelectedImages={(next) => setSelectedImageUrls(next)}
+        onSyncActiveConversation={(id) => setActiveConvId(id)}
+        onClearSelectedImages={() => setSelectedImageUrls(new Set())}
       />
 
       {state && state.batchId ? (
-        <ActiveBatchView state={state} />
+        <ActiveBatchView
+          state={state}
+          attachedProductId={attachedProductId}
+          onOpenProduct={setOpenProductId}
+          onOpenImport={() => setImportOpen(true)}
+        />
       ) : recentBatches.length > 0 ? (
-        <RecentBatchesPanel batches={recentBatches} />
+        <>
+          <div className="flex justify-end">
+            <button
+              type="button"
+              onClick={() => setImportOpen(true)}
+              className="btn btn-primary"
+            >
+              + New batch
+            </button>
+          </div>
+          <RecentBatchesPanel batches={recentBatches} />
+        </>
       ) : (
-        <Panel title="No batches yet" variant="ghost">
-          <EmptyState
-            icon="◇"
-            title="Import a Kalodata workbook to start"
-            hint="Pick an XLSX above. The hub creates a batch, hands you a QR to review products on your phone, and generates all seven APEX hook families as you approve — image prompts too."
-          />
-        </Panel>
+        <GlassPanel title="No batches yet">
+          <div className="text-center py-8">
+            <div className="eyebrow text-muted mb-2">Empty workspace</div>
+            <p className="text-[13px] text-muted max-w-[400px] mx-auto leading-relaxed mb-4">
+              Import a Kalodata sheet or paste TikTok URLs to spin up
+              your first batch. The hub downloads product images and
+              hands you a QR to review each one on your phone; approvals
+              auto-generate hooks and image prompts.
+            </p>
+            <button
+              type="button"
+              onClick={() => setImportOpen(true)}
+              className="btn btn-primary"
+            >
+              + New batch
+            </button>
+          </div>
+        </GlassPanel>
+      )}
+
+      <ImportProductsModal
+        open={importOpen}
+        onClose={() => setImportOpen(false)}
+        onImported={(batchId) => {
+          router.replace(`/prompts?batch=${batchId}`);
+        }}
+      />
+
+      {openProduct && (
+        <ProductDetailDrawer
+          product={openProduct}
+          isAttached={attachedProductId === openProduct.id}
+          selectedImageUrls={selectedImageUrls}
+          onToggleImage={toggleImage}
+          onAttach={() => {
+            void attachProduct(openProduct.id);
+          }}
+          onDetach={() => {
+            void detachProduct();
+          }}
+          onClose={() => setOpenProductId(null)}
+        />
       )}
     </div>
   );
@@ -438,7 +545,17 @@ function RecentBatchesPanel({ batches }: { batches: RecentBatchSummary[] }) {
  * Active batch view
  * ------------------------------------------------------------ */
 
-function ActiveBatchView({ state }: { state: BatchPromptsState }) {
+function ActiveBatchView({
+  state,
+  attachedProductId,
+  onOpenProduct,
+  onOpenImport,
+}: {
+  state: BatchPromptsState;
+  attachedProductId: string | null;
+  onOpenProduct: (id: string) => void;
+  onOpenImport: () => void;
+}) {
   const router = useRouter();
   const [regenPending, startRegenTransition] = useTransition();
   const [regenMsg, setRegenMsg] = useState<string | null>(null);
@@ -512,22 +629,33 @@ function ActiveBatchView({ state }: { state: BatchPromptsState }) {
 
   return (
     <>
-      {/* Batch header ------------------------------------------------ */}
-      <Panel
+      {/* Batch header — glass-panel treated */}
+      <GlassPanel
         title={state.batchName ?? "Active batch"}
         action={
-          <button
-            type="button"
-            onClick={() => router.replace("/prompts")}
-            className="text-[11px] text-muted hover:text-text transition-colors"
-          >
-            Close batch
-          </button>
+          <div className="flex items-center gap-4">
+            <button
+              type="button"
+              onClick={onOpenImport}
+              className="text-[12px] text-accent hover:text-accent-purple transition-colors font-medium"
+              title="Import a new batch"
+            >
+              + New batch
+            </button>
+            <button
+              type="button"
+              onClick={() => router.replace("/prompts")}
+              className="text-[12px] text-muted hover:text-text transition-colors"
+            >
+              Close batch
+            </button>
+          </div>
         }
       >
-        <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_240px] gap-6 items-start">
-          {/* Counts + regenerate control */}
-          <div className="space-y-4">
+        <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_200px] gap-8 items-start">
+          {/* Counts + actions */}
+          <div className="space-y-6">
+            {/* Status pill row */}
             <div className="flex gap-2 flex-wrap">
               <StatusChip
                 label={`${counts.needs_review} needs review`}
@@ -544,58 +672,55 @@ function ActiveBatchView({ state }: { state: BatchPromptsState }) {
               />
             </div>
 
-            <div>
-              <div className="flex items-center gap-3 flex-wrap">
-                {counts.approved > 0 ? (
-                  <button
-                    type="button"
-                    onClick={regenerate}
-                    disabled={regenPending}
-                    className="btn btn-sm"
-                    title={
-                      approvedMissingHooks > 0
-                        ? `${approvedMissingHooks} approved product${approvedMissingHooks === 1 ? "" : "s"} still missing hooks — regenerate now.`
-                        : "Force-regenerate hooks for every approved product using each product's current discount %."
-                    }
-                  >
-                    {regenPending
-                      ? "Regenerating…"
-                      : approvedMissingHooks > 0
-                        ? `Generate hooks for ${approvedMissingHooks} approved`
-                        : "Regenerate all approved"}
-                  </button>
-                ) : (
-                  <span className="text-[11px] text-muted italic">
-                    Approve products on your phone to auto-generate hooks.
-                  </span>
-                )}
-                {regenMsg && (
-                  <span className="text-[11px] text-muted">{regenMsg}</span>
-                )}
+            {/* Actions row — bumped spacing above per the design ask */}
+            <div className="flex items-center gap-3 flex-wrap">
+              {counts.approved > 0 ? (
                 <button
                   type="button"
-                  onClick={reEnrichBatch}
-                  disabled={enrichPending}
+                  onClick={regenerate}
+                  disabled={regenPending}
                   className="btn btn-sm"
-                  title="Re-run TikHub product-detail enrichment on every product in this batch. Overwrites source images + description with the freshest TikHub data; doesn't touch operator-supplied discount % / type."
+                  title={
+                    approvedMissingHooks > 0
+                      ? `${approvedMissingHooks} approved product${approvedMissingHooks === 1 ? "" : "s"} still missing hooks — regenerate now.`
+                      : "Force-regenerate hooks for every approved product using each product's current discount %."
+                  }
                 >
-                  {enrichPending
-                    ? "Re-enriching…"
-                    : "Re-enrich from TikHub"}
+                  {regenPending
+                    ? "Regenerating…"
+                    : approvedMissingHooks > 0
+                      ? `Generate hooks for ${approvedMissingHooks} approved`
+                      : "Regenerate all approved"}
                 </button>
-                {enrichMsg && (
-                  <span className="text-[11px] text-muted">{enrichMsg}</span>
-                )}
-              </div>
+              ) : (
+                <span className="text-[11px] text-muted italic">
+                  Approve products on your phone to auto-generate hooks.
+                </span>
+              )}
+              {regenMsg && (
+                <span className="text-[11px] text-muted">{regenMsg}</span>
+              )}
+              <button
+                type="button"
+                onClick={reEnrichBatch}
+                disabled={enrichPending}
+                className="btn btn-sm"
+                title="Re-run TikHub product-detail enrichment on every product in this batch. Overwrites source images + description with the freshest TikHub data; doesn't touch operator-supplied discount % / type."
+              >
+                {enrichPending
+                  ? "Re-enriching…"
+                  : "Re-enrich from TikHub"}
+              </button>
+              {enrichMsg && (
+                <span className="text-[11px] text-muted">{enrichMsg}</span>
+              )}
             </div>
           </div>
 
-          {/* Review QR — compact panel on the right */}
+          {/* Review QR — right column of the header */}
           {state.reviewUrl && (
             <div className="space-y-2">
-              <div className="text-[10px] uppercase tracking-[0.14em] text-muted">
-                Review on phone
-              </div>
+              <div className="eyebrow text-muted">Review on phone</div>
               {state.reviewQrDataUrl ? (
                 <div className="bg-white rounded-2xl p-3 inline-block">
                   {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -618,34 +743,37 @@ function ActiveBatchView({ state }: { state: BatchPromptsState }) {
             </div>
           )}
         </div>
-      </Panel>
+      </GlassPanel>
 
-      {/* Product-card grid ----------------------------------------- */}
-      <Panel
+      {/* Product chip grid — state 1 of the 3-state pattern. */}
+      <GlassPanel
         title="Products"
         action={
           <span className="text-[11px] text-muted">
-            Click a card to view hooks
+            Click a chip to view details
           </span>
         }
       >
         {products.length === 0 ? (
-          <EmptyState
-            icon="◇"
-            title="No products in this batch"
-            hint="Import a Kalodata workbook to populate a batch."
-          />
+          <div className="text-center py-6 text-[13px] text-muted">
+            No products in this batch. Import a Kalodata workbook or
+            paste TikTok URLs from the batch header.
+          </div>
         ) : (
-          <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2.5">
             {products.map((p) => (
-              <ProductPromptCard key={p.id} product={p} />
+              <ProductChip
+                key={p.id}
+                product={p}
+                isAttached={attachedProductId === p.id}
+                onOpen={() => onOpenProduct(p.id)}
+              />
             ))}
           </div>
         )}
-      </Panel>
+      </GlassPanel>
 
-      {/* Mobile-posting QR — appears when there's actually work
-          to post. */}
+      {/* Mobile-posting QR — glass-panel treated */}
       {counts.hasHooks > 0 && state.postingUrl && (
         <MobilePostingQrPanel
           postingUrl={state.postingUrl}
@@ -659,112 +787,13 @@ function ActiveBatchView({ state }: { state: BatchPromptsState }) {
 }
 
 /* --------------------------------------------------------------
- * Product card
+ * Product card — the legacy full-card ProductPromptCard +
+ * centered ProductKitModal were superseded by the 3-state chip
+ * pattern (ProductChip + ProductDetailDrawer, both at the top of
+ * this file). GenerationStatePill is no longer used by the chip
+ * (hooks show as a compact "N hooks" tail); keeping it defined
+ * in case any other surface adopts it later.
  * ------------------------------------------------------------ */
-
-function ProductPromptCard({ product }: { product: BatchPromptsProduct }) {
-  const [open, setOpen] = useState(false);
-
-  // Ready = has a Style 1 kit OR (legacy) has the flat hook fields.
-  // parseStyle1Kit is deliberately not called here (a JSON.parse per
-  // card per poll would be wasteful); presence of the raw string is
-  // enough to know generation succeeded.
-  const hasHooks =
-    !!product.style1Kit || product.hookVariants.length > 0 || !!product.hook;
-  const status = product.reviewStatus;
-
-  // Card visual treatment mirrors the batches product cards but
-  // pulls in APEX left-border accents based on state — blue for
-  // approved-with-hooks (ready), red for rejected, muted for
-  // needs_review.
-  const cardTone: "ready" | "generating" | "rejected" | "pending" =
-    status === "rejected"
-      ? "rejected"
-      : status === "approved" && hasHooks
-        ? "ready"
-        : status === "approved"
-          ? "generating"
-          : "pending";
-
-  const wrapperClass =
-    cardTone === "ready"
-      ? "card-accent-blue"
-      : cardTone === "rejected"
-        ? "card-accent-red opacity-60"
-        : "panel";
-
-  return (
-    <>
-      <button
-        type="button"
-        onClick={() => (hasHooks ? setOpen(true) : undefined)}
-        disabled={!hasHooks}
-        className={`${wrapperClass} p-3 text-left transition-colors ${hasHooks ? "hover:border-border-strong cursor-pointer" : "cursor-default"}`}
-      >
-        {/* Image */}
-        <div className="aspect-square rounded-xl overflow-hidden bg-panel2 border border-border mb-3 flex items-center justify-center">
-          {product.referenceImageUrl ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={product.referenceImageUrl}
-              alt={product.productName}
-              className="w-full h-full object-cover"
-            />
-          ) : product.imageUrl ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={product.imageUrl}
-              alt={product.productName}
-              className="w-full h-full object-cover"
-            />
-          ) : (
-            <div className="text-muted2 text-[10px]">No image</div>
-          )}
-        </div>
-
-        {/* Name */}
-        <div
-          className="text-[13px] font-medium text-text leading-tight mb-2"
-          title={product.productName}
-          style={{
-            display: "-webkit-box",
-            WebkitLineClamp: 2,
-            WebkitBoxOrient: "vertical",
-            overflow: "hidden",
-          }}
-        >
-          {product.productName}
-        </div>
-
-        {/* Review-status chip + discount % badge — persistent
-            identity signals that don't depend on gen state. */}
-        <div className="flex items-center gap-1.5 flex-wrap mb-1.5">
-          <StatusPill status={status} />
-          {product.discountPercent != null && (
-            <span className="text-[10px] font-mono text-accent-red border border-accent-red/40 bg-accent-red/[0.08] rounded-full px-1.5 py-0.5">
-              −{product.discountPercent}%
-            </span>
-          )}
-        </div>
-
-        {/* One clear generation-state chip. Style 1 kit takes
-            precedence for the "N hooks" count (15 total across
-            three parts when generation ran cleanly); legacy hook
-            variants only for pre-Style-1 rows. */}
-        <GenerationStatePill
-          cardTone={cardTone}
-          hookCount={style1HookCount(product) ?? product.hookVariants.length}
-          aiPromptError={product.aiPromptError}
-          generatedAt={product.aiPromptGeneratedAt}
-        />
-      </button>
-
-      {open && (
-        <ProductKitModal product={product} onClose={() => setOpen(false)} />
-      )}
-    </>
-  );
-}
 
 function StatusPill({ status }: { status: string }) {
   const tone: "ok" | "warn" | "bad" | "muted" =
@@ -899,101 +928,6 @@ function style1HookCount(p: BatchPromptsProduct): number | null {
     kit.copy.part1Options.length +
     kit.copy.part2Options.length +
     kit.copy.part3Options.length
-  );
-}
-
-/**
- * Product kit modal — Style 1's full video kit as the primary
- * shape. Legacy 7-family products (no style1Kit) render a
- * "regenerate to get the Style 1 kit" empty state.
- */
-function ProductKitModal({
-  product,
-  onClose,
-}: {
-  product: BatchPromptsProduct;
-  onClose: () => void;
-}) {
-  // Escape key closes.
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") onClose();
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
-  const kit = useMemo(
-    () => parseStyle1Kit(product.style1Kit),
-    [product.style1Kit],
-  );
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-start justify-center p-4 md:p-8 overflow-y-auto"
-      style={{ background: "rgba(10,16,32,0.7)" }}
-      onClick={onClose}
-    >
-      <div
-        className="panel max-w-3xl w-full my-8 relative"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* Header — product identity + close */}
-        <div className="p-5 border-b border-border flex items-start gap-4">
-          <div className="w-16 h-16 rounded-xl overflow-hidden border border-border bg-panel2 flex-shrink-0">
-            {product.referenceImageUrl ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={product.referenceImageUrl}
-                alt={product.productName}
-                className="w-full h-full object-cover"
-              />
-            ) : product.imageUrl ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={product.imageUrl}
-                alt={product.productName}
-                className="w-full h-full object-cover"
-              />
-            ) : null}
-          </div>
-          <div className="flex-1 min-w-0">
-            <div className="text-sm font-semibold text-text">
-              {kit?.productName || product.productName}
-            </div>
-            <div className="text-[11px] text-muted mt-1 flex items-center gap-2 flex-wrap">
-              {product.discountPercent != null && (
-                <span className="font-mono text-accent-red">
-                  −{product.discountPercent}%
-                </span>
-              )}
-              {kit?.market && <span>{kit.market}</span>}
-              {kit?.category && <span>· {kit.category}</span>}
-              {product.category && !kit && (
-                <span>{product.category}</span>
-              )}
-            </div>
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="text-muted hover:text-text transition-colors text-lg leading-none w-7 h-7 flex items-center justify-center rounded-full"
-            aria-label="Close"
-          >
-            ×
-          </button>
-        </div>
-
-        {/* Body */}
-        <div className="p-5 space-y-5">
-          {kit ? (
-            <Style1KitContents kit={kit} product={product} />
-          ) : (
-            <LegacyProductContents product={product} />
-          )}
-        </div>
-      </div>
-    </div>
   );
 }
 
@@ -1520,8 +1454,8 @@ function MobilePostingQrPanel({
   }
 
   return (
-    <Panel title="Post from your phone">
-      <div className="grid grid-cols-1 md:grid-cols-[240px_1fr] gap-6 items-start">
+    <GlassPanel title="Post from your phone">
+      <div className="grid grid-cols-1 md:grid-cols-[240px_1fr] gap-8 items-start">
         <div>
           {postingQrDataUrl ? (
             <div className="bg-white rounded-2xl p-3 inline-block">
@@ -1566,7 +1500,7 @@ function MobilePostingQrPanel({
           <div className="text-[10px] text-muted2 break-all">{postingUrl}</div>
         </div>
       </div>
-    </Panel>
+    </GlassPanel>
   );
 }
 
@@ -1661,5 +1595,449 @@ function CopyButton({
     >
       {copied ? "✓ copied" : (label ?? "copy")}
     </button>
+  );
+}
+
+/* ================================================================
+ * 3-state product card pattern
+ * ================================================================
+ *
+ * State 1 — ProductChip: compact horizontal chip used in the batch
+ *           grid. Full-card click opens state 2. Hover lift + subtle
+ *           blue-glow border. Blue left-accent bar for
+ *           approved-with-hooks products (kept from the old card).
+ * State 2 — ProductDetailDrawer: right-side glass drawer with the
+ *           full gallery + hooks/prompts + "Attach to conversation"
+ *           button. Reuses the existing Style1KitContents /
+ *           LegacyProductContents render bodies.
+ * State 3 — AttachedProductPill: single small pill above the chat
+ *           input. Not defined here — lives inside the chat panel
+ *           (composer) where it needs to be.
+ *
+ * The reference-image strip is REMOVED from the chat composer and
+ * moved inside state 2 — you pick which images to attach in the
+ * drawer, and the chat only shows the compact pill.
+ * ================================================================ */
+
+/**
+ * Compact horizontal chip. Full-card <button> so click anywhere
+ * opens the drawer. Hover lift + gradient-glow border. Left-accent
+ * bar (blue when ready-and-attached, blue when approved+hooks,
+ * red when rejected, muted otherwise) preserves the existing
+ * status-at-a-glance UX.
+ */
+function ProductChip({
+  product,
+  isAttached,
+  onOpen,
+}: {
+  product: BatchPromptsProduct;
+  isAttached: boolean;
+  onOpen: () => void;
+}) {
+  const hasHooks =
+    !!product.style1Kit ||
+    product.hookVariants.length > 0 ||
+    !!product.hook;
+  const status = product.reviewStatus;
+  const tone: "ready" | "rejected" | "pending" =
+    status === "rejected"
+      ? "rejected"
+      : status === "approved" && hasHooks
+        ? "ready"
+        : "pending";
+  const accentClass =
+    tone === "ready"
+      ? "card-accent-blue"
+      : tone === "rejected"
+        ? "card-accent-red opacity-70"
+        : "panel";
+  const hookCount = style1HookCount(product) ?? product.hookVariants.length;
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className={
+        `${accentClass} group w-full flex items-center gap-3 p-2.5 pr-3 text-left transition-all duration-150 hover:-translate-y-0.5 hover:border-accent/40 focus:outline-none focus:ring-2 focus:ring-accent/40 ` +
+        (isAttached ? "ring-2 ring-accent/40 " : "")
+      }
+      title={product.productName}
+    >
+      {/* Thumbnail — 44px per the spec (40-48px range). */}
+      <div className="w-11 h-11 shrink-0 rounded-lg overflow-hidden bg-panel2 border border-border">
+        {product.referenceImageUrl || product.imageUrl ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={(product.referenceImageUrl || product.imageUrl) as string}
+            alt=""
+            className="w-full h-full object-cover"
+          />
+        ) : (
+          <div className="w-full h-full flex items-center justify-center text-[9px] text-muted2">
+            —
+          </div>
+        )}
+      </div>
+      {/* Name + status pill + hook count / discount, compact. */}
+      <div className="flex-1 min-w-0">
+        <div
+          className="text-[12.5px] font-medium text-text leading-tight mb-1"
+          style={{
+            display: "-webkit-box",
+            WebkitLineClamp: 2,
+            WebkitBoxOrient: "vertical",
+            overflow: "hidden",
+          }}
+        >
+          {product.productName}
+        </div>
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <StatusPill status={status} />
+          {hookCount > 0 && (
+            <span className="text-[10px] font-mono text-muted">
+              {hookCount} {hookCount === 1 ? "hook" : "hooks"}
+            </span>
+          )}
+          {product.discountPercent != null && (
+            <span className="text-[10px] font-mono text-accent-red">
+              −{product.discountPercent}%
+            </span>
+          )}
+          {isAttached && (
+            <span className="text-[9px] uppercase tracking-[0.14em] text-accent">
+              · attached
+            </span>
+          )}
+        </div>
+      </div>
+    </button>
+  );
+}
+
+/**
+ * Right-side glass drawer. State 2 of the 3-state pattern.
+ * Reuses Style1KitContents / LegacyProductContents unchanged so
+ * the display stays consistent with the deprecated ProductKitModal.
+ * The "Attach to conversation" button toggles the product's
+ * attached state on the CURRENT conversation.
+ *
+ * Image selection lives at the parent (ActiveBatchView) and is
+ * threaded down as a controlled multi-select — reference images
+ * ride along with the next chat turn.
+ */
+function ProductDetailDrawer({
+  product,
+  isAttached,
+  selectedImageUrls,
+  onToggleImage,
+  onAttach,
+  onDetach,
+  onClose,
+}: {
+  product: BatchPromptsProduct;
+  isAttached: boolean;
+  selectedImageUrls: Set<string>;
+  onToggleImage: (url: string) => void;
+  onAttach: () => void;
+  onDetach: () => void;
+  onClose: () => void;
+}) {
+  const kit = parseStyle1Kit(product.style1Kit);
+  // Available image URLs for the picker inside the drawer.
+  // Same union we used to compute inside the chat composer,
+  // built here so the drawer owns the picker UI.
+  const availableImages = useMemo(() => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    const push = (u: string | null | undefined) => {
+      if (!u || seen.has(u)) return;
+      seen.add(u);
+      out.push(u);
+    };
+    push(product.referenceImageUrl);
+    push(product.imageUrl);
+    for (const u of product.sourceImages) push(u);
+    return out;
+  }, [product]);
+
+  return (
+    <>
+      <div
+        onClick={onClose}
+        className="fixed inset-0 z-30 bg-black/50 backdrop-blur-sm chat-appear"
+        aria-hidden="true"
+      />
+      <aside
+        role="dialog"
+        aria-label={`Details for ${product.productName}`}
+        className="chat-appear fixed top-0 right-0 z-40 h-screen w-full sm:w-[540px] border-l border-border shadow-2xl flex flex-col"
+        style={{
+          background:
+            "linear-gradient(180deg, rgba(20,20,22,0.86) 0%, rgba(20,20,22,0.72) 100%)",
+          backdropFilter: "blur(20px) saturate(140%)",
+          WebkitBackdropFilter: "blur(20px) saturate(140%)",
+        }}
+      >
+        {/* Header */}
+        <header className="px-5 pt-4 pb-3 flex items-start justify-between gap-4 border-b border-border">
+          <div className="flex items-start gap-3 min-w-0">
+            <div className="w-12 h-12 shrink-0 rounded-lg overflow-hidden bg-panel2 border border-border">
+              {product.referenceImageUrl || product.imageUrl ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={
+                    (product.referenceImageUrl || product.imageUrl) as string
+                  }
+                  alt=""
+                  className="w-full h-full object-cover"
+                />
+              ) : null}
+            </div>
+            <div className="min-w-0">
+              <div className="eyebrow text-muted mb-1">Product detail</div>
+              <div
+                className="text-[14px] font-medium text-text leading-tight"
+                title={product.productName}
+              >
+                {product.productName}
+              </div>
+              <div className="mt-1 flex items-center gap-1.5 flex-wrap">
+                <StatusPill status={product.reviewStatus} />
+                {product.discountPercent != null && (
+                  <span className="text-[10px] font-mono text-accent-red border border-accent-red/40 bg-accent-red/[0.08] rounded-full px-1.5 py-0.5">
+                    −{product.discountPercent}%
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-[12px] text-muted hover:text-text shrink-0 pt-1"
+          >
+            Close
+          </button>
+        </header>
+
+        {/* Scrollable body: reference-image gallery + kit contents. */}
+        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
+          {availableImages.length > 0 && (
+            <DrawerImageGallery
+              images={availableImages}
+              selected={selectedImageUrls}
+              onToggle={onToggleImage}
+            />
+          )}
+
+          {kit ? (
+            <Style1KitContents kit={kit} product={product} />
+          ) : (
+            <LegacyProductContents product={product} />
+          )}
+        </div>
+
+        {/* Sticky footer: primary Attach/Detach + secondary Close. */}
+        <footer className="border-t border-border p-4 flex items-center justify-between gap-3">
+          <div className="text-[11px] text-muted">
+            {isAttached
+              ? `${selectedImageUrls.size} image${selectedImageUrls.size === 1 ? "" : "s"} attached to next turn`
+              : "Attach to send this product's context to the agent."}
+          </div>
+          {isAttached ? (
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={onDetach}
+                className="btn btn-ghost text-[11px] px-3 py-1.5"
+              >
+                Detach
+              </button>
+              <button
+                type="button"
+                onClick={onClose}
+                className="btn btn-primary"
+              >
+                Done
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={onAttach}
+              className="btn btn-primary"
+            >
+              Attach to conversation
+            </button>
+          )}
+        </footer>
+      </aside>
+    </>
+  );
+}
+
+/**
+ * Reference-image gallery inside the drawer. Multi-select — a
+ * subset of these get sent with the NEXT chat turn as
+ * referenceImageUrls. 12px radius, 12px gutters (not edge-to-edge),
+ * scroll horizontally.
+ */
+function DrawerImageGallery({
+  images,
+  selected,
+  onToggle,
+}: {
+  images: string[];
+  selected: Set<string>;
+  onToggle: (url: string) => void;
+}) {
+  return (
+    <section className="space-y-2">
+      <div className="flex items-center justify-between">
+        <div className="eyebrow text-muted">Reference images</div>
+        <div className="text-[10px] text-muted2">
+          {selected.size > 0
+            ? `${selected.size} selected for next turn`
+            : "tap to include with the next chat turn"}
+        </div>
+      </div>
+      <div className="grid grid-cols-3 gap-3">
+        {images.map((url) => {
+          const isOn = selected.has(url);
+          return (
+            <button
+              key={url}
+              type="button"
+              onClick={() => onToggle(url)}
+              className={
+                "relative aspect-square rounded-xl border overflow-hidden transition-all duration-150 " +
+                (isOn
+                  ? "border-accent ring-2 ring-accent/60"
+                  : "border-border opacity-80 hover:opacity-100 hover:-translate-y-0.5 hover:border-border-strong")
+              }
+              title={url}
+            >
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={url}
+                alt=""
+                className="w-full h-full object-cover"
+              />
+              {isOn && (
+                <span className="absolute top-1.5 right-1.5 bg-accent text-black text-[10px] rounded-full w-5 h-5 flex items-center justify-center font-bold">
+                  ✓
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+/**
+ * Import modal — replaces the two always-visible import bars with
+ * a single "+ New" affordance. Wraps the existing KalodataImportBar
+ * + PasteUrlsImportBar so the actual import logic is unchanged.
+ */
+function ImportProductsModal({
+  open,
+  onClose,
+  onImported,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onImported: (batchId: string) => void;
+}) {
+  if (!open) return null;
+  const handleImported = (batchId: string) => {
+    onImported(batchId);
+    onClose();
+  };
+  return (
+    <>
+      <div
+        onClick={onClose}
+        className="fixed inset-0 z-30 bg-black/60 backdrop-blur-sm chat-appear"
+        aria-hidden="true"
+      />
+      <div
+        role="dialog"
+        aria-label="Import products"
+        className="chat-appear fixed inset-0 z-40 flex items-start justify-center overflow-y-auto p-6"
+        onClick={onClose}
+      >
+        <div
+          onClick={(e) => e.stopPropagation()}
+          className="w-full max-w-3xl mt-12 rounded-3xl border border-border shadow-2xl overflow-hidden"
+          style={{
+            background:
+              "linear-gradient(180deg, rgba(20,20,22,0.94) 0%, rgba(20,20,22,0.86) 100%)",
+            backdropFilter: "blur(24px) saturate(140%)",
+            WebkitBackdropFilter: "blur(24px) saturate(140%)",
+          }}
+        >
+          <header className="px-6 pt-5 pb-4 flex items-start justify-between gap-6 border-b border-border">
+            <div>
+              <div className="eyebrow text-muted mb-1">New batch</div>
+              <div className="text-[15px] text-text">
+                Import products from Kalodata or paste TikTok URLs
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={onClose}
+              className="text-[12px] text-muted hover:text-text"
+            >
+              Close
+            </button>
+          </header>
+          <div className="p-6 space-y-5">
+            <KalodataImportBar onImported={handleImported} />
+            <PasteUrlsImportBar onImported={handleImported} />
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+/**
+ * Small glass-panel wrapper used for the review-QR block and the
+ * mobile-posting-QR block, so they visually match the chat card
+ * and the product drawer instead of the flat Panel treatment.
+ */
+function GlassPanel({
+  title,
+  action,
+  children,
+}: {
+  title?: string;
+  action?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <section
+      className="rounded-2xl border border-border overflow-hidden"
+      style={{
+        background:
+          "linear-gradient(180deg, rgba(20,20,22,0.78) 0%, rgba(20,20,22,0.62) 100%)",
+        backdropFilter: "blur(20px) saturate(140%)",
+        WebkitBackdropFilter: "blur(20px) saturate(140%)",
+        boxShadow:
+          "0 12px 40px -8px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.02) inset",
+      }}
+    >
+      {(title || action) && (
+        <header className="px-5 pt-4 pb-3 flex items-center justify-between gap-4 border-b border-border">
+          {title && (
+            <div className="eyebrow text-muted">{title}</div>
+          )}
+          {action}
+        </header>
+      )}
+      <div className="p-5">{children}</div>
+    </section>
   );
 }
