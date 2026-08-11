@@ -49,6 +49,11 @@ import { db } from "@/lib/db";
 import { loadOrCreateSettings } from "@/lib/workspace-settings";
 import { callMcpTool, listMcpTools } from "@/lib/apex-mcp";
 import {
+  resolveLlmCredential,
+  LlmCredentialError,
+  type ResolvedCredential,
+} from "@/lib/llm/credentials";
+import {
   LOCAL_TOOLS,
   LOCAL_TOOL_NAMES,
   runLocalTool,
@@ -129,7 +134,18 @@ async function* runAgentTurnInner(
       id: true,
       batchId: true,
       currentProductId: true,
-      batch: { select: { id: true, workspaceId: true, market: true, name: true } },
+      batch: {
+        select: {
+          id: true,
+          workspaceId: true,
+          market: true,
+          name: true,
+          // Owner userId — used to resolve the user's LLM
+          // credential row (LlmCredential is per-user, not
+          // per-workspace). See src/lib/llm/credentials.ts.
+          workspace: { select: { ownerId: true } },
+        },
+      },
     },
   });
   if (!conv) {
@@ -138,23 +154,64 @@ async function* runAgentTurnInner(
   }
   const workspaceId = conv.batch.workspaceId;
   const batchId = conv.batch.id;
+  const ownerUserId = conv.batch.workspace.ownerId;
 
   const settings = await loadOrCreateSettings(workspaceId);
-  const anthropicKey  = (settings.anthropicApiKey  ?? "").trim();
-  const openrouterKey = (settings.openrouterApiKey ?? "").trim();
 
+  // Try the new credential resolver first (app_key +
+  // eventually user_key + user_oauth). Fall back to legacy
+  // workspace-scoped keys if the resolver has nothing —
+  // required until Phase 8 drops the legacy columns.
   let apiKey: string;
   let baseURL: string | undefined;
   let modelName: string;
   let providerLabel: string;
   let defaultHeaders: Record<string, string> | undefined;
+  let credSource: "resolver" | "legacy_workspace_key";
 
-  if (anthropicKey) {
+  const resolved = await tryResolveLlmCredential(ownerUserId);
+  const anthropicKey  = (settings.anthropicApiKey  ?? "").trim();
+  const openrouterKey = (settings.openrouterApiKey ?? "").trim();
+
+  if (resolved && resolved.apiShape === "anthropic_messages") {
+    // app_key or user_key Anthropic — extract the bearer token
+    // out of the authHeader so the SDK can use it as apiKey.
+    apiKey = resolved.authHeader.replace(/^Bearer\s+/i, "").trim();
+    baseURL = undefined;
+    modelName =
+      (settings.anthropicModel ?? "").trim() || DEFAULT_ANTHROPIC_MODEL;
+    providerLabel = `${resolved.mode}/anthropic`;
+    credSource = "resolver";
+  } else if (resolved && resolved.apiShape === "chat_completions") {
+    // OpenAI Chat Completions direct — the tool-use format is
+    // different from Anthropic's; the loop code below assumes
+    // Anthropic. Land the OpenAI loop in phase 3 alongside
+    // user_key routes. Until then, fail loudly rather than
+    // silently falling back so misconfigured deployments are
+    // obvious.
+    yield {
+      type: "error",
+      message:
+        "OpenAI Chat Completions credential resolved (mode=" +
+        resolved.mode +
+        ") but the OpenAI tool-use loop is not implemented yet — coming in phase 3. For now set APP_ANTHROPIC_API_KEY, or keep using a workspace-scoped Anthropic/OpenRouter key.",
+    };
+    return;
+  } else if (resolved && resolved.apiShape === "responses") {
+    // user_oauth (ChatGPT subscription) lands in phase 4.
+    yield {
+      type: "error",
+      message:
+        "OpenAI Responses credential resolved but the Responses loop is not implemented yet — coming in phase 4.",
+    };
+    return;
+  } else if (anthropicKey) {
     apiKey = anthropicKey;
     baseURL = undefined;
     modelName =
       (settings.anthropicModel ?? "").trim() || DEFAULT_ANTHROPIC_MODEL;
-    providerLabel = "Anthropic";
+    providerLabel = "legacy_workspace/anthropic";
+    credSource = "legacy_workspace_key";
   } else if (openrouterKey) {
     apiKey = openrouterKey;
     // Anthropic SDK appends "/v1/messages"; baseURL must NOT end
@@ -162,7 +219,8 @@ async function* runAgentTurnInner(
     baseURL = "https://openrouter.ai/api";
     modelName =
       (settings.openrouterModel ?? "").trim() || DEFAULT_OPENROUTER_MODEL;
-    providerLabel = "OpenRouter";
+    providerLabel = "legacy_workspace/openrouter";
+    credSource = "legacy_workspace_key";
     const headers: Record<string, string> = {};
     if (settings.openrouterSiteUrl)
       headers["HTTP-Referer"] = settings.openrouterSiteUrl;
@@ -173,7 +231,7 @@ async function* runAgentTurnInner(
     yield {
       type: "error",
       message:
-        "No AI provider key configured. Set an Anthropic OR OpenRouter API key in Settings → AI Providers.",
+        "No LLM credential is configured. Set APP_ANTHROPIC_API_KEY on the app, connect your ChatGPT subscription in Settings, or add a workspace-scoped Anthropic/OpenRouter key.",
     };
     return;
   }
@@ -282,7 +340,7 @@ async function* runAgentTurnInner(
     ...(defaultHeaders ? { defaultHeaders } : {}),
   });
   console.log(
-    `[agent-runner] provider=${providerLabel} model=${modelName} workspace=${workspaceId} batch=${batchId}`,
+    `[agent-runner] source=${credSource} provider=${providerLabel} model=${modelName} workspace=${workspaceId} batch=${batchId} user=${ownerUserId}`,
   );
   // Has the operator picked (or the agent used) a Veo model in
   // this conversation already? Scan every prior assistant turn's
@@ -680,6 +738,37 @@ function extractJobStatus(result: McpResult): string | null {
   // Fallback: top-level status (generation stub shape).
   if (typeof rec.status === "string") return rec.status;
   return null;
+}
+
+/**
+ * Soft variant of resolveLlmCredential — returns null instead of
+ * throwing when no credential exists. Used by the agent-runner to
+ * decide whether to fall through to legacy workspace-scoped keys.
+ * Errors OTHER than "no_usable_credential" (decrypt failure, bad
+ * OAuth grant) are logged and treated as "credential broken → try
+ * the next fallback" — we don't want a single corrupt row to
+ * break a whole workspace's chat.
+ */
+async function tryResolveLlmCredential(
+  userId: string,
+): Promise<ResolvedCredential | null> {
+  try {
+    return await resolveLlmCredential(userId);
+  } catch (err) {
+    if (
+      err instanceof LlmCredentialError &&
+      err.code === "no_usable_credential"
+    ) {
+      // Expected — no user_key / user_oauth row AND no app_key
+      // env vars. Fall through to legacy workspace key path.
+      return null;
+    }
+    console.warn(
+      `[agent-runner] resolveLlmCredential failed for user=${userId}:`,
+      (err as Error).message?.slice(0, 200),
+    );
+    return null;
+  }
 }
 
 function sleep(ms: number): Promise<void> {
