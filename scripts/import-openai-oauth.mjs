@@ -61,11 +61,6 @@ function parseArgs() {
       process.exit(0);
     }
   }
-  if (!out.userEmail) {
-    console.error("error: --user-email is required");
-    printHelp();
-    process.exit(2);
-  }
   if (!out.file) {
     // Default to opencode's location on Linux/macOS.
     out.file = resolve(homedir(), ".local/share/opencode/auth.json");
@@ -75,12 +70,52 @@ function parseArgs() {
 
 function printHelp() {
   console.log(
-    "usage: node scripts/import-openai-oauth.mjs --user-email <email> [--file <path>]\n" +
+    "usage: node scripts/import-openai-oauth.mjs [--user-email <email>] [--file <path>]\n" +
       "\n" +
-      "  --user-email  Email of the User row to attach the credential to (required)\n" +
+      "  --user-email  Email of the local User row to attach the credential to.\n" +
+      "                Optional when the DB has exactly one User (auto-selected).\n" +
+      "                Required when the DB has multiple Users.\n" +
       "  --file        Path to opencode/codex auth.json\n" +
       "                (default: ~/.local/share/opencode/auth.json)\n",
   );
+}
+
+/**
+ * Resolve which local User this credential attaches to.
+ *   - --user-email flag wins if passed (targets that specific row).
+ *   - Otherwise, if exactly one User row exists, use it silently.
+ *   - Otherwise, list the emails and exit with an actionable error.
+ */
+async function resolveTargetUser(db, userEmailFlag) {
+  if (userEmailFlag) {
+    const user = await db.user.findUnique({ where: { email: userEmailFlag } });
+    if (!user) {
+      console.error(`error: no User with email=${userEmailFlag}`);
+      process.exit(1);
+    }
+    return user;
+  }
+  const users = await db.user.findMany({
+    select: { id: true, email: true },
+    orderBy: { createdAt: "asc" },
+  });
+  if (users.length === 0) {
+    console.error(
+      "error: no User rows in the database. Sign up first, then re-run.",
+    );
+    process.exit(1);
+  }
+  if (users.length === 1) {
+    console.log(
+      `→ Auto-selected the only User in the DB: ${users[0].email} (id=${users[0].id})`,
+    );
+    return users[0];
+  }
+  console.error(
+    `error: multiple Users in the DB; pass --user-email to pick one:`,
+  );
+  for (const u of users) console.error(`  - ${u.email}`);
+  process.exit(2);
 }
 
 /* ------------------------------------------------------------------
@@ -148,11 +183,7 @@ async function main() {
 
   const db = new PrismaClient();
   try {
-    const user = await db.user.findUnique({ where: { email: userEmail } });
-    if (!user) {
-      console.error(`error: no User with email=${userEmail}`);
-      process.exit(1);
-    }
+    const user = await resolveTargetUser(db, userEmail);
 
     const accessTokenEnc = encryptLlmSecret(access);
     const refreshTokenEnc = encryptLlmSecret(refresh);
