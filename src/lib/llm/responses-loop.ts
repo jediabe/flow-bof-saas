@@ -177,9 +177,22 @@ export async function* runResponsesLoop(
           tools: openaiTools,
           store: false,
           stream: true,
-          ...(input.reasoningEffort
-            ? { reasoning: { effort: input.reasoningEffort } }
-            : {}),
+          // reasoning.context MUST be "all_turns" when we send
+          // the x-openai-internal-codex-responses-lite header
+          // (which we always do — see openai-oauth.ts). Codex
+          // 400s otherwise with:
+          //   "X-OpenAI-Internal-Codex-Responses-Lite requires
+          //    `reasoning.context` to be `all_turns`."
+          // The context field applies retroactively across all
+          // turns of the conversation; the effort is optional
+          // and defaults to the model's own default_reasoning_
+          // level when omitted.
+          reasoning: {
+            context: "all_turns",
+            ...(input.reasoningEffort
+              ? { effort: input.reasoningEffort }
+              : {}),
+          },
         },
       })) {
         streamOk = true;
