@@ -210,11 +210,15 @@ async function* runAgentTurnInner(
     //   gpt-5.1-codex-max    — most reasoning power on 5.1
     //   gpt-5.1-codex        — the safe default (widest availability)
     //   gpt-5.1-codex-mini   — cheapest / fastest
-    // Workspace-level openrouterModel override can pin a
-    // different one without a code change; it's the same
-    // free-text field we already surface in Settings.
+    //
+    // We deliberately DO NOT reuse settings.openrouterModel here.
+    // OpenRouter's model namespace is completely different
+    // ("anthropic/claude-...", "deepseek/deepseek-...") and
+    // dropping any of those into the Codex endpoint 400s. The
+    // override is a dedicated env var so accidentally-configured
+    // workspace-level model IDs never leak into this path.
     modelName =
-      (settings.openrouterModel ?? "").trim() || "gpt-5.1-codex";
+      (process.env.LLM_RESPONSES_MODEL ?? "").trim() || "gpt-5.1-codex";
     providerLabel = "user_oauth/openai_responses";
     credSource = "resolver";
     runMode = "responses";
