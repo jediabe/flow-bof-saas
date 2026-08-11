@@ -149,26 +149,111 @@ export async function* runResponsesLoop(
     console.log(
       `[responses-loop] iter=${iter} → POST ${input.cred.endpoint} model=${input.model} input_items=${inputItems.length} tools=${openaiTools.length}`,
     );
-    let apiResponse: ResponsesApiResponse;
+
+    // Codex requires streaming responses ("Stream must be set
+    // to true" 400 otherwise). We stream, parse SSE frames as
+    // they arrive, forward text deltas straight to the client
+    // for a live-typing effect, and accumulate the finalized
+    // output items to drive the tool-dispatch phase after.
+    let textContent = "";
+    const functionCalls: OpenAiFunctionCallOutput[] = [];
+    // Assemble function_call arguments from streamed deltas.
+    // The Codex Responses stream emits arguments piecewise:
+    // response.function_call_arguments.delta events, then a
+    // response.output_item.done event carries the full item.
+    // Both paths accumulate into this map keyed by call_id.
+    const fcInProgress = new Map<
+      string,
+      { name: string; args: string }
+    >();
+
+    let streamOk = false;
     try {
-      apiResponse = await callResponsesApi({
+      for await (const evt of streamResponsesApi({
         cred: input.cred,
         body: {
           model: input.model,
           input: inputItems,
           tools: openaiTools,
           store: false,
+          stream: true,
           ...(input.reasoningEffort
             ? { reasoning: { effort: input.reasoningEffort } }
             : {}),
         },
-      });
+      })) {
+        streamOk = true;
+        const type = typeof evt.type === "string" ? evt.type : "";
+
+        // Text streaming — forward the delta to the client so
+        // it renders live, and accumulate for the persisted
+        // assistant row.
+        if (type === "response.output_text.delta") {
+          const delta = typeof evt.delta === "string" ? evt.delta : "";
+          if (delta) {
+            textContent += delta;
+            yield { type: "text_delta", delta };
+          }
+          continue;
+        }
+
+        // Function-call arguments streaming — accumulate.
+        if (type === "response.function_call_arguments.delta") {
+          const callId =
+            typeof evt.item_id === "string"
+              ? evt.item_id
+              : typeof evt.id === "string"
+                ? evt.id
+                : "";
+          if (!callId) continue;
+          const chunk = typeof evt.delta === "string" ? evt.delta : "";
+          const existing = fcInProgress.get(callId) ?? { name: "", args: "" };
+          existing.args += chunk;
+          fcInProgress.set(callId, existing);
+          continue;
+        }
+
+        // A finalized output item — could be a message (already
+        // captured via deltas), function_call (finalize into
+        // functionCalls[]), or reasoning (ignore).
+        if (type === "response.output_item.done" && evt.item) {
+          const item = evt.item as {
+            type?: string;
+            id?: string;
+            call_id?: string;
+            name?: string;
+            arguments?: string;
+          };
+          if (item.type === "function_call") {
+            const callId = item.call_id ?? item.id ?? `fc-${Date.now()}`;
+            const args =
+              typeof item.arguments === "string"
+                ? item.arguments
+                : (fcInProgress.get(callId)?.args ?? "{}");
+            functionCalls.push({
+              callId,
+              name: item.name ?? "unknown_tool",
+              arguments: args || "{}",
+            });
+          }
+          continue;
+        }
+
+        // Error events sent by the server mid-stream.
+        if (type === "error" || type === "response.error") {
+          const message =
+            typeof evt.error === "object" && evt.error && "message" in evt.error
+              ? String((evt.error as { message: unknown }).message)
+              : "unknown streaming error";
+          throw new Error(`stream error: ${message}`);
+        }
+
+        // response.completed / response.created / lifecycle
+        // events — nothing to do; keep reading until the
+        // stream naturally ends.
+      }
     } catch (err) {
       const message = (err as Error).message ?? String(err);
-      // Log the FULL message server-side so we can debug 400s
-      // from the Codex endpoint (tool schema rejection, model
-      // rejection, header issues). Client only sees a truncated
-      // version to keep the chat readable.
       console.warn(
         `[responses-loop] iter=${iter} fetch error: ${message.slice(0, 2000)}`,
       );
@@ -180,55 +265,26 @@ export async function* runResponsesLoop(
     }
 
     console.log(
-      `[responses-loop] iter=${iter} ← model=${apiResponse.model ?? input.model} output_items=${apiResponse.output?.length ?? 0}`,
+      `[responses-loop] iter=${iter} ← stream_ok=${streamOk} text=${textContent.length}ch function_calls=${functionCalls.length}`,
     );
 
-    // Extract text + function_calls out of the response's
-    // output array. Ignore reasoning items — they're advisory,
-    // not for display.
-    const textParts: string[] = [];
-    const functionCalls: OpenAiFunctionCallOutput[] = [];
-    for (const item of apiResponse.output ?? []) {
-      if (item.type === "message" && Array.isArray(item.content)) {
-        for (const block of item.content) {
-          if (block && block.type === "output_text" && typeof block.text === "string") {
-            textParts.push(block.text);
-          }
-        }
-      } else if (item.type === "function_call") {
-        functionCalls.push({
-          callId: item.call_id ?? item.id ?? `fc-${Date.now()}`,
-          name: item.name ?? "unknown_tool",
-          arguments: typeof item.arguments === "string" ? item.arguments : "{}",
-        });
-      }
-    }
-    const textContent = textParts.join("\n\n");
-
-    // Empty-response guard — same shape as the OpenRouter/
-    // Anthropic empty guard. Fires when the model bounces the
-    // request without either text or function_calls (usually a
-    // policy/moderation filter).
+    // Empty-response guard.
     if (
       iter === 0 &&
-      textParts.length === 0 &&
+      textContent.length === 0 &&
       functionCalls.length === 0
     ) {
       console.warn(
-        `[responses-loop] iter=0 empty output — raw response:`,
-        JSON.stringify(apiResponse).slice(0, 2000),
+        `[responses-loop] iter=0 empty output. stream_ok=${streamOk}`,
       );
       yield {
         type: "error",
         message:
-          "The OpenAI Responses API returned an empty output. The model may have refused the prompt, or the account/plan doesn't have access to this model. Check the docker logs for the raw response.",
+          "The OpenAI Responses API stream ended without any text or tool calls. The model may have refused the prompt, or the account/plan doesn't have access to this model. Check the docker logs.",
       };
       return;
     }
 
-    if (textContent) {
-      yield { type: "text_delta", delta: textContent };
-    }
     for (const fc of functionCalls) {
       let parsedArgs: Record<string, unknown> = {};
       try {
@@ -358,57 +414,94 @@ type ResponsesInputItem =
       output: string;
     };
 
-interface ResponsesApiResponse {
-  id?: string;
-  model?: string;
-  output?: Array<{
-    type?: string;
-    id?: string;
-    call_id?: string;
-    name?: string;
-    arguments?: string;
-    content?: Array<{ type?: string; text?: string }>;
-    [k: string]: unknown;
-  }>;
-  usage?: Record<string, unknown>;
-  error?: { message?: string; type?: string };
-}
-
-async function callResponsesApi(input: {
+/**
+ * Streaming variant of the Codex Responses POST. The endpoint
+ * REQUIRES `stream: true` — a non-streaming request comes back
+ * with { detail: "Stream must be set to true" } as a 400.
+ *
+ * Yields parsed SSE event objects as they arrive. Each event's
+ * shape depends on its .type — the caller does the typed
+ * dispatch (response.output_text.delta,
+ * response.function_call_arguments.delta,
+ * response.output_item.done, response.completed, error, ...).
+ *
+ * The stream terminates on either "data: [DONE]" (OpenAI's
+ * end-of-stream sentinel) or when the underlying fetch body
+ * closes. HTTP errors (non-2xx) throw synchronously before the
+ * first event is yielded.
+ */
+async function* streamResponsesApi(input: {
   cred: ResolvedCredential;
   body: Record<string, unknown>;
-}): Promise<ResponsesApiResponse> {
+}): AsyncGenerator<Record<string, unknown>, void, void> {
   const resp = await fetch(input.cred.endpoint, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Accept: "application/json",
+      Accept: "text/event-stream",
       Authorization: input.cred.authHeader,
       ...input.cred.extraHeaders,
     },
     body: JSON.stringify(input.body),
-    signal: AbortSignal.timeout(180_000),
+    signal: AbortSignal.timeout(600_000), // 10 min cap for very long turns
   });
-  const bodyText = await resp.text();
   if (!resp.ok) {
+    const bodyText = await resp.text().catch(() => "");
     throw new Error(
       `HTTP ${resp.status} from ${input.cred.endpoint}: ${bodyText.slice(0, 400)}`,
     );
   }
-  let parsed: ResponsesApiResponse;
+  if (!resp.body) {
+    throw new Error("Response has no body — streaming not supported by transport");
+  }
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
   try {
-    parsed = JSON.parse(bodyText) as ResponsesApiResponse;
-  } catch (err) {
-    throw new Error(
-      `Non-JSON response (${resp.status}): ${bodyText.slice(0, 200)} — ${(err as Error).message}`,
-    );
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      // SSE frames separated by "\n\n". Each frame is 1+ lines
+      // like "event: ...\ndata: {...}". We only consume the
+      // data line — the event type is inside the JSON payload
+      // as .type anyway.
+      let sepIdx: number;
+      while ((sepIdx = buffer.indexOf("\n\n")) !== -1) {
+        const frame = buffer.slice(0, sepIdx);
+        buffer = buffer.slice(sepIdx + 2);
+        // Concatenate ALL "data:" lines in the frame (SSE
+        // allows multi-line data payloads).
+        let data = "";
+        for (const line of frame.split("\n")) {
+          if (line.startsWith("data:")) {
+            data += line.slice(5).trim();
+          }
+        }
+        if (!data) continue;
+        if (data === "[DONE]") return;
+        try {
+          const parsed = JSON.parse(data) as Record<string, unknown>;
+          yield parsed;
+        } catch {
+          // Malformed frame — log & skip rather than crash the
+          // whole turn.
+          console.warn(
+            `[responses-loop] skipping malformed SSE frame: ${data.slice(0, 200)}`,
+          );
+        }
+      }
+    }
+  } finally {
+    // Best-effort cancel — if we broke out early the reader
+    // holds the socket open until GC.
+    try {
+      await reader.cancel();
+    } catch {
+      // ignore
+    }
   }
-  if (parsed.error?.message) {
-    throw new Error(
-      `API error: ${parsed.error.type ?? "unknown"}: ${parsed.error.message}`,
-    );
-  }
-  return parsed;
 }
 
 /* ==================================================================
