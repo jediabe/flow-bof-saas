@@ -480,11 +480,12 @@ function UserBubble({ message, isLast }: { message: V2Message; isLast: boolean }
 /* ------- Assistant text (bare, no bubble) ------------------------ */
 
 function AssistantText({ message }: { message: V2Message }) {
-  const mediaUrls = extractMediaUrls(message.content);
+  const normalized = normalizeAssistantText(message.content);
+  const mediaUrls = extractMediaUrls(normalized);
   return (
     <div className="chat-appear pr-6">
       <div className="text-[14px] leading-[1.65] text-text whitespace-pre-wrap break-words">
-        <LinkifiedText text={message.content} />
+        <LinkifiedText text={normalized} />
       </div>
       {mediaUrls.length > 0 && (
         <div className="mt-4 grid grid-cols-2 gap-3">
@@ -1056,6 +1057,30 @@ function EmptyState({ hasProduct }: { hasProduct: boolean }) {
 /* ==================================================================
  * Shared helpers
  * ================================================================ */
+
+/**
+ * Trim runaway whitespace from an assistant text block before we
+ * render it with whitespace-pre-wrap. Different models emit very
+ * different newline habits — Claude is tidy, DeepSeek and some
+ * others pad every response with 3-6 trailing newlines which
+ * paint as a wall of empty space in the transcript.
+ *
+ * Normalisation:
+ *   - Trim leading + trailing whitespace across the whole block.
+ *   - Collapse any run of 3+ consecutive newlines to exactly 2
+ *     (single paragraph break). Genuine paragraph breaks stay.
+ *   - Trim trailing whitespace on every line so an accidental
+ *     "  \n" doesn't leave visible padding to the right of the
+ *     text.
+ */
+function normalizeAssistantText(text: string): string {
+  if (!text) return "";
+  const trimmedLines = text
+    .split("\n")
+    .map((line) => line.replace(/[ \t]+$/, ""))
+    .join("\n");
+  return trimmedLines.replace(/\n{3,}/g, "\n\n").trim();
+}
 
 function safeParseImages(json: string | null): string[] {
   if (!json) return [];
