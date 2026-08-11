@@ -146,6 +146,9 @@ export async function* runResponsesLoop(
 
   const maxIterations = input.maxIterations ?? DEFAULT_MAX_ITERATIONS;
   for (let iter = 0; iter < maxIterations; iter += 1) {
+    console.log(
+      `[responses-loop] iter=${iter} → POST ${input.cred.endpoint} model=${input.model} input_items=${inputItems.length} tools=${openaiTools.length}`,
+    );
     let apiResponse: ResponsesApiResponse;
     try {
       apiResponse = await callResponsesApi({
@@ -161,15 +164,23 @@ export async function* runResponsesLoop(
         },
       });
     } catch (err) {
+      const message = (err as Error).message ?? String(err);
+      // Log the FULL message server-side so we can debug 400s
+      // from the Codex endpoint (tool schema rejection, model
+      // rejection, header issues). Client only sees a truncated
+      // version to keep the chat readable.
+      console.warn(
+        `[responses-loop] iter=${iter} fetch error: ${message.slice(0, 2000)}`,
+      );
       yield {
         type: "error",
-        message: `OpenAI Responses error: ${(err as Error).message?.slice(0, 300)}`,
+        message: `OpenAI Responses error: ${message.slice(0, 400)}`,
       };
       return;
     }
 
     console.log(
-      `[responses-loop] iter=${iter} model=${apiResponse.model ?? input.model} output_items=${apiResponse.output?.length ?? 0}`,
+      `[responses-loop] iter=${iter} ← model=${apiResponse.model ?? input.model} output_items=${apiResponse.output?.length ?? 0}`,
     );
 
     // Extract text + function_calls out of the response's
@@ -203,6 +214,10 @@ export async function* runResponsesLoop(
       textParts.length === 0 &&
       functionCalls.length === 0
     ) {
+      console.warn(
+        `[responses-loop] iter=0 empty output — raw response:`,
+        JSON.stringify(apiResponse).slice(0, 2000),
+      );
       yield {
         type: "error",
         message:
