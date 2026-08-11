@@ -21,7 +21,8 @@
     "docker:prod:ps": "docker compose --env-file .env.production -f docker-compose.prod.yml ps",
     "db:prod:push": "./scripts/prod-db-push.sh",
     "cleanup:uploads": "node scripts/cleanup-uploads.mjs",
-    "backfill:product-images": "node scripts/backfill-product-images.mjs"
+    "backfill:product-images": "node scripts/backfill-product-images.mjs",
+    "llm:import-openai-oauth": "node --env-file=.env scripts/import-openai-oauth.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.100.1",

@@ -34,7 +34,15 @@
  */
 
 import { db } from "@/lib/db";
-import { decryptLlmSecret } from "./crypto";
+import { decryptLlmSecret, encryptLlmSecret } from "./crypto";
+import {
+  CHATGPT_CODEX_RESPONSES_URL,
+  CHATGPT_COMMON_HEADERS,
+  extractChatgptAccountId,
+  OpenAiRefreshError,
+  REFRESH_HORIZON_MS,
+  refreshOpenAiOAuthToken,
+} from "./openai-oauth";
 
 /* ==================================================================
  * Public types
@@ -257,21 +265,156 @@ async function tryUserKey(
 /* ----- user_oauth ---------------------------------------------- */
 
 async function tryUserOauth(
-  _userId: string,
+  userId: string,
   row: LlmCredentialRow | null,
 ): Promise<ResolvedCredential | null> {
   if (!row || row.mode !== "user_oauth") return null;
   if (!isCurrentlyUsable(row)) return null;
+  if (row.provider !== "openai") {
+    // Anthropic has no subscription/OAuth path today. If a row
+    // ever ends up here it's a bug in the ingestion layer.
+    throw new LlmCredentialError(
+      "invalid_row",
+      `user_oauth is OpenAI-only; row.provider=${row.provider}`,
+    );
+  }
+  if (
+    !row.accessTokenEnc ||
+    !row.refreshTokenEnc ||
+    !row.accessExpiresAt ||
+    !row.chatgptAccountId
+  ) {
+    throw new LlmCredentialError(
+      "invalid_row",
+      "user_oauth row missing accessTokenEnc / refreshTokenEnc / accessExpiresAt / chatgptAccountId",
+    );
+  }
 
-  // Phase 4 wires this up. Until then, treat any stored oauth row
-  // as unavailable — the resolver falls through to user_key or
-  // app_key. Throwing "not_implemented" would spam logs on every
-  // resolve call while the operator is still setting things up;
-  // returning null is quieter.
-  throw new LlmCredentialError(
-    "not_implemented",
-    "user_oauth mode not implemented yet — phase 4",
-  );
+  // Decrypt current tokens. A decrypt failure means the row is
+  // unusable and needs re-connection — the caller can catch and
+  // fall through.
+  let accessToken: string;
+  let refreshToken: string;
+  try {
+    accessToken = decryptLlmSecret(row.accessTokenEnc);
+    refreshToken = decryptLlmSecret(row.refreshTokenEnc);
+  } catch (err) {
+    throw new LlmCredentialError(
+      "decrypt_failed",
+      "Could not decrypt user_oauth tokens — encryption key rotated or row tampered.",
+      { cause: err },
+    );
+  }
+
+  // Refresh if within the 5-min horizon. Guarded by a per-user
+  // lock so concurrent turns don't race two refreshes against
+  // each other (only one wins the rotation, the other invalidates
+  // its own refresh_token).
+  const msUntilExpiry = row.accessExpiresAt.getTime() - Date.now();
+  if (msUntilExpiry <= REFRESH_HORIZON_MS) {
+    ({ accessToken, refreshToken } = await refreshUnderLock(
+      userId,
+      refreshToken,
+      accessToken,
+    ));
+  }
+
+  return {
+    mode: "user_oauth",
+    provider: "openai",
+    endpoint: CHATGPT_CODEX_RESPONSES_URL,
+    authHeader: `Bearer ${accessToken}`,
+    extraHeaders: {
+      "chatgpt-account-id": row.chatgptAccountId,
+      ...CHATGPT_COMMON_HEADERS,
+    },
+    apiShape: "responses",
+  };
+}
+
+/* ==================================================================
+ * Per-user refresh lock
+ *
+ * OpenAI rotates refresh tokens on refresh (opencode notes this
+ * too). Two concurrent refreshes for the same user race, one wins,
+ * the other's refresh_token becomes invalid — cascading into an
+ * "invalid_grant" the next call over. The lock ensures every
+ * concurrent caller waits for one refresh and reads the same new
+ * pair. In-memory Map is fine — refresh takes <2s and this runs
+ * inside a single Next.js process; a multi-instance deployment
+ * would need a Redis lock, but that's a follow-up problem.
+ * ================================================================ */
+
+const inflightRefresh = new Map<
+  string,
+  Promise<{ accessToken: string; refreshToken: string }>
+>();
+
+async function refreshUnderLock(
+  userId: string,
+  currentRefreshToken: string,
+  currentAccessToken: string,
+): Promise<{ accessToken: string; refreshToken: string }> {
+  const existing = inflightRefresh.get(userId);
+  if (existing) return existing;
+
+  const promise = (async () => {
+    try {
+      const result = await refreshOpenAiOAuthToken(currentRefreshToken);
+      // Atomically persist the new pair BEFORE returning it — a
+      // crash between refresh and persist wastes the refresh (the
+      // rotated refresh_token in memory is lost).
+      const newAccountId =
+        extractChatgptAccountId(result.accessToken) ?? null;
+      await db.llmCredential.update({
+        where: { userId },
+        data: {
+          accessTokenEnc: encryptLlmSecret(result.accessToken),
+          refreshTokenEnc: encryptLlmSecret(result.refreshToken),
+          accessExpiresAt: new Date(result.expiresAtMs),
+          ...(newAccountId ? { chatgptAccountId: newAccountId } : {}),
+        },
+      });
+      console.log(
+        `[llm-credentials] refreshed user_oauth for user=${userId}, expires in ${Math.round(
+          (result.expiresAtMs - Date.now()) / 1000,
+        )}s`,
+      );
+      return {
+        accessToken: result.accessToken,
+        refreshToken: result.refreshToken,
+      };
+    } catch (err) {
+      if (err instanceof OpenAiRefreshError && err.code === "invalid_grant") {
+        // Refresh token is dead. Clear the row so subsequent
+        // resolves fall through to user_key / app_key, and the
+        // operator is prompted to re-connect. Do NOT throw
+        // through the lock — return the OLD access token so if
+        // it hasn't expired yet the current call can still limp
+        // through this last time.
+        console.warn(
+          `[llm-credentials] user_oauth invalid_grant for user=${userId}; clearing credential`,
+        );
+        await db.llmCredential
+          .delete({ where: { userId } })
+          .catch(() => {});
+        return {
+          accessToken: currentAccessToken,
+          refreshToken: currentRefreshToken,
+        };
+      }
+      // Transient failure — keep the credential, propagate so
+      // this turn errors out. Next turn will retry.
+      throw err;
+    }
+  })();
+
+  inflightRefresh.set(userId, promise);
+  try {
+    return await promise;
+  } finally {
+    inflightRefresh.delete(userId);
+  }
 }
 
 /* ==================================================================

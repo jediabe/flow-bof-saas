@@ -53,6 +53,7 @@ import {
   LlmCredentialError,
   type ResolvedCredential,
 } from "@/lib/llm/credentials";
+import { runResponsesLoop } from "@/lib/llm/responses-loop";
 import {
   LOCAL_TOOLS,
   LOCAL_TOOL_NAMES,
@@ -158,16 +159,26 @@ async function* runAgentTurnInner(
 
   const settings = await loadOrCreateSettings(workspaceId);
 
-  // Try the new credential resolver first (app_key +
-  // eventually user_key + user_oauth). Fall back to legacy
-  // workspace-scoped keys if the resolver has nothing —
-  // required until Phase 8 drops the legacy columns.
+  // Try the new credential resolver first (app_key + user_key +
+  // user_oauth). Fall back to legacy workspace-scoped keys if
+  // the resolver has nothing — required until the legacy
+  // cleanup commit drops those columns.
+  //
+  // runMode is what actually picks the loop implementation below:
+  //   "anthropic" → the Anthropic Messages loop in this file
+  //                 (works for direct Anthropic, OpenRouter via
+  //                 baseURL override, and Anthropic app_key/user_key)
+  //   "responses" → runResponsesLoop in src/lib/llm/responses-loop.ts
+  //                 (ChatGPT-subscription user_oauth)
+  // chat_completions is deferred to a later commit.
   let apiKey: string;
   let baseURL: string | undefined;
   let modelName: string;
   let providerLabel: string;
   let defaultHeaders: Record<string, string> | undefined;
   let credSource: "resolver" | "legacy_workspace_key";
+  let runMode: "anthropic" | "responses";
+  let responsesCred: ResolvedCredential | null = null;
 
   const resolved = await tryResolveLlmCredential(ownerUserId);
   const anthropicKey  = (settings.anthropicApiKey  ?? "").trim();
@@ -182,27 +193,29 @@ async function* runAgentTurnInner(
       (settings.anthropicModel ?? "").trim() || DEFAULT_ANTHROPIC_MODEL;
     providerLabel = `${resolved.mode}/anthropic`;
     credSource = "resolver";
+    runMode = "anthropic";
+  } else if (resolved && resolved.apiShape === "responses") {
+    // user_oauth (ChatGPT subscription). Loop dispatch happens
+    // after shared setup (MCP tools + system prompt) — see the
+    // runResponsesLoop hand-off later in this function.
+    apiKey = "";
+    baseURL = undefined;
+    // Default model per opencode's config — gpt-5.2 is the top
+    // tier available to ChatGPT Plus subs. Workspace-level
+    // override can pin a different variant.
+    modelName =
+      (settings.openrouterModel ?? "").trim() || "gpt-5.2";
+    providerLabel = "user_oauth/openai_responses";
+    credSource = "resolver";
+    runMode = "responses";
+    responsesCred = resolved;
   } else if (resolved && resolved.apiShape === "chat_completions") {
-    // OpenAI Chat Completions direct — the tool-use format is
-    // different from Anthropic's; the loop code below assumes
-    // Anthropic. Land the OpenAI loop in phase 3 alongside
-    // user_key routes. Until then, fail loudly rather than
-    // silently falling back so misconfigured deployments are
-    // obvious.
     yield {
       type: "error",
       message:
         "OpenAI Chat Completions credential resolved (mode=" +
         resolved.mode +
-        ") but the OpenAI tool-use loop is not implemented yet — coming in phase 3. For now set APP_ANTHROPIC_API_KEY, or keep using a workspace-scoped Anthropic/OpenRouter key.",
-    };
-    return;
-  } else if (resolved && resolved.apiShape === "responses") {
-    // user_oauth (ChatGPT subscription) lands in phase 4.
-    yield {
-      type: "error",
-      message:
-        "OpenAI Responses credential resolved but the Responses loop is not implemented yet — coming in phase 4.",
+        ") but the OpenAI Chat Completions tool-use loop is not implemented yet. For now set APP_ANTHROPIC_API_KEY, use a workspace-scoped Anthropic/OpenRouter key, or connect a ChatGPT subscription via user_oauth.",
     };
     return;
   } else if (anthropicKey) {
@@ -212,6 +225,7 @@ async function* runAgentTurnInner(
       (settings.anthropicModel ?? "").trim() || DEFAULT_ANTHROPIC_MODEL;
     providerLabel = "legacy_workspace/anthropic";
     credSource = "legacy_workspace_key";
+    runMode = "anthropic";
   } else if (openrouterKey) {
     apiKey = openrouterKey;
     // Anthropic SDK appends "/v1/messages"; baseURL must NOT end
@@ -221,6 +235,7 @@ async function* runAgentTurnInner(
       (settings.openrouterModel ?? "").trim() || DEFAULT_OPENROUTER_MODEL;
     providerLabel = "legacy_workspace/openrouter";
     credSource = "legacy_workspace_key";
+    runMode = "anthropic";
     const headers: Record<string, string> = {};
     if (settings.openrouterSiteUrl)
       headers["HTTP-Referer"] = settings.openrouterSiteUrl;
@@ -364,6 +379,151 @@ async function* runAgentTurnInner(
     currentProductId: conv.currentProductId,
     hasVideoBefore,
   });
+
+  // Shared tool-dispatch helper — used by both loop
+  // implementations. Wraps local_* + MCP calls, applies the
+  // auto-poll for async jobs, and normalizes the result shape
+  // to { content: string, isError: boolean }. Extracting this
+  // out means the Responses loop and the Anthropic loop share
+  // one dispatch policy and the auto-poll logic doesn't
+  // duplicate.
+  const dispatchOneTool = async (
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<{ content: string; isError: boolean }> => {
+    try {
+      if (LOCAL_TOOL_NAMES.has(name)) {
+        const local = await runLocalTool({
+          workspaceId,
+          batchId,
+          name,
+          args,
+        });
+        return {
+          content: local.result || "(empty result)",
+          isError: local.isError,
+        };
+      }
+      let result = await callMcpTool({
+        sub: workspaceId,
+        flowEmail,
+        name,
+        args,
+      });
+      if (name !== "google_flow_get_job") {
+        result = await resolveAsyncJob(result, {
+          sub: workspaceId,
+          flowEmail,
+          originatingTool: name,
+        });
+      }
+      const resultText =
+        result.structuredContent !== undefined
+          ? JSON.stringify(result.structuredContent).slice(0, 20_000)
+          : (result.content ?? [])
+              .map((c) => {
+                if (c && typeof c === "object" && "text" in c) {
+                  return String((c as { text: unknown }).text ?? "");
+                }
+                return "";
+              })
+              .join("\n")
+              .slice(0, 20_000);
+      return {
+        content: resultText || "(empty result)",
+        isError: result.isError,
+      };
+    } catch (err) {
+      return {
+        content: `Tool call failed: ${(err as Error).message?.slice(0, 300)}`,
+        isError: true,
+      };
+    }
+  };
+
+  // ---- Route by API shape ---------------------------------------
+  // ChatGPT-subscription (user_oauth) uses the OpenAI Responses
+  // API which has a completely different wire protocol. Hand off
+  // to the dedicated loop and return.
+  if (runMode === "responses" && responsesCred) {
+    console.log(
+      `[agent-runner] source=${credSource} provider=${providerLabel} model=${modelName} workspace=${workspaceId} batch=${batchId} user=${ownerUserId}`,
+    );
+    yield* runResponsesLoop({
+      cred: responsesCred,
+      model: modelName,
+      systemPrompt,
+      tools: anthropicTools.map((t) => ({
+        name: t.name,
+        description: t.description ?? "",
+        input_schema: t.input_schema as {
+          type: "object";
+          properties?: Record<string, unknown>;
+          required?: string[];
+        },
+      })),
+      storedHistory: stored.map((row) => ({
+        role: row.role,
+        content: row.content,
+        toolCallsJson: row.toolCallsJson,
+        toolResultJson: row.toolResultJson,
+        attachedImagesJson: row.attachedImagesJson,
+      })),
+      reasoningEffort: "medium",
+      hooks: {
+        persistAssistant: async ({ content, toolCalls }) => {
+          // Store OpenAI function_calls in the SAME JSON shape
+          // Anthropic tool_use blocks use, so the transcript UI
+          // (and future rehydration back into Anthropic format
+          // if the user switches providers) works uniformly.
+          const asToolUses = toolCalls.map((fc) => {
+            let input: unknown = {};
+            try {
+              input = JSON.parse(fc.arguments);
+            } catch {
+              // fall through — store empty object
+            }
+            return {
+              type: "tool_use" as const,
+              id: fc.callId,
+              name: fc.name,
+              input,
+            };
+          });
+          const row = await db.message.create({
+            data: {
+              conversationId: conv.id,
+              role: "assistant",
+              content,
+              toolCallsJson:
+                asToolUses.length > 0 ? JSON.stringify(asToolUses) : null,
+            },
+            select: { id: true },
+          });
+          return { id: row.id };
+        },
+        persistToolResult: async ({ callId, output, isError }) => {
+          const row = await db.message.create({
+            data: {
+              conversationId: conv.id,
+              role: "user",
+              content: "",
+              toolResultJson: JSON.stringify({
+                type: "tool_result",
+                tool_use_id: callId,
+                content: output,
+                is_error: isError,
+              }),
+            },
+            select: { id: true },
+          });
+          return { id: row.id };
+        },
+        dispatchTool: dispatchOneTool,
+      },
+    });
+    return;
+  }
 
   for (let iter = 0; iter < MAX_LOOP_ITERATIONS; iter += 1) {
     let finalMessage: Message;
