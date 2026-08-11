@@ -394,12 +394,16 @@ function registerNextStep(server: McpServer): void {
       title: "Style 2 · Execute the next chain step",
       description: `Execute EXACTLY ONE step of the Style 2 chain. The caller drives the loop by calling once per step, feeding the previous step's mediaGenerationId back in as previous_output_media_id.
 
+CRITICAL — avatar re-attachment on every step. avatar_media_id is REQUIRED on every single invocation of this tool, on every step of the chain. The MCP server is stateless: it does not remember the avatar between calls, and Google Flow does not "carry" reference images across separate generations. If the caller omits avatar_media_id on ANY step (including mid-chain steps 4-7 where it's tempting to skip because "she was already established in step 3"), the character drifts and the whole video is a re-shoot. Copy the SAME avatar_media_id into every call in the same conversation — do not swap it, do not upgrade it, do not omit it. The schema enforces .min(1), so an empty string is also rejected.
+
+Same rule for product_media_id (must be passed on every Nano step that shows the product — N2, N4, N6 in the standard chain) and garment_media_id (must be passed on every step of a worn chain, alongside the avatar).
+
 Never blocks on Veo — Veo steps return a jobId immediately and the caller polls google_flow_get_job. That's why this tool is single-step: a 7-clip chain is over 10 minutes of wall clock, which no MCP tool call should hold.
 
-References:
-  - avatar_media_id is ALWAYS attached as an identity reference on every step (SOP §5 face-drift mitigation).
-  - product_media_id, if provided, is attached to Nano N2, N4, N6 so the model sees the physical product.
-  - garment_media_id is REQUIRED for worn chains — attached to every step alongside the avatar.
+References attached per step:
+  - avatar_media_id: EVERY step, no exceptions (face-drift mitigation).
+  - product_media_id: attached to Nano steps that show the product (typically N2/N4/N6) so the model sees the physical product's shape and label.
+  - garment_media_id: REQUIRED for worn chains — attached to EVERY step alongside the avatar. Missing it means the garment won't appear.
 
 Returns the same shape as google_flow_generate_image (Nano) or google_flow_generate_video (Veo):
   { "operation": string, "mode": "sync" | "async", "jobId": string,
@@ -423,13 +427,13 @@ Errors:
           .string()
           .min(1)
           .describe(
-            "mediaGenerationId of the locked avatar image (uploaded once via google_flow_upload_asset). Attached to every step as the identity reference.",
+            "mediaGenerationId of the locked avatar image (uploaded once via google_flow_upload_asset). REQUIRED on EVERY invocation of this tool — the server is stateless, so omitting it on any step causes face drift and forces a re-shoot. Copy the same value into every call in the same chain.",
           ),
         product_media_id: z
           .string()
           .optional()
           .describe(
-            "Optional mediaGenerationId of the product image. Attached to Nano N2/N4/N6 so the model sees the product's shape and label.",
+            "mediaGenerationId of the product image. Attached to Nano steps that show the product (typically N2/N4/N6). Pass the SAME value on every call in the chain — the server does not remember it between steps.",
           ),
         previous_output_media_id: z
           .string()
