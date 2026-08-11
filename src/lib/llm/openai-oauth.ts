@@ -55,10 +55,17 @@ export const CHATGPT_CODEX_RESPONSES_URL = `${CHATGPT_BACKEND_API_BASE}/codex/re
 
 /** Headers every model call needs on top of Authorization +
  *  chatgpt-account-id. `originator` is what the Codex CLI sends
- *  and is what OpenAI's backend expects for subscription auth. */
+ *  and is what OpenAI's backend expects for subscription auth.
+ *
+ *  x-openai-internal-codex-responses-lite: newer Codex models
+ *  (gpt-5.6-sol/terra/luna) have `use_responses_lite: true` in
+ *  models.json and expect this header. The server ignores it
+ *  for models that don't opt in, so we always send it — the
+ *  CLI does the same. */
 export const CHATGPT_COMMON_HEADERS: Record<string, string> = {
   "OpenAI-Beta": "responses=experimental",
   originator: "codex_cli_rs",
+  "x-openai-internal-codex-responses-lite": "true",
 };
 
 /** Refresh access tokens this many ms BEFORE they expire. 5 min

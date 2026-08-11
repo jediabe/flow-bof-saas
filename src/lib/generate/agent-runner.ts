@@ -200,29 +200,30 @@ async function* runAgentTurnInner(
     // runResponsesLoop hand-off later in this function.
     apiKey = "";
     baseURL = undefined;
-    // The /backend-api/codex/responses endpoint has a NARROWER
-    // model whitelist than opencode's config would suggest —
-    // ChatGPT-account auth (as opposed to platform-key auth)
-    // is tier-gated. Operator's Plus plan has already rejected
-    // both "gpt-5.2" and "gpt-5.1-codex" with:
+    // Codex's current models.json (openai/codex@main) ships
+    // priority=1 = "gpt-5.6-sol", which is what the CLI itself
+    // reaches for by default when logged in via a ChatGPT
+    // subscription. Earlier attempts with the opencode-listed
+    // "-codex" variants (gpt-5.1-codex, codex-mini-latest,
+    // gpt-5.2) were all rejected on Plus with:
     //   "The '<x>' model is not supported when using Codex with
-    //   a ChatGPT account."
-    // codex-mini-latest is the entry-level Codex model that
-    // opencode also lists; it should be available to every
-    // Codex-enabled account. If that's ALSO rejected, try the
-    // env-var override with one of these opencode-known ids:
-    //   gpt-5-codex-mini
-    //   gpt-5.1-codex-mini
-    //   gpt-5.1-codex-max
-    //   gpt-5.2-codex
+    //    a ChatGPT account."
+    // The whitelist has moved to the 5.6-* generation.
+    //
+    // Alternates you can pin via LLM_RESPONSES_MODEL if 5.6-sol
+    // is unavailable (priority order per models.json):
+    //   gpt-5.6-sol   (default, latest frontier)
+    //   gpt-5.6-terra
+    //   gpt-5.6-luna
+    //   gpt-5.5
+    //   gpt-5.4
     //
     // We deliberately DO NOT reuse settings.openrouterModel
-    // here — OpenRouter's model namespace ("anthropic/...",
-    // "deepseek/...") is incompatible and dropping any of
-    // those into the Codex endpoint 400s.
+    // — OpenRouter's model namespace is incompatible and would
+    // 400 the Codex endpoint on every turn.
     modelName =
       (process.env.LLM_RESPONSES_MODEL ?? "").trim() ||
-      "codex-mini-latest";
+      "gpt-5.6-sol";
     providerLabel = "user_oauth/openai_responses";
     credSource = "resolver";
     runMode = "responses";
