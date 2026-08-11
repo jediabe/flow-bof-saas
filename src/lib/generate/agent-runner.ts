@@ -428,12 +428,25 @@ async function* runAgentTurnInner(
               is_error: local.isError,
             };
           }
-          const result = await callMcpTool({
+          let result = await callMcpTool({
             sub: workspaceId,
             flowEmail,
             name: tu.name,
             args,
           });
+          // Auto-poll async jobs on the server so the LLM
+          // doesn't burn credits calling google_flow_get_job in
+          // a loop. See resolveAsyncJob() for the shape check —
+          // any result stamped mode:"async" with a jobId gets
+          // resolved here, and the completed job's payload
+          // replaces the original stub before the LLM sees it.
+          if (tu.name !== "google_flow_get_job") {
+            result = await resolveAsyncJob(result, {
+              sub: workspaceId,
+              flowEmail,
+              originatingTool: tu.name,
+            });
+          }
           const resultText =
             result.structuredContent !== undefined
               ? JSON.stringify(result.structuredContent).slice(0, 20_000)
@@ -544,6 +557,133 @@ function rehydrateMessage(row: {
     imageUrls.map((u, i) => `${i + 1}. ${u}`).join("\n");
   const text = row.content ? `${preamble}\n\n${row.content}` : preamble;
   return { role: "user", content: text };
+}
+
+/* ------------------------------------------------------------------
+ * Server-side async job polling
+ *
+ * Google Flow's video endpoints are async: generate_video and
+ * friends return a jobId immediately, and the caller polls
+ * google_flow_get_job every ~15s until status is completed or
+ * failed. The naive path is to have the LLM drive the poll loop
+ * — which we did originally — but each poll is a full LLM turn
+ * + tool_call, and a 3-minute video means ~12 wasted turns of
+ * agent context and provider credits.
+ *
+ * resolveAsyncJob detects an async result (mode:"async" + a
+ * jobId) and takes over the polling on the server. The LLM
+ * never sees the intermediate jobId; it gets the completed
+ * job's payload as if generate_video returned synchronously.
+ *
+ * Cap at 10 minutes wall clock — long enough for veo-3.1-quality
+ * with a hot queue but short enough to bail if the account is
+ * genuinely stuck. On timeout we return the original stub with
+ * an extra note so the LLM can decide what to do (typically:
+ * tell the operator and ask whether to keep waiting).
+ * ---------------------------------------------------------------- */
+
+const POLL_INTERVAL_MS = 15_000;
+const POLL_MAX_WAIT_MS = 10 * 60 * 1_000;
+
+interface McpResult {
+  isError: boolean;
+  content: unknown[];
+  structuredContent?: unknown;
+}
+
+async function resolveAsyncJob(
+  result: McpResult,
+  ctx: { sub: string; flowEmail: string; originatingTool: string },
+): Promise<McpResult> {
+  const jobId = extractAsyncJobId(result);
+  if (!jobId) return result;
+
+  const started = Date.now();
+  console.log(
+    `[agent-runner] auto-polling ${ctx.originatingTool} jobId=${jobId}`,
+  );
+  while (Date.now() - started < POLL_MAX_WAIT_MS) {
+    await sleep(POLL_INTERVAL_MS);
+    let poll: McpResult;
+    try {
+      poll = await callMcpTool({
+        sub: ctx.sub,
+        flowEmail: ctx.flowEmail,
+        name: "google_flow_get_job",
+        args: { job_id: jobId },
+      });
+    } catch (err) {
+      console.warn(
+        `[agent-runner] poll failed for jobId=${jobId}:`,
+        (err as Error).message?.slice(0, 200),
+      );
+      continue;
+    }
+    const status = extractJobStatus(poll);
+    if (status === "completed" || status === "failed") {
+      const elapsed = Math.floor((Date.now() - started) / 1000);
+      console.log(
+        `[agent-runner] job ${jobId} ${status} after ${elapsed}s`,
+      );
+      // Return the completed poll payload directly — it contains
+      // the full media[] and any error detail. The LLM sees this
+      // as if the original generate call returned synchronously.
+      return poll;
+    }
+  }
+  // Timed out. Give the LLM the original stub plus an autopoll
+  // note so it can surface a clear "job still running after 10
+  // min" message and ask the operator what to do.
+  console.warn(
+    `[agent-runner] job ${jobId} still not done after ${POLL_MAX_WAIT_MS / 1000}s — surfacing timeout`,
+  );
+  const structured = (result.structuredContent ?? {}) as Record<string, unknown>;
+  return {
+    ...result,
+    structuredContent: {
+      ...structured,
+      _autopoll: {
+        timedOut: true,
+        elapsedSeconds: Math.floor((Date.now() - started) / 1000),
+        note: "The runner polled google_flow_get_job for 10 minutes without completion. Tell the operator and ask whether to keep waiting or cancel.",
+      },
+    },
+  };
+}
+
+/** Pull a jobId out of an MCP tool result if it looks async.
+ *  Returns null for sync results, empty results, or completed
+ *  jobs that don't need polling. */
+function extractAsyncJobId(result: McpResult): string | null {
+  const s = result.structuredContent;
+  if (!s || typeof s !== "object") return null;
+  const rec = s as Record<string, unknown>;
+  if (rec.mode !== "async") return null;
+  // Skip if the job is already done — some sync fallbacks stamp
+  // status="completed" alongside mode:"async" (edge case).
+  const status = rec.status;
+  if (status === "completed" || status === "failed") return null;
+  const jobId = rec.jobId;
+  return typeof jobId === "string" && jobId.length > 0 ? jobId : null;
+}
+
+function extractJobStatus(result: McpResult): string | null {
+  const s = result.structuredContent;
+  if (!s || typeof s !== "object") return null;
+  const rec = s as Record<string, unknown>;
+  // get_job returns {job: {status, ...}} — the normalized shape.
+  const job = rec.job;
+  if (job && typeof job === "object") {
+    const inner = job as Record<string, unknown>;
+    if (typeof inner.status === "string") return inner.status;
+  }
+  // Fallback: top-level status (generation stub shape).
+  if (typeof rec.status === "string") return rec.status;
+  return null;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function parseAttachedImages(json: string | null): string[] {
@@ -677,8 +817,9 @@ the placement feels real, not forced onto a countertop.
 5. Scene 1 motion: google_flow_generate_video with the universal
    store motion prompt, image=<image url from step 4>,
    model=<the Veo model the operator picked at the start>,
-   aspect_ratio=portrait. Async — poll google_flow_get_job every
-   10-15s until COMPLETED / FAILED.
+   aspect_ratio=portrait. The runner auto-polls this for you —
+   the tool result comes back with the completed media[] and
+   the mediaGenerationId, no polling turns needed.
 6. local_save_generated_video(productId, sceneLabel="scene_1_store",
    mediaGenerationId=<from the completed job>, prompt=<motion prompt used>).
 7. Repeat 4-6 for Scene 2 with the home prompt. Fill in BOTH
@@ -744,8 +885,9 @@ Style 2 workflow for "make a Style 2 for this product":
    avatar_media_id ALWAYS passed, product_media_id passed on
    Nano steps that show the product, previous_output_media_id
    for Veo steps that continue from a Nano, garment_media_id
-   on every step of a worn chain. Poll google_flow_get_job
-   after each Veo step.
+   on every step of a worn chain. Veo steps come back with the
+   completed video automatically — the runner auto-polls, so
+   don't call google_flow_get_job in between.
 6. When all steps are done, apex_style2_validate_copy on the
    copy block. If it fails, rewrite and re-validate.
 
@@ -761,9 +903,18 @@ looks like a different person by scene 5.
 
 - NEVER fabricate a jobId, mediaGenerationId, or URL. If a tool
   call fails or times out, say what happened and stop.
-- Videos take 60-180 seconds. Poll every 10-15s.
-- Poll a job that's "PENDING" or "RUNNING"; STOP the moment it
-  goes "COMPLETED" or "FAILED".
+- **Async jobs are auto-polled by the runner — do NOT call
+  google_flow_get_job yourself.** When you fire
+  google_flow_generate_video, google_flow_extend_video,
+  google_flow_upscale_video, or apex_style2_next_step for a Veo
+  step, the runner waits for the job to complete (or fail, or
+  time out at 10 min) and returns the COMPLETED payload — with
+  media[] and URLs — as if the call had been synchronous. There
+  is no jobId in the intermediate result for you to poll. If
+  the result carries an _autopoll.timedOut flag, the job is
+  still running after 10 min — report that to the operator and
+  ask whether to keep waiting. Only call google_flow_get_job
+  when the operator explicitly hands you a jobId to inspect.
 - If any tool returns a 596 error, the operator's Google session
   is broken — tell them to visit Settings → Google Flow account
   and reconnect via useapi.net's automated setup. Never retry
