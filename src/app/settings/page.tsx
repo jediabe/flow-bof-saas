@@ -8,6 +8,7 @@ import WorkspaceApiTokenPanel from "./WorkspaceApiTokenPanel";
 import WorkspaceVoicePanel from "./WorkspaceVoicePanel";
 import WorkspaceCapCutPanel from "./WorkspaceCapCutPanel";
 import WorkspaceGoogleFlowPanel from "./WorkspaceGoogleFlowPanel";
+import ChangePasswordPanel from "./ChangePasswordPanel";
 import {
   getMaskedAiSettings,
   setIpRiskChecksEnabled,
@@ -78,6 +79,16 @@ export default async function SettingsPage() {
           />
           <Row k="ID" v={<code className="id-mono">{workspace.id}</code>} />
         </dl>
+      </Panel>
+
+      <Panel title="Change password">
+        <p className="text-xs text-muted mb-4">
+          Update the password on <strong>{user.email}</strong>. Requires
+          the current password as proof of identity. Sessions on other
+          devices stay signed in until their JWT expires — nothing
+          force-logs-out.
+        </p>
+        <ChangePasswordPanel />
       </Panel>
 
       <Panel title="Workspace API token">

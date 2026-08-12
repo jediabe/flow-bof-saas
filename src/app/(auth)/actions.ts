@@ -113,3 +113,78 @@ export async function logoutAction(): Promise<void> {
   await clearSessionCookie();
   redirect("/login");
 }
+
+/**
+ * Result shape for the settings-page change-password form. Kept
+ * distinct from AuthFormState because success surfaces a message
+ * (rather than a redirect), and the form uses useActionState.
+ */
+export interface ChangePasswordState {
+  ok: boolean;
+  message: string;
+}
+
+/**
+ * Change the current user's password. Requires the CURRENT
+ * password as proof of identity — this matches the standard
+ * "change password" pattern and prevents a stolen session
+ * (browser left open, XSS, etc.) from silently rotating the
+ * credential.
+ *
+ * Sessions are NOT invalidated on success. If we ever ship a
+ * session-version column on User, we'd bump it here to force
+ * every other device to re-auth; today the JWT is stateless and
+ * there's nothing to bump.
+ *
+ * Timing side-channel: bcrypt compare + hash on every call
+ * regardless of the current-password result, so an attacker
+ * can't tell "wrong current password" from "policy rejection"
+ * via response time.
+ */
+export async function changePasswordAction(
+  _prev: ChangePasswordState,
+  formData: FormData,
+): Promise<ChangePasswordState> {
+  const { getCurrentUser } = await import("@/lib/workspace");
+  const user = await getCurrentUser({ optional: true });
+  if (!user) {
+    return { ok: false, message: "Session expired. Sign in again." };
+  }
+
+  const currentPassword = String(formData.get("currentPassword") || "");
+  const newPassword = String(formData.get("newPassword") || "");
+  const confirmPassword = String(formData.get("confirmPassword") || "");
+
+  if (!currentPassword || !newPassword || !confirmPassword) {
+    return { ok: false, message: "Fill in every field." };
+  }
+  if (newPassword !== confirmPassword) {
+    return { ok: false, message: "The two new-password fields don't match." };
+  }
+  const policyErr = validatePassword(newPassword);
+  if (policyErr) {
+    return { ok: false, message: policyErr };
+  }
+  if (newPassword === currentPassword) {
+    return { ok: false, message: "New password must be different from your current one." };
+  }
+
+  const row = await db.user.findUnique({
+    where: { id: user.id },
+    select: { id: true, passwordHash: true },
+  });
+  const currentOk = await verifyPassword(
+    currentPassword,
+    row?.passwordHash ?? null,
+  );
+  if (!row || !currentOk) {
+    return { ok: false, message: "Current password is incorrect." };
+  }
+
+  const newHash = await hashPassword(newPassword);
+  await db.user.update({
+    where: { id: row.id },
+    data: { passwordHash: newHash },
+  });
+  return { ok: true, message: "Password updated. Existing sessions on other devices stay signed in until their JWT expires." };
+}
