@@ -22,7 +22,8 @@
     "db:prod:push": "./scripts/prod-db-push.sh",
     "cleanup:uploads": "node scripts/cleanup-uploads.mjs",
     "backfill:product-images": "node scripts/backfill-product-images.mjs",
-    "llm:import-openai-oauth": "node --env-file=.env scripts/import-openai-oauth.mjs"
+    "llm:import-openai-oauth": "node --env-file=.env scripts/import-openai-oauth.mjs",
+    "user:reset-password": "node --env-file=.env scripts/reset-user-password.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.100.1",
