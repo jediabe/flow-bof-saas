@@ -646,6 +646,77 @@ function rehydrateToInputItems(rows: StoredMessage[]): ResponsesInputItem[] {
       out.push({ role: "user", content: row.content });
     }
   }
+  return patchOrphanFunctionCalls(out);
+}
+
+/**
+ * Post-rehydration fix-up — the Responses API rejects the whole
+ * request with:
+ *   "No tool output found for function call call_XXX"
+ * if any function_call in the input array lacks a paired
+ * function_call_output immediately after it. Orphan function_calls
+ * happen when a prior turn was interrupted between persisting the
+ * assistant's tool_use row and persisting the tool_result row —
+ * server crash, client cancellation, dispatchTool throwing before
+ * the persist hook ran, etc. Once that happens the whole
+ * conversation is unusable until the orphan is cleaned up.
+ *
+ * We patch each orphan by inserting a synthetic
+ * function_call_output right after it, carrying a short "tool did
+ * not complete" message. The model sees "this tool didn't work
+ * out" and can move on rather than being wedged.
+ *
+ * Detection: walk the array, track every function_call by its
+ * call_id, and match against every function_call_output seen
+ * downstream. Missing pairs get synthesized. Only the
+ * IMMEDIATELY-following function_call_output counts per the API
+ * (it doesn't allow reordering), so we insert the synthetic
+ * output right after the orphan.
+ */
+function patchOrphanFunctionCalls(
+  items: ResponsesInputItem[],
+): ResponsesInputItem[] {
+  // Pass 1: collect every call_id that HAS an output.
+  const paired = new Set<string>();
+  for (const item of items) {
+    if (
+      "type" in item &&
+      item.type === "function_call_output" &&
+      typeof item.call_id === "string"
+    ) {
+      paired.add(item.call_id);
+    }
+  }
+  // Pass 2: rebuild the list, inserting a synthetic output after
+  // each orphan function_call.
+  const out: ResponsesInputItem[] = [];
+  let patchedCount = 0;
+  for (const item of items) {
+    out.push(item);
+    if (
+      "type" in item &&
+      item.type === "function_call" &&
+      typeof item.call_id === "string" &&
+      !paired.has(item.call_id)
+    ) {
+      out.push({
+        type: "function_call_output",
+        call_id: item.call_id,
+        output:
+          "(tool did not complete — a prior turn was interrupted before the result was persisted. Treat this call as failed and proceed.)",
+      });
+      // Mark as paired so a second copy doesn't get inserted if
+      // the same call_id appears twice (defensive; shouldn't
+      // happen in practice).
+      paired.add(item.call_id);
+      patchedCount += 1;
+    }
+  }
+  if (patchedCount > 0) {
+    console.warn(
+      `[responses-loop] rehydration patched ${patchedCount} orphan function_call(s) with synthetic outputs. Interrupted prior turn(s) — expected after a mid-turn crash or client cancel.`,
+    );
+  }
   return out;
 }
 
