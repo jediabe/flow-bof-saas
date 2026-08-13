@@ -33,6 +33,7 @@ import {
   type ClipStep,
 } from "./style2/chain.js";
 import { MARKETS, validateCopyPure } from "./style2/copy.js";
+import { getStyle2AgentInstructions } from "./style2/agent-instructions.js";
 import { SYNC_GENERATION_TIMEOUT_MS } from "../constants.js";
 
 /* ==================================================================
@@ -64,6 +65,7 @@ export function registerStyle2Tools(server: McpServer): void {
   registerValidateCopy(server);
   registerNextStep(server);
   registerCopywriterPrompt(server);
+  registerFlowAgentV6Prompt(server);
 }
 
 /* ------------------------------------------------------------------
@@ -634,4 +636,46 @@ Prohibitions across every block:
   - No profanity, including censored forms.
 
 Output each block clearly labeled. After producing the copy, call apex_style2_validate_copy with the four fields to confirm compliance.`;
+}
+
+/* ------------------------------------------------------------------
+ * style2_flow_agent_v6 MCP prompt
+ *
+ * Serves the full rev-6 Style 2 Flow-agent instructions (loaded
+ * from docs/STYLE-2-SOP.md at server boot) as a fetchable MCP
+ * prompt. Chat agents pull this at the start of a Style 2
+ * conversation to load the complete spec — 8-node chain, the
+ * character-ref attachment rules, room menus, LARGE/WORN
+ * overrides, prohibitions, and the fixed prompt templates —
+ * without the calling app having to embed 700+ lines of Style 2
+ * text in its own system prompt.
+ *
+ * No args: the spec is self-contained; the operator fills in
+ * product-specific details (rolled scene, form, count) at
+ * invocation time per the spec's INTAKE section.
+ * ---------------------------------------------------------------- */
+
+function registerFlowAgentV6Prompt(server: McpServer): void {
+  server.registerPrompt(
+    "style2_flow_agent_v6",
+    {
+      title: "Style 2 · Flow-agent instructions (rev 6)",
+      description:
+        "Full Style 2 (MOF AI Avatar) instructions for a chat agent that will drive the 8-node image + video chain end-to-end via the google_flow_* tools. Uses character-ref registration for identity anchoring (see NO CHARACTER REFERENCE ON FILE), enforces the 8-node S0/N1–N7 attachment table, ships the fixed prompt text for every node, and lists prohibitions. Load this at the start of any Style 2 conversation via prompts/get.",
+      // No args — the spec is self-contained; product/scene
+      // details are filled in at invocation time per the
+      // INTAKE section of the doc.
+    },
+    () => ({
+      messages: [
+        {
+          role: "user",
+          content: {
+            type: "text",
+            text: getStyle2AgentInstructions(),
+          },
+        },
+      ],
+    }),
+  );
 }

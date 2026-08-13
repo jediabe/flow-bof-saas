@@ -40,6 +40,12 @@ RUN npm ci --omit=dev --no-audit --no-fund
 # The compiled output from the builder.
 COPY --from=builder /app/dist ./dist
 
+# Docs directory — needed at runtime by prompts that serve
+# spec text (e.g. style2_flow_agent_v6 which returns
+# docs/STYLE-2-SOP.md verbatim). Keep this after the dist copy
+# so a docs-only change doesn't invalidate the earlier layers.
+COPY docs ./docs
+
 # Non-root user (Node's built-in one) so the process can't touch
 # the container filesystem outside /app.
 USER node

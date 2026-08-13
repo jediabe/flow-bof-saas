@@ -156,6 +156,8 @@ Encode the Apex Style 2 (MOF AI Avatar) SOP as a set of deterministic tools plus
 
 The `style2_copywriter` MCP prompt hands the calling model the SOP §6 authoring rules and feeds its output back to `apex_style2_validate_copy`. Voice / ElevenLabs tools (synth, fit loop, timing map, captions) are a follow-up phase — not in this ship.
 
+**`style2_flow_agent_v6` MCP prompt** — the current end-to-end Flow-agent spec (rev 6 of [`docs/STYLE-2-SOP.md`](docs/STYLE-2-SOP.md)). Fetch via `prompts/get` at the start of any Style 2 conversation to load the complete instructions: MODE 0 (avatar build + `google_flow_create_character` registration), MODE 1 (8-node S0/N1–N7 chain with the attachment table, room menus, LARGE/WORN overrides, prohibitions, and fixed prompt text for every node). The `apex_style2_next_step` / `_build_clip_prompts` / `_roll_scene` tools still ship but are superseded by v6's direct-tool-call flow — v6 has the agent call `google_flow_create_character`, `google_flow_upload_asset`, `google_flow_generate_image`, and `google_flow_generate_video` directly.
+
 Every tool takes `response_format` (`markdown` by default, or `json`) and returns `structuredContent` alongside the text, so your UI can render media cards from the same call the model reads.
 
 ### How the tools differ from the raw API

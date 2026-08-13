@@ -774,6 +774,8 @@ section("Style 2 · copywriter prompt");
   const prompts = body.result?.prompts ?? [];
   check("prompts/list includes style2_copywriter",
     prompts.some((p) => p.name === "style2_copywriter"));
+  check("prompts/list includes style2_flow_agent_v6",
+    prompts.some((p) => p.name === "style2_flow_agent_v6"));
 
   const { body: getP } = await rpc("prompts/get", {
     name: "style2_copywriter",
@@ -787,6 +789,22 @@ section("Style 2 · copywriter prompt");
   const text = getP.result?.messages?.[0]?.content?.text ?? "";
   check("prompts/get style2_copywriter returns SOP guidance",
     text.includes("70-75 words") && text.includes("21% off"));
+
+  // style2_flow_agent_v6 takes NO args and returns the full
+  // rev-6 spec verbatim from docs/STYLE-2-SOP.md.
+  const { body: getV6 } = await rpc("prompts/get", {
+    name: "style2_flow_agent_v6",
+    arguments: {},
+  });
+  const v6Text = getV6.result?.messages?.[0]?.content?.text ?? "";
+  check("prompts/get style2_flow_agent_v6 returns non-trivial text",
+    v6Text.length > 2000);
+  check("v6 spec text contains the MODE 0 / MODE 1 headings",
+    v6Text.includes("MODE 0") && v6Text.includes("MODE 1"));
+  check("v6 spec text names google_flow_create_character (character-ref mechanism)",
+    v6Text.includes("google_flow_create_character"));
+  check("v6 spec text keeps the FIXED-TEXT template markers",
+    v6Text.includes("FIXED TEXT") && v6Text.includes("S0 — SCENE IMAGE"));
 }
 
 /* ===================================================================== */
