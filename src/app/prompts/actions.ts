@@ -1128,6 +1128,88 @@ export async function setChosenCopyPart(input: {
  *
  * Synchronous — a 30-row batch takes ~10s with concurrency 5.
  */
+/**
+ * Re-enrich a SINGLE product from TikHub. Used by the "Retry
+ * TikHub" button on the product detail drawer's failure banner
+ * so the operator can retry one bad product without re-running
+ * the whole batch. Useful when TikHub had a bad minute for one
+ * specific ID + region combo.
+ *
+ * Region is derived from the product's batch's market — same
+ * source of truth as the batch-wide re-enrich, no override.
+ *
+ * Also fires the Style 1 auto-gen trigger on success so a
+ * newly-populated discount % rolls into a fresh copy kit
+ * without needing another manual regenerate.
+ */
+export async function reEnrichProductFromTikHub(input: {
+  productId: string;
+}): Promise<{ ok: boolean; message: string }> {
+  if (!input.productId) return { ok: false, message: "missing productId" };
+  const { workspace } = await getCurrentWorkspace();
+  const product = await db.product.findFirst({
+    where: {
+      id: input.productId,
+      deletedAt: null,
+      batch: { workspaceId: workspace.id },
+    },
+    select: {
+      id: true,
+      batchId: true,
+      batch: { select: { id: true, market: true } },
+    },
+  });
+  if (!product) {
+    return { ok: false, message: "product not found in this workspace" };
+  }
+  const region =
+    (product.batch.market ?? "").toLowerCase() === "us" ? "US" : "GB";
+  try {
+    const { enrichProductFromTikHub, triggerStyle1GenerationIfDiscountReady } =
+      await import("@/lib/tikhub-enrichment");
+    const result = await enrichProductFromTikHub({
+      productId: product.id,
+      workspaceId: workspace.id,
+      batchId: product.batchId,
+      region,
+    });
+    revalidatePath("/prompts");
+    revalidatePath(`/batches/${product.batchId}`);
+    // If enrichment produced a discount, kick a fresh Style 1
+    // gen so the kit reflects it — same pattern the batch-wide
+    // re-enrich uses.
+    if (result === "updated" || result === "no-op") {
+      try {
+        await triggerStyle1GenerationIfDiscountReady({
+          batchId: product.batchId,
+          workspaceId: workspace.id,
+        });
+      } catch (err) {
+        console.error(
+          `[re-enrich-product] auto-gen queue threw for product=${product.id}:`,
+          err,
+        );
+      }
+    }
+    const label: Record<string, string> = {
+      updated: "TikHub updated the product",
+      "no-op": "No changes needed",
+      "not-found": `Not found in TikHub catalog (region ${region})`,
+      "api-failed": `TikHub API error (region ${region})`,
+      "no-product-id": "No TikTok Shop URL on this product",
+    };
+    return {
+      ok: result === "updated" || result === "no-op",
+      message: label[result] ?? result,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      message: `Re-enrichment errored: ${(err as Error).message.slice(0, 200)}`,
+    };
+  }
+}
+
 export async function reEnrichBatchFromTikHub(input: {
   batchId: string;
 }): Promise<{ ok: boolean; message: string }> {

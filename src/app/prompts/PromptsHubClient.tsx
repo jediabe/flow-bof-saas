@@ -13,6 +13,7 @@ import {
   regenerateApprovedInBatch,
   setChosenCopyPart,
   reEnrichBatchFromTikHub,
+  reEnrichProductFromTikHub,
   type BatchPromptsState,
   type BatchPromptsProduct,
   type RecentBatchSummary,
@@ -1202,11 +1203,14 @@ function ProductAssets({ product }: { product: BatchPromptsProduct }) {
             TikHub enrichment failed
           </div>
           <div className="text-text">{err}</div>
-          {attemptedAt && (
-            <div className="text-[10px] text-muted2 mt-1">
-              Last attempted {new Date(attemptedAt).toLocaleString()}
-            </div>
-          )}
+          <div className="flex items-center gap-3 mt-2 flex-wrap">
+            <ProductRetryButton productId={product.id} />
+            {attemptedAt && (
+              <span className="text-[10px] text-muted2">
+                Last attempted {new Date(attemptedAt).toLocaleString()}
+              </span>
+            )}
+          </div>
         </div>
       )}
       {primary && (
@@ -1258,6 +1262,58 @@ function ProductAssets({ product }: { product: BatchPromptsProduct }) {
         </details>
       )}
     </div>
+  );
+}
+
+/**
+ * Retry TikHub enrichment for a single product. Rendered next
+ * to the drawer's "TikHub enrichment failed" banner so the
+ * operator can retry one bad product without rerunning the
+ * whole batch (which would burn credits on every OK product too).
+ *
+ * On success the parent's polling loop picks up the fresh row
+ * within a couple of seconds — no local state update needed.
+ */
+function ProductRetryButton({ productId }: { productId: string }) {
+  const router = useRouter();
+  const [pending, startTransition] = useTransition();
+  const [msg, setMsg] = useState<string | null>(null);
+  const [ok, setOk] = useState<boolean>(false);
+
+  function onClick() {
+    setMsg(null);
+    startTransition(async () => {
+      const r = await reEnrichProductFromTikHub({ productId });
+      setOk(r.ok);
+      setMsg(r.message);
+      // Pull fresh server data so the failure banner disappears
+      // (or gets a new lastAttempted timestamp) without waiting
+      // for the batch poller.
+      router.refresh();
+      // Clear the toast after a few seconds so it doesn't linger.
+      setTimeout(() => setMsg(null), 6000);
+    });
+  }
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={pending}
+        className="text-[11px] px-2.5 py-1 rounded-lg border border-border hover:border-border-strong hover:bg-panel2 text-text transition-colors disabled:opacity-50"
+        title="Re-run TikHub enrichment for THIS product only. Uses the batch's region."
+      >
+        {pending ? "Retrying…" : "Retry TikHub"}
+      </button>
+      {msg && (
+        <span
+          className={"text-[10px] " + (ok ? "text-ok" : "text-muted")}
+        >
+          {ok ? "✓ " : ""}{msg}
+        </span>
+      )}
+    </>
   );
 }
 
