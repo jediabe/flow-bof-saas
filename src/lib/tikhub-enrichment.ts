@@ -121,36 +121,87 @@ export async function enrichProductFromTikHub(input: {
     return "no-product-id";
   }
 
-  const region = input.region ?? "GB";
-  let detail;
-  try {
-    detail = await getShopProductDetailEnriched(productIdOnTikTok, {
-      region,
-    });
-  } catch (err) {
-    const raw = (err as Error).message || "unknown error";
-    console.error(
-      `[tikhub-enrichment] fetch failed for product=${input.productId} tiktok_product=${productIdOnTikTok}:`,
-      err,
-    );
-    await recordAttempt(
-      row.id,
-      `TikHub API error (region ${region}): ${raw.slice(0, 180)}`,
-    );
-    return "api-failed";
+  const primaryRegion = input.region ?? "GB";
+  // TikHub product-detail lookups are region-scoped. If a product
+  // isn't sold in the batch's region — or TikHub's own upstream
+  // is refusing that product+region combo with the generic
+  // "Request failed. Please retry. ... You won't be charged"
+  // message (their polite "can't process this" that our retry
+  // loop can't work around) — fall back to the OTHER region and
+  // try once. Most products sold on TT Shop appear in both GB
+  // and US catalogues, so this typically converts a
+  // straight-up failure into a successful enrichment with the
+  // right images + description.
+  const fallbackRegion = primaryRegion === "GB" ? "US" : "GB";
+  const attemptOrder: string[] = [primaryRegion, fallbackRegion];
+
+  type AttemptOutcome =
+    | { kind: "ok"; detail: NonNullable<Awaited<ReturnType<typeof getShopProductDetailEnriched>>> }
+    | { kind: "api-failed"; error: string }
+    | { kind: "not-found" };
+  const attempts: Array<{ region: string; outcome: AttemptOutcome }> = [];
+
+  for (const region of attemptOrder) {
+    try {
+      const detail = await getShopProductDetailEnriched(productIdOnTikTok, {
+        region,
+      });
+      if (detail) {
+        attempts.push({ region, outcome: { kind: "ok", detail } });
+        break;
+      }
+      attempts.push({ region, outcome: { kind: "not-found" } });
+    } catch (err) {
+      const raw = (err as Error).message || "unknown error";
+      console.error(
+        `[tikhub-enrichment] fetch failed for product=${input.productId} tiktok_product=${productIdOnTikTok} region=${region}:`,
+        err,
+      );
+      attempts.push({
+        region,
+        outcome: { kind: "api-failed", error: raw.slice(0, 180) },
+      });
+    }
   }
-  // getShopProductDetailEnriched returns null in two distinct
-  // cases: (a) the HTTP call returned a non-object payload
-  // (should be rare — that would be a network / body-parse
-  // issue), and (b) TikHub returned exists=false meaning the
-  // product isn't in the queried region. Case (b) is the
-  // ~always-culprit here so we bias the diagnostic toward it.
+
+  const winner = attempts.find((a) => a.outcome.kind === "ok");
+  const detail =
+    winner && winner.outcome.kind === "ok" ? winner.outcome.detail : null;
+
   if (!detail) {
+    // Every region failed. Report the primary region's failure
+    // reason (that's what the operator picked), but include the
+    // fallback's outcome in the note so the log line explains
+    // why we didn't succeed.
+    const primary = attempts[0]!;
+    const fallback = attempts[1];
+    const fallbackNote = fallback
+      ? ` · fallback ${fallback.region}: ${fallback.outcome.kind}${fallback.outcome.kind === "api-failed" ? ` (${fallback.outcome.error.slice(0, 80)})` : ""}`
+      : "";
+    if (primary.outcome.kind === "api-failed") {
+      await recordAttempt(
+        row.id,
+        `TikHub API error (region ${primary.region}): ${primary.outcome.error}${fallbackNote}`,
+      );
+      return "api-failed";
+    }
+    // not-found (primary and fallback both)
     await recordAttempt(
       row.id,
-      `Not found in TikHub catalog (region ${region}) — product may be delisted, or the batch region doesn't match this product's actual shop region. Product ID: ${productIdOnTikTok}`,
+      `Not found in TikHub catalog (region ${primary.region}) — product may be delisted, or the batch region doesn't match this product's actual shop region. Product ID: ${productIdOnTikTok}${fallbackNote}`,
     );
     return "not-found";
+  }
+
+  // If the fallback region rescued us, log it so the operator
+  // can see in docker logs which products came from a different
+  // shop than the batch's market — useful for spotting patterns
+  // (e.g. Kalodata sheet exported for UK but half the products
+  // are US-only).
+  if (winner!.region !== primaryRegion) {
+    console.warn(
+      `[tikhub-enrichment] product=${input.productId} tiktok_product=${productIdOnTikTok} rescued by fallback region ${winner!.region} (batch region ${primaryRegion} returned ${attempts[0]!.outcome.kind}).`,
+    );
   }
 
   // Build the update payload. Source-* fields ALWAYS overwrite
