@@ -47,7 +47,7 @@ import type {
 } from "@anthropic-ai/sdk/resources/messages";
 import { db } from "@/lib/db";
 import { loadOrCreateSettings } from "@/lib/workspace-settings";
-import { callMcpTool, listMcpTools } from "@/lib/apex-mcp";
+import { callMcpTool, getMcpPrompt, listMcpTools } from "@/lib/apex-mcp";
 import {
   resolveLlmCredential,
   LlmCredentialError,
@@ -392,11 +392,33 @@ async function* runAgentTurnInner(
       return false;
     }
   });
+  // Style 2 spec injection — the chat agent's LLM can't call
+  // prompts/get (MCP prompts aren't exposed to Anthropic
+  // Messages or OpenAI Responses natively), so we fetch the
+  // style2_flow_agent_v6 prompt server-side and inline it into
+  // the system prompt whenever this turn (or any prior turn)
+  // looks Style-2-shaped. Cached in-memory after first fetch
+  // per process so 99% of turns skip the round-trip.
+  //
+  // Detection is deliberately broad: any past user message or
+  // this-turn message mentioning "style 2", "MOF avatar",
+  // "build avatar", "avatar", etc. arms it. Once armed, every
+  // subsequent turn in the conversation gets the spec.
+  // False-positives are cheap (just adds ~30K chars of read-only
+  // context to the system prompt); false-negatives leave the
+  // agent unable to run Style 2.
+  const style2SpecText = await maybeLoadStyle2Spec({
+    workspaceId,
+    flowEmail,
+    userText,
+    priorMessages: stored,
+  });
   const systemPrompt = buildSystemPrompt({
     batchName: conv.batch.name,
     market: conv.batch.market,
     currentProductId: conv.currentProductId,
     hasVideoBefore,
+    style2SpecText,
   });
 
   // Shared tool-dispatch helper — used by both loop
@@ -967,11 +989,42 @@ function parseAttachedImages(json: string | null): string[] {
   return [];
 }
 
+// Broad regex — any of these substrings in a past-or-current user
+// message arms the Style 2 spec injection. Kept intentionally loose;
+// a false positive costs ~30K chars of read-only system context, a
+// false negative leaves the agent unable to run Style 2.
+const STYLE2_TRIGGER_RE =
+  /\b(style\s*2|style-?2|mof\s+avatar|avatar\s+(video|scene|clip|store|discovery)|build\s+(my\s+)?avatar|s2|character[- ]ref|n[1-7]\b|s0\s+register)/i;
+
+async function maybeLoadStyle2Spec(input: {
+  workspaceId: string;
+  flowEmail: string | null;
+  userText: string;
+  priorMessages: Array<{ role: string; content: string | null }>;
+}): Promise<string | null> {
+  if (!input.flowEmail) return null;
+  const armed =
+    STYLE2_TRIGGER_RE.test(input.userText) ||
+    input.priorMessages.some(
+      (m) =>
+        m.role === "user" &&
+        typeof m.content === "string" &&
+        STYLE2_TRIGGER_RE.test(m.content),
+    );
+  if (!armed) return null;
+  return getMcpPrompt({
+    sub: input.workspaceId,
+    flowEmail: input.flowEmail,
+    name: "style2_flow_agent_v6",
+  });
+}
+
 function buildSystemPrompt(ctx: {
   batchName: string;
   market: string;
   currentProductId: string | null;
   hasVideoBefore: boolean;
+  style2SpecText: string | null;
 }): string {
   const marketLabel = ctx.market === "us" ? "US" : "UK";
   const focus = ctx.currentProductId
@@ -1100,27 +1153,21 @@ the placement feels real, not forced onto a countertop.
 # Style 2 (only when the operator asks for Style 2)
 
 Style 2 is the avatar-based Store-Discovery format (UGC-style,
-single locked identity across every scene). The full spec —
-character-ref registration, 8-node S0/N1–N7 chain, room menus,
-LARGE + WORN overrides, prohibitions, and the fixed prompt text
-for every node — lives in the MCP as a fetchable prompt:
-**style2_flow_agent_v6**.
+single locked identity across every scene). ${
+    ctx.style2SpecText
+      ? `The full spec — character-ref registration, 8-node S0/N1–N7 chain, room menus, LARGE + WORN overrides, prohibitions, and the fixed prompt text for every node — is inlined below in the **Style 2 v6 spec** section.
 
-When the operator says anything Style-2-shaped ("make a Style 2",
-"MOF avatar video", "build my avatar", etc.), your FIRST move
-is to load that prompt via prompts/get (name:
-"style2_flow_agent_v6", no args) and follow it end-to-end. It
-tells you which google_flow_* tools to call, in what order, and
-with which reference attachments — do not improvise around it.
+When the operator says anything Style-2-shaped ("make a Style 2", "MOF avatar video", "build my avatar", etc.), follow that inlined spec end-to-end. It tells you which google_flow_* tools to call, in what order, and with which reference attachments — do not improvise around it.
 
 Two things the v6 spec doesn't know and that stay true here:
-  - Async jobs are auto-polled by the runner (see below), so
-    ignore the spec's "poll google_flow_get_job until terminal"
-    instruction — a completed job payload comes back to you
-    directly from google_flow_generate_video.
-  - The chat agent doesn't handle copy for Style 2 (that goes
-    through the style2_copywriter prompt separately). Follow
-    v6's "You do not write copy" rule.
+  - Async jobs are auto-polled by the runner (see below), so ignore the spec's "poll google_flow_get_job until terminal" instruction — a completed job payload comes back to you directly from google_flow_generate_video.
+  - The chat agent doesn't handle copy for Style 2 (that goes through the style2_copywriter prompt separately). Follow v6's "You do not write copy" rule.
+
+## Style 2 v6 spec (verbatim)
+
+${ctx.style2SpecText}`
+      : `The full v6 spec normally loads server-side and is inlined here, but the fetch failed for this turn — DO NOT try to run Style 2 in this state. Tell the operator: "The Style 2 v6 spec (style2_flow_agent_v6) failed to load server-side this turn. Please retry the message; if it keeps failing, check that apex-mcp is running and reachable." If they insist on proceeding, offer the older numbered scene roller (apex_style2_roll_scene / build_clip_prompts / next_step / validate_copy) — but only if they explicitly ask for it.`
+  }
 
 The older apex_style2_roll_scene / build_clip_prompts /
 next_step / validate_copy tools still exist but are superseded

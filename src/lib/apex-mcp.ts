@@ -311,6 +311,71 @@ export async function listMcpTools(input: {
   }
 }
 
+/**
+ * One-shot: fetch an MCP prompt by name and return the flattened
+ * text of its user-role message content. The chat agent doesn't
+ * expose prompts/get to the LLM (neither Anthropic Messages nor
+ * OpenAI Responses has a native "fetch this prompt" primitive),
+ * so this runs SERVER-SIDE at agent-turn start and the returned
+ * text is injected into the system prompt.
+ *
+ * Returns null on any failure (unknown prompt, network hiccup,
+ * empty content). Callers should check for null and fall back
+ * gracefully rather than crashing the turn.
+ *
+ * Caches per (sub, promptName) tuple for one process lifetime —
+ * prompt content is static within a deployment and the fetch is
+ * cheap enough to skip most of the time.
+ */
+const promptCache = new Map<string, string>();
+
+export async function getMcpPrompt(input: {
+  sub: string;
+  flowEmail: string;
+  name: string;
+  args?: Record<string, unknown>;
+}): Promise<string | null> {
+  const cacheKey = `${input.sub}::${input.name}`;
+  const cached = promptCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+
+  const client = await connectMcpClient(input);
+  try {
+    const resp = await client.getPrompt({
+      name: input.name,
+      arguments: (input.args ?? {}) as Record<string, string>,
+    });
+    // Flatten the first user-role message's text content.
+    // Prompts we register on our side always emit exactly one
+    // user-role text message; if that assumption ever changes we
+    // handle it by concatenating text blocks.
+    const parts: string[] = [];
+    for (const msg of resp.messages ?? []) {
+      const content = msg.content;
+      if (content && typeof content === "object" && "text" in content) {
+        const t = (content as { text: unknown }).text;
+        if (typeof t === "string") parts.push(t);
+      }
+    }
+    const text = parts.join("\n\n").trim();
+    if (!text) {
+      console.warn(
+        `[apex-mcp] getPrompt ${input.name} returned empty text`,
+      );
+      return null;
+    }
+    promptCache.set(cacheKey, text);
+    return text;
+  } catch (err) {
+    console.warn(
+      `[apex-mcp] getPrompt ${input.name} failed: ${(err as Error).message?.slice(0, 200)}`,
+    );
+    return null;
+  } finally {
+    await client.close().catch(() => {});
+  }
+}
+
 /** One-shot: call a tool and return the structured result. */
 export async function callMcpTool(input: {
   sub: string;
