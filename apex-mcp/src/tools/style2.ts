@@ -659,9 +659,9 @@ function registerFlowAgentV6Prompt(server: McpServer): void {
   server.registerPrompt(
     "style2_flow_agent_v6",
     {
-      title: "Style 2 · Flow-agent instructions (rev 6)",
+      title: "Style 2 · Flow-agent instructions (rev 6.1)",
       description:
-        "Full Style 2 (MOF AI Avatar) instructions for a chat agent that will drive the 8-node image + video chain end-to-end via the google_flow_* tools. Uses character-ref registration for identity anchoring (see NO CHARACTER REFERENCE ON FILE), enforces the 8-node S0/N1–N7 attachment table, ships the fixed prompt text for every node, and lists prohibitions. Load this at the start of any Style 2 conversation via prompts/get.",
+        "Full Style 2 (MOF AI Avatar) instructions for a chat agent that will drive the 8-node image + video chain end-to-end via the google_flow_* tools. Uses character-ref registration for identity anchoring (see NO CHARACTER REFERENCE ON FILE), enforces the 8-node S0/N1–N7 attachment table with the rev-6.1 correction (video nodes carry startImage ONLY — never characters or referenceImages alongside a start frame, per the confirmed-live Flow rejection), ships the fixed prompt text for every node, and lists prohibitions. Load this at the start of any Style 2 conversation via prompts/get.",
       // No args — the spec is self-contained; product/scene
       // details are filled in at invocation time per the
       // INTAKE section of the doc.

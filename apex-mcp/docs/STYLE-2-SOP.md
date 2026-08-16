@@ -1,4 +1,4 @@
-# Style 2 — MOF AI Avatar · MCP Agent Instructions (rev 6)
+# Style 2 — MOF AI Avatar · MCP Agent Instructions (rev 6.1)
 
 Rewritten from rev 5 to run through the APEX MCP tool layer directly. The biggest structural change: **@HOST is no longer a re-attached image "ingredient."** It's a `character` ref returned once by the MCP's character-registration tool and reused by reference on every node — the same mechanism this project's Style 3 (Omni Flash) system prompt uses, applied here to Style 2's Veo-based node chain. Everything else — the eight-node S0/N1–N7 structure, the fixed prompts, the room menus, the LARGE/WORN overrides, the prohibitions — is unchanged in substance; only the attachment mechanics, plus three additions, changed: image/video-prompting best practices confirmed through live testing on this project, a formal timestamp-prompting option, and a note on where Style 3 fits if you ever want a spoken-avatar alternative to this silent format.
 
@@ -6,7 +6,7 @@ Rewritten from rev 5 to run through the APEX MCP tool layer directly. The bigges
 
 **Project settings:** veo-3.1-lite · portrait · 1 output · confirm-before-generating **Always** · prompt enhancement **off** if exposed.
 
-One note on a limit worth verifying on your account: Veo 3.1 Lite is documented at **3 combined character + reference-image slots per generation**, while Nano-family image models accept more. The attachment table below is built around that — the image nodes carry every product angle, the video nodes carry the character plus the hero product shot plus the start frame.
+**Confirmed live, rev 6.1 (13 Aug 2026):** running this pipeline through the MCP produced a real rejection at N1 — `"Cannot use reference images / characters with start/end frames."` Flow's video endpoint will not accept `characters` or `referenceImages` on the same call as `startImage`/`endImage`. This is not a documentation gap, it's a confirmed API rule: once a video node has a start frame, identity and product fidelity must come from that frame alone, not from also attaching the character/product references directly to the video call. The attachment table, node headers, and MCP TOOL LAYER section below are corrected for this — image nodes still take `characters`/`referenceImages` normally, since the rejection was specific to combining those with `startImage`/`endImage` on a video generation.
 
 ---
 
@@ -59,8 +59,14 @@ You call the APEX MCP's Google Flow tools directly. The pattern:
 
   VIDEO nodes (N1, N3, N5, N7): google_flow_generate_video, model=
   veo-3.1-lite, duration as specified per node, aspectRatio=portrait,
-  characters=[<character ref>], referenceImages=[<hero product asset id>],
-  startImage=<the preceding image node's mediaGenerationId>.
+  startImage=<the preceding image node's mediaGenerationId>. Do NOT also
+  pass `characters` or `referenceImages` on this call — Flow rejects a
+  video generation that combines reference images/characters with a
+  start/end frame (confirmed live, see the note at the top of this doc).
+  Identity and product fidelity carry through the start frame alone, since
+  that frame was itself generated with the character and product
+  references attached. Say "continuing from this exact image" in the
+  prompt text to reinforce it, as the fixed prompts below already do.
 
   Every generation is async — submit, then poll google_flow_get_job until
   it reports a terminal status, and follow whatever nextAction it gives
@@ -225,9 +231,9 @@ This is latitude to fit the product properly, not license to redesign the
 format. If you're unsure whether a product fits an existing room or
 genuinely needs a new one, ask rather than force it or invent one silently.
 
-═══════════════════════════════════════════════════════════════════
+──────────────────────────────────────────────────────────────────
 ## MODE 0 — AVATAR BUILD
-═══════════════════════════════════════════════════════════════════
+──────────────────────────────────────────────────────────────────
 
 Trigger: I say "build avatar" or "new avatar", or MODE 1 is requested and no
 avatar is registered yet.
@@ -325,9 +331,9 @@ The avatar is now frozen. Her face, hair colour, hair length, hair texture
 and hairline never change again — not between videos, not between nodes.
 Only the room, outfit, angle, pose and crop vary.
 
-═══════════════════════════════════════════════════════════════════
+──────────────────────────────────────────────────────────────────
 ## MODE 1 — VIDEO RUN
-═══════════════════════════════════════════════════════════════════
+──────────────────────────────────────────────────────────────────
 
 ## INTAKE — how I hand you a job
 
@@ -379,19 +385,28 @@ PRODUCT DESCRIPTION — classify it yourself. Do not ask me to fill in a form.
 
 THREE ATTACHMENT RULES. Not optional, no exceptions.
 
-RULE 1 — THE CHARACTER REF ATTACHES TO EVERY NODE, S0 through N7. Eight
-  nodes, eight attachments, via `characters=[<character ref>]` on each
-  call. You do not stop attaching it once she "looks right" in a generated
-  frame. A generated frame is a copy of a copy; the character ref is the
-  original. Every node references the original, never the copy before it.
+RULE 1 — THE CHARACTER REF CARRIES IDENTITY ON EVERY NODE, S0 through N7,
+  but HOW it attaches differs by node type. Image nodes (S0, N2, N4, N6):
+  pass `characters=[<character ref>]` directly on the call. Video nodes
+  (N1, N3, N5, N7): do NOT pass `characters` — Flow rejects that combined
+  with a start frame (see the confirmed-constraint note at the top of this
+  doc). Identity carries through `startImage` alone on video nodes, because
+  the image node before it was generated with the character ref attached.
+  You do not stop caring about identity once she "looks right" in a
+  generated frame — you just stop attaching the ref directly once a start
+  frame is doing that job instead.
 
-RULE 2 — A PRODUCT REFERENCE ATTACHES TO EVERY NODE FROM N2 ONWARD.
+RULE 2 — A PRODUCT REFERENCE ATTACHES TO EVERY IMAGE NODE FROM N2 ONWARD,
+  the same way identity does.
   Nano image nodes (N2, N4, N6): referenceImages=[all PRODUCT_1..n asset
-  ids].
-  Veo video nodes (N3, N5, N7): referenceImages=[HERO asset id].
+  ids], passed directly on the call.
+  Veo video nodes (N3, N5, N7): do NOT pass `referenceImages` — same
+  rejection as characters, same fix. Product fidelity carries through
+  `startImage` alone, since N2/N4/N6 were generated with the product
+  references attached.
   The product is NEVER described from memory and NEVER re-drawn from a
-  previous generation. Every node reads the label, logo, colour and
-  proportions from the real uploaded photographs.
+  previous generation — the image nodes are what keep this true, since
+  they're the ones actually holding the reference attachment.
   No product reference attaches to S0 — the promoted product does not
   appear in the scene image.
 
@@ -399,27 +414,30 @@ RULE 3 — THE PREVIOUS IMAGE CHAINS FORWARD, as startImage for a video node
   or the continuity reference for an image node. This carries the room,
   outfit, lighting and pose.
 
-ATTACHMENT TABLE — attach exactly this, every run:
+ATTACHMENT TABLE — attach exactly this, every run. Video nodes carry
+ONLY startImage — no characters, no referenceImages, ever, confirmed by
+live rejection (see the note at the top of this doc):
 
   NODE   TYPE    ATTACH
   S0     image   characters=[CHARACTER]
-  N1     video   characters=[CHARACTER], startImage=S0
+  N1     video   startImage=S0
   N2     image   characters=[CHARACTER], referenceImages=[PRODUCT_1..n], startImage=S0 (continuity)
-  N3     video   characters=[CHARACTER], referenceImages=[HERO], startImage=N2
+  N3     video   startImage=N2
   N4     image   characters=[CHARACTER], referenceImages=[PRODUCT_1..n], startImage=N2 (continuity)
-  N5     video   characters=[CHARACTER], referenceImages=[HERO], startImage=N4
+  N5     video   startImage=N4
   N6     image   characters=[CHARACTER], referenceImages=[PRODUCT_1..n], startImage=N4 (continuity)
-  N7     video   characters=[CHARACTER], referenceImages=[HERO], startImage=N6
+  N7     video   startImage=N6
 
 For WORN items, the garment photographs are GARMENT_1..n asset ids and
-attach from the seed image onward — every Nano and every clip, same
-pattern as PRODUCT_1..n.
+attach the same way — image/Nano nodes carry `referenceImages=[GARMENT_1..n]`
+directly, video/Clip nodes carry only `startImage`.
 
-Remember Veo's ≤3 combined character+referenceImage cap: character (1) +
-HERO (1) = 2 on every video node, one slot of headroom if ever needed. If a
-node hits a reference limit anyway, drop the LOWEST-numbered non-hero
-product image first. Never drop the character ref, never drop the HERO,
-never drop the start frame. Tell me when you drop one.
+The old ≤3 combined character+referenceImage slot cap on Veo video calls is
+moot for this pipeline now — video nodes never carry `characters` or
+`referenceImages` at all, only `startImage`, so there's nothing to hit a
+combined cap with. That cap still applies to Veo video calls made WITHOUT a
+start frame, if this doc is ever adapted for one — not relevant to the
+eight-node chain as written.
 
 BEFORE FIRING EACH WAVE, state in one line which references you are
 attaching to each node in that wave. If a reference is missing or cannot be
@@ -567,7 +585,7 @@ interface visible. Photorealistic, vertical 9:16.
 The promoted product does NOT appear in S0. The foreground props are generic
 everyday items for the vibe only. Attach no product reference to this node.
 
---- N1 — VEO, 4 SECONDS  ·  characters=[CHARACTER], startImage=S0 ---
+--- N1 — VEO, 4 SECONDS  ·  startImage=S0 ONLY (no characters, no referenceImages) ---
 
 Continuing from this exact image — same woman, face identical. Ultra-
 realistic front-facing smartphone selfie video, close framing, her face
@@ -595,7 +613,7 @@ hand and one in the other]. All labels clearly facing the camera, true to
 size. Soft natural smile, direct eye contact. Indoor, photorealistic. No
 warping of the products or labels.
 
---- N3 — VEO, 6s  ·  characters=[CHARACTER], referenceImages=[HERO], startImage=N2 ---
+--- N3 — VEO, 6s  ·  startImage=N2 ONLY (no characters, no referenceImages) ---
 
 No talking, no lip movement. Continuing from this exact image — same
 avatar, identical face. The referenced product matches its exact color,
@@ -635,7 +653,7 @@ readable.
     roller-> to her cheek                lip   -> applicator at her lips
     eye patch -> held near her under-eye
 
---- N5 — VEO, 6s  ·  characters=[CHARACTER], referenceImages=[HERO], startImage=N4 ---
+--- N5 — VEO, 6s  ·  startImage=N4 ONLY (no characters, no referenceImages) ---
 
 No talking, no lip movement. Continue from this exact image — same woman,
 face identical, same setting, same lighting. The referenced product matches
@@ -669,7 +687,7 @@ sharp and centred, hands holding both sides. Her face visible but softly
 out of focus behind. Depth of field: product sharp, face blurred. Raw
 iPhone UGC. Vertical 9:16.
 
---- N7 — VEO, 6s  ·  characters=[CHARACTER], referenceImages=[HERO], startImage=N6 ---
+--- N7 — VEO, 6s  ·  startImage=N6 ONLY (no characters, no referenceImages) ---
 
 No talking, no lip movement. Continue from the end-frame image, same
 avatar, same face, same [ROLLED SETTING]. The referenced product matches
@@ -684,7 +702,9 @@ warping.
 
 --- LARGE / COUNTERTOP overrides ---
 
-Product references still attach to N2–N7 per the table. The unit SITS on the
+Product references still attach to N2, N4, N6 (the image nodes) per the
+table — N3, N5, N7 carry only startImage, same as every other video node.
+The unit SITS on the
 surface for the entire video. She never lifts it to her chest or face. The
 handheld camera STAYS PUT — no push-in, no zoom. The unit stays fully
 visible in frame, top to bottom, never cropped by the frame edge or her
@@ -705,8 +725,10 @@ on it and looks at the camera.
 
 --- WORN ITEMS override (clothing / shoes / accessories) ---
 
-GARMENT_1..n asset ids attach to EVERY node including the seed image; the
-character ref attaches to every node as normal. She is ALREADY WEARING the
+GARMENT_1..n asset ids attach to the Nano seed image (referenceImages=
+[GARMENT_1..n], characters=[CHARACTER]); each Veo clip carries only its
+preceding Nano frame as startImage, same no-characters/no-referenceImages
+rule as every other video node in this doc. She is ALREADY WEARING the
 item from the first frame — the one exception to "no promoted product in
 the scene image" — and applies nothing to her skin. Dress her in the EXACT
 garment from the attached photographs: match colour, cut, waistband and

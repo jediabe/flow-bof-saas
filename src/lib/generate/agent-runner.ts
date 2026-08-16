@@ -407,17 +407,21 @@ async function* runAgentTurnInner(
   // False-positives are cheap (just adds ~30K chars of read-only
   // context to the system prompt); false-negatives leave the
   // agent unable to run Style 2.
-  const style2SpecText = await maybeLoadStyle2Spec({
-    workspaceId,
-    flowEmail,
-    userText,
-    priorMessages: stored,
-  });
+  const [style1SpecText, style2SpecText] = await Promise.all([
+    loadStyle1Spec({ workspaceId, flowEmail }),
+    maybeLoadStyle2Spec({
+      workspaceId,
+      flowEmail,
+      userText,
+      priorMessages: stored,
+    }),
+  ]);
   const systemPrompt = buildSystemPrompt({
     batchName: conv.batch.name,
     market: conv.batch.market,
     currentProductId: conv.currentProductId,
     hasVideoBefore,
+    style1SpecText,
     style2SpecText,
   });
 
@@ -1019,11 +1023,29 @@ async function maybeLoadStyle2Spec(input: {
   });
 }
 
+// Style 1 is the default flow (every conversation is a Style 1
+// Store Discovery run unless the operator says otherwise), so we
+// always fetch its spec — no keyword gate. Returns null on fetch
+// failure; buildSystemPrompt falls back to the shorter inline
+// summary in that case so the agent still functions.
+async function loadStyle1Spec(input: {
+  workspaceId: string;
+  flowEmail: string | null;
+}): Promise<string | null> {
+  if (!input.flowEmail) return null;
+  return getMcpPrompt({
+    sub: input.workspaceId,
+    flowEmail: input.flowEmail,
+    name: "style1_flow_agent_v3",
+  });
+}
+
 function buildSystemPrompt(ctx: {
   batchName: string;
   market: string;
   currentProductId: string | null;
   hasVideoBefore: boolean;
+  style1SpecText: string | null;
   style2SpecText: string | null;
 }): string {
   const marketLabel = ctx.market === "us" ? "US" : "UK";
@@ -1067,61 +1089,35 @@ You have two families of tools:
   - google_flow_*: 19 tools that wrap the useapi.net Google
     Flow API (Veo 3.1 video, Nano Banana images, jobs).
 
-# Style 1 SOP — the workflow for every product
+${
+    ctx.style1SpecText
+      ? `# Style 1 v3.1 spec (verbatim)
+
+This is the authoritative Style 1 specification, loaded server-side from the MCP prompt \`style1_flow_agent_v3\` (rev 3.1). Follow it exactly for every Style 1 run — Scene 1 image/video, Scene 2 image/video, market handling, room table, prohibitions. The confirmed-live Flow attachment rule (video calls carry startImage only, never referenceImages/characters alongside a start frame) applies to every google_flow_generate_video call.
+
+${ctx.style1SpecText}`
+      : `# Style 1 SOP — the workflow for every product (fallback: MCP spec fetch failed)
+
+The full v3.1 spec normally loads server-side and is inlined here, but the fetch failed for this turn. Falling back to the short summary below. If Style 1 output looks off, retry the message — the fetch usually succeeds on retry.
 
 Style 1 is TWO scenes, ~16 seconds total:
 
   Scene 1 (~8s) — Store walk-up.
-    A retail-shelf shot of the product; camera walks toward it;
-    a hand pokes it at the end. No faces.
     IMAGE PROMPT (verbatim, swap "UK" for "US" if market=US):
       "Put a display setup for this product inside of a ${marketLabel} retail store, no price tags"
-    MOTION PROMPT (universal, verbatim):
-      "Bring the camera closer to the product and have a hand poke the product as if the person recording touched it"
+    MOTION PROMPT (universal, verbatim, and the Veo call takes startImage ONLY — no reference_images):
+      "Continuing from this exact image. Bring the camera closer to the product and have a hand poke it as if the person recording touched it, no warping of the product or label."
 
   Scene 2 (~8s) — Product at home.
-    Product sitting in the room it belongs in, on the surface a
-    real person would actually put it on. Casual iPhone snapshot
-    vibe. Same "hand pokes it" motion.
+    IMAGE PROMPT: "A real casual iPhone snapshot of this exact product sitting on a [SURFACE] in a normal everyday [SETTING]. The home looks real and presentable — clean surfaces with just one or two natural everyday items nearby, NOT cluttered, NOT messy, NOT styled or curated. Flat, normal indoor household lighting — no soft golden-hour glow, no dramatic light. Authentic phone-camera look: slight grain, true-to-life colors, minor natural imperfections, slightly casual framing like a quick photo. The product is clearly visible with its label sharp and readable, fully in frame and never cropped by the frame edge. Amateur snapshot of a clean normal home, NOT professional, NOT cinematic, NOT studio, NOT glossy, NOT CGI, NOT a magazine shoot, and NOT messy or dirty. Vertical 9:16."
+    MOTION PROMPT (universal, verbatim, Veo takes startImage ONLY):
+      "Continuing from this exact image. Bring the camera slowly closer to the product naturally as if someone is filming it on their phone at home, and have a hand come in and poke it as if the person recording reached out and touched it, no transitions, product stays the clear focus and fully visible in frame throughout, no warping of the product or label."
 
-    IMAGE PROMPT (fill in [SETTING] AND [SURFACE] — pick the
-    setting from the category table below, then pick the surface
-    that makes sense for THIS product in THAT room. Don't default
-    to "countertop" for everything — a candle goes on a coffee
-    table, a book on a nightstand, a garden tool leaning against
-    a shed wall. Product-appropriate placement is the whole point
-    of Scene 2):
-      "A real casual iPhone snapshot of this exact product sitting on a [SURFACE] in a normal everyday [SETTING]. The home looks real and presentable — clean surfaces with just one or two natural everyday items nearby, NOT cluttered, NOT messy, NOT styled or curated. Flat, normal indoor household lighting — no soft golden-hour glow, no dramatic light. Authentic phone-camera look: slight grain, true-to-life colors, minor natural imperfections, slightly casual framing like a quick photo. The product is clearly visible with its label sharp and readable. Amateur snapshot of a clean normal home, NOT professional, NOT cinematic, NOT studio, NOT glossy, NOT CGI, NOT a magazine shoot, and NOT messy or dirty. Vertical 9:16."
+Category → Scene 2 [SETTING]: Beauty/Skincare → bathroom · Kitchen/Food → kitchen · Home/Storage → living room · Tools/Outdoor → garage · Tech → desk · Pets → living room floor. Ambiguous → living room + mention it.
+Picking [SURFACE]: match the product's natural home (skincare → bathroom vanity, appliance → kitchen counter, candle → coffee table, garden tool → back step, etc.). Don't default to countertop for everything.
 
-    MOTION PROMPT (universal, verbatim):
-      "bring the camera slowly closer to the product naturally as if someone is filming it on their phone at home, and have a hand come in and poke the product as if the person recording reached out and touched it, no transitions, product stays the clear focus, no warping of the product or label"
-
-Category → Scene 2 [SETTING] substitution:
-  Beauty/Skincare  → bathroom
-  Kitchen/Food     → kitchen
-  Home/Storage     → living room
-  Tools/Outdoor    → garage
-  Tech             → desk
-  Pets             → living room floor
-If category is unclear, default to living room and mention it
-in your response so the operator can override.
-
-Picking [SURFACE] — use your judgement based on the product's
-form, function, and category. Some starting points, not a rigid
-mapping:
-  - Skincare bottle, toothbrush, hair tool     → bathroom vanity
-  - Air fryer, kettle, kitchen gadget          → kitchen counter
-  - Candle, small decor, coffee-table book     → coffee table
-  - Lamp, clock, tissue box                    → nightstand or side table
-  - Diffuser, plant, floating shelf item       → open shelf
-  - Bedding, throw pillow, blanket             → on the bed
-  - Garden tool, watering can                  → back step / patio floor
-  - Tool, drill                                → workbench or garage floor
-  - Pet toy, treat jar                         → living room floor beside a pet bed
-  - Large appliance (vacuum, air purifier)     → the floor where it lives
-If the product has a natural "home" that isn't listed, use it —
-these are examples, not an exhaustive rulebook. What matters is
-the placement feels real, not forced onto a countertop.
+**Flow attachment rule (confirmed live):** google_flow_generate_video rejects reference_images/characters combined with a start/end frame. Always pass startImage ONLY on the motion call — product fidelity carries through the frame because the image generation before it had the product reference attached.`
+  }
 
 # Standard workflow for "generate Style 1 for product X"
 
