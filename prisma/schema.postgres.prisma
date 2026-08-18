@@ -25,11 +25,10 @@ generator client {
   provider = "prisma-client-js"
 }
 
-// Skeleton dev uses SQLite — no service to run. To move to Postgres
-// later, change `provider` to "postgresql" and point DATABASE_URL at
-// a Postgres connection string. The `@db.Text` annotations in this
-// file are removed for SQLite compatibility; restore them on
-// `imagePrompt` (Product) and `message` (JobEvent) if you migrate.
+// Production runs against Postgres. The Dockerfile copies this
+// file over prisma/schema.prisma before `prisma generate` so
+// the production image is built against Postgres without
+// disrupting the dev experience.
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
@@ -438,6 +437,9 @@ model Product {
   // Videos the /generate agent produced via APEX MCP — see
   // FlowGeneratedVideo below.
   flowGeneratedVideos FlowGeneratedVideo[]
+  // Milestone 1 — Style 1 Scene 1 / Scene 2 stills as first-class
+  // QA-able assets. See FlowGeneratedImage below.
+  flowGeneratedImages FlowGeneratedImage[]
 
   @@index([batchId])
   @@index([reviewStatus])
@@ -459,9 +461,88 @@ model FlowGeneratedVideo {
   mediaGenerationId String
   prompt            String?
   notes             String?
+  // Source Nano image that produced this video (startImage fed
+  // to google_flow_generate_video). Nullable for pre-M1 rows.
+  imageMediaGenerationId String?
+  // Milestone 1 QA lifecycle — see SQLite schema for the full
+  // enum documentation. States:
+  //   NOT_QA_CHECKED | QA_RUNNING | APPROVED | REGEN_NEEDED
+  //   REGEN_IN_FLIGHT | HUMAN_REVIEW | FAILED
+  qaStatus       String   @default("NOT_QA_CHECKED")
+  qaScore        Int?
+  qaVerdictJson  String?
+  qaCompletedAt  DateTime?
+  attemptNumber  Int      @default(1)
+  parentVideoId  String?
+  parent         FlowGeneratedVideo?  @relation("VideoLineage", fields: [parentVideoId], references: [id], onDelete: SetNull)
+  attempts       FlowGeneratedVideo[] @relation("VideoLineage")
+  qaAttempts     QaAttempt[]
   createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  deletedAt         DateTime?
 
   @@index([productId, createdAt(sort: Desc)])
+  @@index([qaStatus])
+  @@index([parentVideoId])
+  @@index([deletedAt])
+}
+
+// Milestone 1 — Style 1 Scene 1 / Scene 2 stills as first-class
+// QA-able assets. See SQLite schema for full commentary.
+model FlowGeneratedImage {
+  id                String   @id @default(cuid())
+  productId         String
+  product           Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  sceneLabel        String
+  mediaGenerationId String
+  prompt            String?
+  notes             String?
+  qaStatus          String   @default("NOT_QA_CHECKED")
+  qaScore           Int?
+  qaVerdictJson     String?
+  qaCompletedAt     DateTime?
+  attemptNumber     Int      @default(1)
+  parentImageId     String?
+  parent            FlowGeneratedImage?  @relation("ImageLineage", fields: [parentImageId], references: [id], onDelete: SetNull)
+  attempts          FlowGeneratedImage[] @relation("ImageLineage")
+  qaAttempts        QaAttempt[]
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  deletedAt         DateTime?
+
+  @@index([productId, createdAt(sort: Desc)])
+  @@index([qaStatus])
+  @@index([parentImageId])
+  @@index([deletedAt])
+}
+
+// Milestone 1 — QA attempt audit log. See SQLite schema for
+// full commentary. Append-only; retention = forever.
+model QaAttempt {
+  id               String   @id @default(cuid())
+  videoId          String?
+  video            FlowGeneratedVideo? @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  imageId          String?
+  image            FlowGeneratedImage? @relation(fields: [imageId], references: [id], onDelete: Cascade)
+  assetType        String
+  attemptNumber    Int
+  rubricVersion    String
+  providerModel    String
+  framesJson       String?
+  resultJson       String
+  decision         String
+  overallScore     Int
+  hasHardFailure   Boolean  @default(false)
+  repairPromptText String?
+  repairReason     String?
+  humanOverride    String?
+  humanOverrideBy  String?
+  humanOverrideAt  DateTime?
+  createdAt        DateTime @default(now())
+
+  @@index([videoId])
+  @@index([imageId])
+  @@index([createdAt(sort: Desc)])
 }
 
 // Phase 3 — additional reference images for a Product. Up to three

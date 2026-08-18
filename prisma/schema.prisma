@@ -14,11 +14,11 @@ generator client {
   provider = "prisma-client-js"
 }
 
-// Skeleton dev uses SQLite — no service to run. To move to Postgres
-// later, change `provider` to "postgresql" and point DATABASE_URL at
-// a Postgres connection string. The `@db.Text` annotations in this
-// file are removed for SQLite compatibility; restore them on
-// `imagePrompt` (Product) and `message` (JobEvent) if you migrate.
+// Skeleton dev uses SQLite — no service to run. Production runs
+// against Postgres via prisma/schema.postgres.prisma (the
+// Dockerfile copies that file over schema.prisma before
+// `prisma generate` so the production image is built against
+// Postgres without disrupting the dev experience).
 datasource db {
   provider = "sqlite"
   url      = env("DATABASE_URL")
@@ -629,6 +629,9 @@ model Product {
   // re-mint fresh signed URLs against on demand (they expire in
   // 6h; the id doesn't). See FlowGeneratedVideo below.
   flowGeneratedVideos     FlowGeneratedVideo[]
+  // Milestone 1 — Style 1 Scene 1 / Scene 2 stills as first-class
+  // QA-able assets. See FlowGeneratedImage below.
+  flowGeneratedImages     FlowGeneratedImage[]
 
   @@index([batchId])
   @@index([reviewStatus])
@@ -673,9 +676,136 @@ model FlowGeneratedVideo {
   // attempt, may regenerate for better lighting"). Rendered as
   // hover text in the mobile posting page's videos section.
   notes             String?
+  // Source Nano image that produced this video (the startImage
+  // fed to google_flow_generate_video). Nullable for rows
+  // created before Milestone 1. QA needs it so the evaluator can
+  // compare the still against the reference image without having
+  // to re-derive it from chat history.
+  imageMediaGenerationId String?
+  // Milestone 1 QA lifecycle. See src/lib/qa/types.ts for the
+  // enum values:
+  //   "NOT_QA_CHECKED" (default — pre-M1 rows stay here forever
+  //     unless the operator hits Run QA)
+  //   "QA_RUNNING" | "APPROVED" | "REGEN_NEEDED"
+  //   "REGEN_IN_FLIGHT" | "HUMAN_REVIEW" | "FAILED"
+  // The application (not the LLM) is the sole writer.
+  qaStatus       String   @default("NOT_QA_CHECKED")
+  // Denormalised for quick sort/filter — copied from the latest
+  // QaAttempt.overallScore on APPROVE / REGEN_NEEDED / HUMAN_REVIEW.
+  qaScore        Int?
+  // Full latest VisualQaResult (stringified, Zod-validated
+  // before write). Historic verdicts live on QaAttempt; this is
+  // the "current" one for cheap reads.
+  qaVerdictJson  String?
+  qaCompletedAt  DateTime?
+  // Repair-attempt lineage. attemptNumber=1 is the original;
+  // regenerations increment. parentVideoId points to the prior
+  // attempt in the chain so the drawer can render the history.
+  attemptNumber  Int      @default(1)
+  parentVideoId  String?
+  parent         FlowGeneratedVideo?  @relation("VideoLineage", fields: [parentVideoId], references: [id], onDelete: SetNull)
+  attempts       FlowGeneratedVideo[] @relation("VideoLineage")
+  // Full QA history for this row — one row per Run-QA click.
+  qaAttempts     QaAttempt[]
   createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  deletedAt         DateTime?
 
   @@index([productId, createdAt(sort: Desc)])
+  @@index([qaStatus])
+  @@index([parentVideoId])
+  @@index([deletedAt])
+}
+
+// Style 1 Scene 1 / Scene 2 stills the /generate agent produced
+// via APEX MCP for this product. Currently the chat agent
+// generates these images and immediately consumes them as the
+// startImage for a video generation — the mediaGenerationId is
+// never persisted. Milestone 1 elevates them to first-class
+// assets so QA can rate them and (in Phase D) repair-regenerate
+// a bad still without re-running the whole video chain.
+model FlowGeneratedImage {
+  id                String   @id @default(cuid())
+  productId         String
+  product           Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  // "scene_1_store_image" | "scene_2_home_image" | "other".
+  sceneLabel        String
+  mediaGenerationId String
+  prompt            String?
+  notes             String?
+  qaStatus          String   @default("NOT_QA_CHECKED")
+  qaScore           Int?
+  qaVerdictJson     String?
+  qaCompletedAt     DateTime?
+  attemptNumber     Int      @default(1)
+  parentImageId     String?
+  parent            FlowGeneratedImage?  @relation("ImageLineage", fields: [parentImageId], references: [id], onDelete: SetNull)
+  attempts          FlowGeneratedImage[] @relation("ImageLineage")
+  qaAttempts        QaAttempt[]
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  deletedAt         DateTime?
+
+  @@index([productId, createdAt(sort: Desc)])
+  @@index([qaStatus])
+  @@index([parentImageId])
+  @@index([deletedAt])
+}
+
+// Append-only audit log — one row per QA evaluation. Every Run-
+// QA click writes one row regardless of outcome. Milestone 1
+// reads: the drawer shows attempt history + per-attempt issues.
+// Post-Milestone 1: analytics on which failure categories are
+// most common per prompt/model.
+//
+// Exactly one of (videoId, imageId) is set per row. The app
+// service layer enforces this — Prisma has no XOR constraints.
+// assetType is denormalised so history queries don't have to
+// inspect both FKs to know what was evaluated.
+//
+// Retention: kept forever. Rows are small (mostly JSON text)
+// and the audit trail is worth more than the storage cost.
+model QaAttempt {
+  id               String   @id @default(cuid())
+  videoId          String?
+  video            FlowGeneratedVideo? @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  imageId          String?
+  image            FlowGeneratedImage? @relation(fields: [imageId], references: [id], onDelete: Cascade)
+  // "STORE_IMAGE" | "STORE_VIDEO" | "HOME_IMAGE" | "HOME_VIDEO"
+  assetType        String
+  // Copy of the parent asset's attemptNumber at the time of QA.
+  attemptNumber    Int
+  // From src/lib/qa/config.ts RUBRIC_VERSION — bumped when the
+  // rubric changes so historic rows are still interpretable.
+  rubricVersion    String
+  // e.g. "claude-sonnet-5-20260601" — captured at call time.
+  providerModel    String
+  // ExtractedFrame[] metadata (timestamps + count). Null for
+  // image-asset rows (only videos have frames).
+  framesJson       String?
+  // The validated VisualQaResult (Zod-parsed before write).
+  resultJson       String
+  // "APPROVE" | "REGENERATE" | "HUMAN_REVIEW"
+  decision         String
+  // Denormalised from resultJson for cheap queries.
+  overallScore     Int
+  hasHardFailure   Boolean  @default(false)
+  // Populated by the repair-prompt service (Phase D). Nullable
+  // here so Phase B tests + writes don't require it.
+  repairPromptText String?
+  repairReason     String?
+  // Optional human override recorded when the operator explicitly
+  // approves / rejects a HUMAN_REVIEW row. humanOverrideBy is
+  // unenforced (matches the existing Job pattern) — the app fills
+  // it from the session.
+  humanOverride    String?
+  humanOverrideBy  String?
+  humanOverrideAt  DateTime?
+  createdAt        DateTime @default(now())
+
+  @@index([videoId])
+  @@index([imageId])
+  @@index([createdAt(sort: Desc)])
 }
 
 // Phase 3 — additional reference images for a Product. Up to three
