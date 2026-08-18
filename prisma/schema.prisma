@@ -632,6 +632,11 @@ model Product {
   // Milestone 1 — Style 1 Scene 1 / Scene 2 stills as first-class
   // QA-able assets. See FlowGeneratedImage below.
   flowGeneratedImages     FlowGeneratedImage[]
+  // Milestone 1 — content-generation runs against this product.
+  // One Product can have many ContentRuns (different styles,
+  // markets, repair variants, re-runs on different days). See
+  // ContentRun below.
+  contentRuns             ContentRun[]
 
   @@index([batchId])
   @@index([reviewStatus])
@@ -641,6 +646,98 @@ model Product {
   // index, each render scans the whole products table on a busy
   // workspace.
   @@index([ipRiskStatus])
+}
+
+// ---------------------------------------------------------------------------
+// ContentRun — one row per independent content-generation run
+// against a Product.
+//
+// A Product can be the source of many generation runs over its
+// lifetime: separate Style 1 attempts on different days,
+// simultaneous UK + US market runs, Style 2 variants, repair
+// retries the operator explicitly re-triggers rather than
+// letting the automatic repair loop handle. Without this row,
+// state like "which prompts were used", "which discount was
+// captured at run time", "how many attempts did THIS run take"
+// all collide on Product and lose their per-run identity.
+//
+// Scope for Milestone 1: this table holds run IDENTITY plus the
+// FROZEN inputs the generation was made against (prompt kit
+// snapshot, discount %, discount type, style, market). Per-run
+// posting/copy fields (chosenCopyPart*, postingStatus,
+// postingNotes) stay on Product for now — those move to
+// ContentRun in a later PR when the mobile-posting UX itself
+// becomes multi-run-aware.
+//
+// FlowGeneratedImage / FlowGeneratedVideo carry a NULLABLE
+// contentRunId FK. Pre-M1 asset rows have no run — they
+// grandfather as orphaned assets, still discoverable via
+// productId. New orchestrator paths (Phase C onward) always
+// populate contentRunId at generation time.
+//
+// LIFECYCLE: statuses are strings owned by the app; the LLM
+// never writes them. Preferred way to retire a run is to set
+// status = "abandoned" rather than deleting the row — these
+// rows are audit trail. The onDelete: SetNull cascade on the
+// asset FKs exists as defence-in-depth only.
+//
+// promptSnapshotJson: stored as String (not Json) matching the
+// convention every other JSON column in this schema uses
+// (style1Kit, hashtags, hookVariants, ipRiskReasons, etc.).
+// Prisma's Json type doesn't support SQLite; the dual-schema
+// setup here needs the SAME type on both providers, and the
+// SQLite provider is the constraint.
+model ContentRun {
+  id                 String   @id @default(cuid())
+  productId          String
+  product            Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  // "style1" | "style2" | future. Kept as a string (no enum)
+  // per repo convention — Batch.status, Product.reviewStatus,
+  // QaAttempt.decision are all strings the app validates.
+  style              String
+  // Market this run targets, e.g. "uk" | "us". Copied from
+  // Product.market (or Batch.market) at run creation and
+  // FROZEN — changing the Product's market override afterward
+  // does not retroactively alter this run's market.
+  market             String
+  // Run lifecycle. Enum-in-string:
+  //   "generating"  - the orchestrator is producing assets
+  //   "qa_running"  - QA in flight across this run's assets
+  //   "ready"       - every required asset has APPROVED status
+  //   "posted"      - operator marked the run posted (multi-run
+  //                   posting UX lands later; for M1 this is
+  //                   written by the mobile-posting server
+  //                   action against whichever run it targets)
+  //   "abandoned"   - operator explicitly retired the run.
+  //                   Preferred over deletion so the audit
+  //                   trail survives.
+  status             String   @default("generating")
+  // Snapshot of the prompt kit used at run creation
+  // (Product.style1Kit JSON, style2 spec version, whatever).
+  // FROZEN — regenerating Product.style1Kit later doesn't
+  // silently invalidate this run's audit trail. JSON stringified
+  // like every other JSON column; parse with parseJson<T>() at
+  // read time.
+  promptSnapshotJson String?
+  // Frozen inputs. Style 1 hooks depend on discount at
+  // generation time; a re-run days later with a different live
+  // discount is a NEW ContentRun with its own values, not a
+  // mutation.
+  discountPercent    Int?
+  discountType       String?
+  // Optional operator-facing label surfaced in the drawer
+  // ("v2 - repaired label warp", "US pilot"). Nothing in the
+  // application depends on this — pure debug affordance.
+  label              String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  images             FlowGeneratedImage[]
+  videos             FlowGeneratedVideo[]
+
+  @@index([productId, createdAt(sort: Desc)])
+  @@index([productId, status])
+  @@index([status])
 }
 
 // ---------------------------------------------------------------------------
@@ -662,6 +759,13 @@ model FlowGeneratedVideo {
   id                String   @id @default(cuid())
   productId         String
   product           Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  // Milestone 1 — content-run membership. Nullable for legacy
+  // rows created before ContentRun existed; new Phase-C+ paths
+  // MUST populate this. onDelete: SetNull is defensive only —
+  // ContentRuns should be marked status="abandoned" rather
+  // than deleted so the audit trail survives.
+  contentRunId      String?
+  contentRun        ContentRun? @relation(fields: [contentRunId], references: [id], onDelete: SetNull)
   // Style-1 slot: "scene_1_store" | "scene_2_home" | "combined"
   //             (full stitched video) | "other" (adhoc / test).
   sceneLabel        String
@@ -715,6 +819,7 @@ model FlowGeneratedVideo {
   @@index([qaStatus])
   @@index([parentVideoId])
   @@index([deletedAt])
+  @@index([contentRunId])
 }
 
 // Style 1 Scene 1 / Scene 2 stills the /generate agent produced
@@ -728,6 +833,11 @@ model FlowGeneratedImage {
   id                String   @id @default(cuid())
   productId         String
   product           Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  // Milestone 1 — content-run membership. Same rules as
+  // FlowGeneratedVideo.contentRunId — nullable for legacy,
+  // required on the new orchestrator paths.
+  contentRunId      String?
+  contentRun        ContentRun? @relation(fields: [contentRunId], references: [id], onDelete: SetNull)
   // "scene_1_store_image" | "scene_2_home_image" | "other".
   sceneLabel        String
   mediaGenerationId String
@@ -750,6 +860,7 @@ model FlowGeneratedImage {
   @@index([qaStatus])
   @@index([parentImageId])
   @@index([deletedAt])
+  @@index([contentRunId])
 }
 
 // Append-only audit log — one row per QA evaluation. Every Run-

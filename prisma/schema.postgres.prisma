@@ -440,6 +440,9 @@ model Product {
   // Milestone 1 — Style 1 Scene 1 / Scene 2 stills as first-class
   // QA-able assets. See FlowGeneratedImage below.
   flowGeneratedImages FlowGeneratedImage[]
+  // Milestone 1 — content-generation runs against this product.
+  // See ContentRun below.
+  contentRuns         ContentRun[]
 
   @@index([batchId])
   @@index([reviewStatus])
@@ -451,12 +454,47 @@ model Product {
   @@index([ipRiskStatus])
 }
 
+// Milestone 1 — content-generation runs against a Product.
+// See SQLite schema for the full architectural commentary
+// (why this exists, what belongs on it, why per-run posting
+// fields are deferred). This overlay is structurally
+// identical; strings match the SQLite provider's constraint.
+model ContentRun {
+  id                 String   @id @default(cuid())
+  productId          String
+  product            Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  style              String
+  market             String
+  status             String   @default("generating")
+  // JSON blob stored as String for schema-parity with the
+  // SQLite provider (Prisma's Json type doesn't support
+  // SQLite). Parse with parseJson<T>() at read time.
+  promptSnapshotJson String?
+  discountPercent    Int?
+  discountType       String?
+  label              String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  images             FlowGeneratedImage[]
+  videos             FlowGeneratedVideo[]
+
+  @@index([productId, createdAt(sort: Desc)])
+  @@index([productId, status])
+  @@index([status])
+}
+
 // /generate agent's saved videos per product. See SQLite schema
 // for full docs on why mediaGenerationId (not URL) is stored.
 model FlowGeneratedVideo {
   id                String   @id @default(cuid())
   productId         String
   product           Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  // Milestone 1 — content-run membership. Nullable for legacy
+  // rows; new orchestrator paths MUST populate it. See SQLite
+  // schema for the full rationale.
+  contentRunId      String?
+  contentRun        ContentRun? @relation(fields: [contentRunId], references: [id], onDelete: SetNull)
   sceneLabel        String
   mediaGenerationId String
   prompt            String?
@@ -485,6 +523,7 @@ model FlowGeneratedVideo {
   @@index([qaStatus])
   @@index([parentVideoId])
   @@index([deletedAt])
+  @@index([contentRunId])
 }
 
 // Milestone 1 — Style 1 Scene 1 / Scene 2 stills as first-class
@@ -493,6 +532,10 @@ model FlowGeneratedImage {
   id                String   @id @default(cuid())
   productId         String
   product           Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  // Milestone 1 — content-run membership. Nullable for legacy;
+  // new paths MUST populate. See SQLite schema.
+  contentRunId      String?
+  contentRun        ContentRun? @relation(fields: [contentRunId], references: [id], onDelete: SetNull)
   sceneLabel        String
   mediaGenerationId String
   prompt            String?
@@ -514,6 +557,7 @@ model FlowGeneratedImage {
   @@index([qaStatus])
   @@index([parentImageId])
   @@index([deletedAt])
+  @@index([contentRunId])
 }
 
 // Milestone 1 — QA attempt audit log. See SQLite schema for
