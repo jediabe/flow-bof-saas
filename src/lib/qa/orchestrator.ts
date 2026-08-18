@@ -45,9 +45,12 @@
  * up.
  */
 
-import { db } from "@/lib/db";
 import { mcpGetAssetUrl } from "@/lib/apex-mcp";
 import { fetchImageAsBase64 } from "@/lib/media/fetch-image";
+import {
+  LlmCredentialError,
+  resolveLlmCredential,
+} from "@/lib/llm/credentials";
 import { decide } from "./decision-engine";
 import { resolveQaConfig, DEFAULT_QA_CONFIG } from "./config";
 import { RUBRIC, computeHasHardFailure } from "./rubric";
@@ -69,7 +72,7 @@ import {
   type AssetKind,
 } from "./persistence";
 import { extractFrames, type FrameSamplingOptions } from "./frame-extraction";
-import { createAnthropicVisualQaProvider } from "./providers/anthropic-visual-qa";
+import { createVisualQaProviderFromCredential } from "./providers/factory";
 import type {
   AssetInput,
   VisualQaEvaluation,
@@ -211,7 +214,7 @@ export async function runQaForAsset(input: RunQaInput): Promise<RunQaOutput> {
 
     // 5. Provider — evaluate.
     const provider =
-      input.providerOverride ?? (await resolveDefaultProvider(asset.workspaceId));
+      input.providerOverride ?? (await resolveDefaultProvider(asset));
     providerModel = provider.identifier;
 
     const evalInput: VisualQaInput = {
@@ -354,23 +357,37 @@ function mapDecisionToStatus(
 }
 
 /**
- * Default provider factory — resolves the workspace's
- * anthropic settings and constructs an AnthropicVisualQaProvider.
- * Isolated so tests never touch it (they pass providerOverride).
+ * Default provider factory — walks the same
+ * resolveLlmCredential chain the chat agent uses
+ * (user_oauth → user_key → app_key) against the workspace
+ * OWNER's userId. Returns a VisualQaProvider that speaks the
+ * appropriate wire protocol for the resolved credential shape:
+ *
+ *   ChatGPT OAuth (user_oauth)       → Codex Responses variant
+ *   OpenAI API key (user_key / app)  → OpenAI Chat Completions vision
+ *   Anthropic API key (user_key / app) → Anthropic Messages vision
+ *
+ * Result: QA uses whichever LLM the workspace owner already
+ * pays for, matching the chat-agent invariant.
+ *
+ * Isolated so tests never touch it — they pass providerOverride
+ * on RunQaInput to inject a fake VisualQaProvider directly.
  */
 async function resolveDefaultProvider(
-  workspaceId: string,
+  asset: AssetForQa,
 ): Promise<VisualQaProvider> {
-  const settings = await db.workspaceSettings.findUnique({
-    where: { workspaceId },
-    select: { anthropicApiKey: true, anthropicModel: true },
-  });
-  const apiKey = (settings?.anthropicApiKey ?? "").trim();
-  if (!apiKey) {
-    throw new ProviderError(
-      `Workspace ${workspaceId} has no Anthropic API key configured. Visual QA requires one — set it in workspace settings.`,
-    );
+  try {
+    const cred = await resolveLlmCredential(asset.workspaceOwnerId);
+    return createVisualQaProviderFromCredential({ cred });
+  } catch (err) {
+    if (err instanceof LlmCredentialError) {
+      throw new ProviderError(
+        `No usable LLM credential for workspace ${asset.workspaceId} (owner ${asset.workspaceOwnerId}): ${err.message}. ` +
+          `Configure a credential in Settings — either connect a ChatGPT subscription, set an OpenAI or Anthropic API key, ` +
+          `or make sure an APP_OPENAI_API_KEY / APP_ANTHROPIC_API_KEY env var is present.`,
+        { cause: err },
+      );
+    }
+    throw err;
   }
-  const model = (settings?.anthropicModel ?? "").trim() || undefined;
-  return createAnthropicVisualQaProvider({ apiKey, ...(model ? { model } : {}) });
 }

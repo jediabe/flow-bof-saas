@@ -68,6 +68,10 @@ export interface AssetForQa {
   };
   workspaceId: string;
   workspaceFlowEmail: string | null;
+  /** Workspace OWNER's userId. Used by the orchestrator to walk
+   *  resolveLlmCredential() — same credential chain the chat
+   *  agent uses (user_oauth → user_key → app_key). */
+  workspaceOwnerId: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -90,7 +94,7 @@ export async function loadAssetForQa(input: {
           include: {
             batch: {
               include: {
-                workspace: { include: { settings: true } },
+                workspace: { include: { settings: true, owner: true } },
               },
             },
           },
@@ -126,6 +130,7 @@ export async function loadAssetForQa(input: {
       },
       workspaceId: row.product.batch.workspaceId,
       workspaceFlowEmail: row.product.batch.workspace.settings?.flowEmail ?? null,
+      workspaceOwnerId: row.product.batch.workspace.owner.id,
     };
   }
   // image
@@ -137,7 +142,7 @@ export async function loadAssetForQa(input: {
         include: {
           batch: {
             include: {
-              workspace: { include: { settings: true } },
+              workspace: { include: { settings: true, owner: true } },
             },
           },
         },
@@ -173,6 +178,7 @@ export async function loadAssetForQa(input: {
     },
     workspaceId: row.product.batch.workspaceId,
     workspaceFlowEmail: row.product.batch.workspace.settings?.flowEmail ?? null,
+    workspaceOwnerId: row.product.batch.workspace.owner.id,
   };
 }
 

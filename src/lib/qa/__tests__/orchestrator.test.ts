@@ -146,6 +146,7 @@ function videoRow(overrides: Record<string, unknown> = {}) {
         workspaceId: "ws-1",
         workspace: {
           settings: { flowEmail: "flow@example.com" },
+          owner: { id: "user-owner-1" },
         },
       },
     },
