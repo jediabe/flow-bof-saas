@@ -1,14 +1,23 @@
 import { defineConfig } from "vitest/config";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
 
 // Minimal vitest config for the pure-code test suites under
-// src/lib/**/__tests__/**. Kept intentionally small — the
-// tests we run today are all pure TypeScript (no DOM, no DB,
-// no network) so we don't need jsdom / setup files / coverage
-// plumbing yet. Expand when Phase C+ adds media/QA/orchestrator
-// tests that touch fs or HTTP.
+// src/lib/**/__tests__/**. Node env — no DOM, no jsdom.
+//
+// Path alias: mirror tsconfig.json's "@/*" → "./src/*" so tests
+// resolve the same imports as production code without changing
+// module specifiers.
+const here = dirname(fileURLToPath(import.meta.url));
+
 export default defineConfig({
   test: {
     environment: "node",
     include: ["src/**/__tests__/**/*.test.ts"],
+  },
+  resolve: {
+    alias: {
+      "@": resolve(here, "src"),
+    },
   },
 });
