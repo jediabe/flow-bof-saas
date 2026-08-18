@@ -28,6 +28,9 @@
 
 import OpenAI from "openai";
 import Anthropic from "@anthropic-ai/sdk";
+// Behavior-preserving extraction — see src/lib/media/fetch-image.ts
+// module doc for the details this used to carry inline.
+import { fetchImageAsBase64 } from "@/lib/media/fetch-image";
 
 import { DEFAULT_MODELS, type AiProviderSettings } from "./types";
 import { extractJson } from "./prompt-generator";
@@ -517,42 +520,6 @@ If no counterfeit/impersonation signal in EITHER text or image:
   status="low", reasons=[], recommendation="approve",
   notes="No counterfeit or impersonation signals in text or
   image."`;
-
-/**
- * Fetch a public URL and return it base64-encoded. Used by the
- * Anthropic vision path which doesn't accept raw URLs.
- *
- * Limits: 8 MiB max (Anthropic's per-request image cap is ~5 MiB
- * for most models; we leave headroom). Throws on non-image
- * content-type or oversized payload.
- */
-async function fetchImageAsBase64(
-  url: string,
-): Promise<{ data: string; mediaType: "image/jpeg" | "image/png" | "image/webp" | "image/gif" }> {
-  const resp = await fetch(url);
-  if (!resp.ok) {
-    throw new Error(`Image fetch failed: HTTP ${resp.status} ${resp.statusText}`);
-  }
-  const ct = (resp.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
-  if (!ct.startsWith("image/")) {
-    throw new Error(`Image fetch returned non-image content-type: ${ct || "?"}`);
-  }
-  const buf = Buffer.from(await resp.arrayBuffer());
-  const MAX = 8 * 1024 * 1024;
-  if (buf.byteLength > MAX) {
-    throw new Error(
-      `Image too large (${buf.byteLength} bytes, max ${MAX}).`,
-    );
-  }
-  // Anthropic accepts jpeg / png / webp / gif. Coerce anything else
-  // to image/jpeg (still works on server side; we already verified
-  // the bytes via content-type).
-  const allowed = ["image/jpeg", "image/png", "image/webp", "image/gif"] as const;
-  const mediaType = (allowed.includes(ct as typeof allowed[number])
-    ? ct
-    : "image/jpeg") as (typeof allowed)[number];
-  return { data: buf.toString("base64"), mediaType };
-}
 
 async function openaiIpRiskVision(
   input: ProductForRiskCheck,
