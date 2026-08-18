@@ -78,7 +78,13 @@ FROM node:20-alpine AS runner
 WORKDIR /app
 
 # Same runtime libs Prisma's query engine needs.
-RUN apk add --no-cache libc6-compat openssl
+# ffmpeg is used by the Milestone 1 visual-QA pipeline for
+# video frame extraction (src/lib/qa/frame-extraction.ts).
+# Alpine's community ffmpeg is a static-ish binary at
+# /usr/bin/ffmpeg + /usr/bin/ffprobe. The frame-extraction
+# module respects FFMPEG_PATH / FFPROBE_PATH env overrides but
+# defaults to `ffmpeg` / `ffprobe` on PATH — which lands here.
+RUN apk add --no-cache libc6-compat openssl ffmpeg
 
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
