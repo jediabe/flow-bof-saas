@@ -474,7 +474,8 @@ model ContentRun {
   discountType       String?
   label              String?
   createdAt          DateTime @default(now())
-  updatedAt          DateTime @updatedAt
+  // Same @default rationale as FlowGeneratedVideo.updatedAt.
+  updatedAt          DateTime @default(now()) @updatedAt
 
   images             FlowGeneratedImage[]
   videos             FlowGeneratedVideo[]
@@ -516,7 +517,11 @@ model FlowGeneratedVideo {
   attempts       FlowGeneratedVideo[] @relation("VideoLineage")
   qaAttempts     QaAttempt[]
   createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  // @default(now()) is required alongside @updatedAt so
+  // `prisma db push` can add this column to an already-populated
+  // prod table (Postgres rejects ADD COLUMN NOT NULL without a
+  // value). See SQLite schema for the fuller rationale.
+  updatedAt         DateTime @default(now()) @updatedAt
   deletedAt         DateTime?
 
   @@index([productId, createdAt(sort: Desc)])
@@ -550,7 +555,8 @@ model FlowGeneratedImage {
   attempts          FlowGeneratedImage[] @relation("ImageLineage")
   qaAttempts        QaAttempt[]
   createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  // Same @default rationale as FlowGeneratedVideo.updatedAt.
+  updatedAt         DateTime @default(now()) @updatedAt
   deletedAt         DateTime?
 
   @@index([productId, createdAt(sort: Desc)])

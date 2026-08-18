@@ -730,7 +730,8 @@ model ContentRun {
   // application depends on this — pure debug affordance.
   label              String?
   createdAt          DateTime @default(now())
-  updatedAt          DateTime @updatedAt
+  // See FlowGeneratedVideo.updatedAt for the @default rationale.
+  updatedAt          DateTime @default(now()) @updatedAt
 
   images             FlowGeneratedImage[]
   videos             FlowGeneratedVideo[]
@@ -812,7 +813,14 @@ model FlowGeneratedVideo {
   // Full QA history for this row — one row per Run-QA click.
   qaAttempts     QaAttempt[]
   createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  // @default(now()) is required here (not just @updatedAt) so
+  // `prisma db push` can ADD this column to an already-populated
+  // FlowGeneratedVideo table in prod — Postgres rejects ADD
+  // COLUMN NOT NULL without a value. The default fires on INSERT
+  // (including the ALTER TABLE backfill), @updatedAt handles
+  // subsequent UPDATE bumps. Same pattern on FlowGeneratedImage
+  // + ContentRun below for defensive uniformity.
+  updatedAt         DateTime @default(now()) @updatedAt
   deletedAt         DateTime?
 
   @@index([productId, createdAt(sort: Desc)])
@@ -853,7 +861,9 @@ model FlowGeneratedImage {
   attempts          FlowGeneratedImage[] @relation("ImageLineage")
   qaAttempts        QaAttempt[]
   createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  // See FlowGeneratedVideo.updatedAt above for why the @default
+  // sits here alongside @updatedAt.
+  updatedAt         DateTime @default(now()) @updatedAt
   deletedAt         DateTime?
 
   @@index([productId, createdAt(sort: Desc)])
