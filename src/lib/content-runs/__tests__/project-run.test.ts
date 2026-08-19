@@ -79,6 +79,20 @@ describe("projectContentRun", () => {
     expect(ContentRunProjectionSchema.parse(projection)).toEqual(projection);
   });
 
+  it("preserves persisted created status while deriving the first action", () => {
+    const projection = projectContentRun(
+      baseInput({ run: { ...baseInput().run, status: "created" } }),
+    );
+
+    expect(projection).toMatchObject({
+      status: "created",
+      requiredNextAction: {
+        type: "GENERATE_IMAGE",
+        slot: "scene_1_store_image",
+      },
+    });
+  });
+
   it("always sends a persisted NOT_QA_CHECKED managed asset to QA", () => {
     const projection = projectContentRun(
       baseInput({

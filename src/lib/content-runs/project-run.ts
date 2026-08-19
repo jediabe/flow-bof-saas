@@ -420,7 +420,10 @@ export function projectContentRun(input: ProjectContentRunInput): ContentRunProj
     id: input.run.id,
     productId: input.run.productId,
     objective: snapshot.objective,
-    status: derived.status,
+    status:
+      input.run.status === "created" && derived.status === "generating"
+        ? "created"
+        : derived.status,
     specVersion: snapshot.specVersion,
     modelSnapshot: {
       imageModel: snapshot.imageModel,
