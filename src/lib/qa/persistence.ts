@@ -55,6 +55,12 @@ export interface AssetForQa {
   originalPrompt: string | null;
   attemptNumber: number;
   contentRunId: string;
+  /** Canonical SaaS-owned object metadata. Nullable only for legacy assets. */
+  storageBucket: string | null;
+  storageKey: string | null;
+  storageContentType: string | null;
+  storageBytes: number | null;
+  storageSha256: string | null;
   contentRun: {
     id: string;
     style: string;
@@ -117,6 +123,11 @@ export async function loadAssetForQa(input: {
       originalPrompt: row.prompt,
       attemptNumber: row.attemptNumber,
       contentRunId: row.contentRunId,
+      storageBucket: row.storageBucket,
+      storageKey: row.storageKey,
+      storageContentType: row.storageContentType,
+      storageBytes: row.storageBytes,
+      storageSha256: row.storageSha256,
       contentRun: {
         id: row.contentRun.id,
         style: row.contentRun.style,
@@ -165,6 +176,11 @@ export async function loadAssetForQa(input: {
     originalPrompt: row.prompt,
     attemptNumber: row.attemptNumber,
     contentRunId: row.contentRunId,
+    storageBucket: row.storageBucket,
+    storageKey: row.storageKey,
+    storageContentType: row.storageContentType,
+    storageBytes: row.storageBytes,
+    storageSha256: row.storageSha256,
     contentRun: {
       id: row.contentRun.id,
       style: row.contentRun.style,

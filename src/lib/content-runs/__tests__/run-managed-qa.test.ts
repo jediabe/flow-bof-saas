@@ -1,18 +1,45 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { runQaForAsset, qaPersistenceDb } = vi.hoisted(() => ({
-  runQaForAsset: vi.fn(),
-  qaPersistenceDb: {
+const {
+  runQaForAsset,
+  qaPersistenceDb,
+  mcpGetAssetUrl,
+  fetchImageAsBase64,
+  extractFrames,
+  createObjectStorageFromEnv,
+  managedStorage,
+} = vi.hoisted(() => {
+  const qaPersistenceDb = {
     flowGeneratedImage: {
       updateMany: vi.fn(),
       findUnique: vi.fn(),
+      update: vi.fn(),
     },
     flowGeneratedVideo: {
       updateMany: vi.fn(),
       findUnique: vi.fn(),
+      update: vi.fn(),
     },
-  },
-}));
+    qaAttempt: { create: vi.fn() },
+    $transaction: vi.fn(),
+  };
+  const managedStorage = {
+    bucket: "managed-media",
+    put: vi.fn(),
+    get: vi.fn(),
+    delete: vi.fn(),
+    createSignedReadUrl: vi.fn(),
+  };
+  return {
+    runQaForAsset: vi.fn(),
+    qaPersistenceDb,
+    mcpGetAssetUrl: vi.fn(),
+    fetchImageAsBase64: vi.fn(),
+    extractFrames: vi.fn(),
+    createObjectStorageFromEnv: vi.fn(() => managedStorage),
+    managedStorage,
+  };
+});
 
 vi.mock("@/lib/db", () => ({ db: qaPersistenceDb }));
 vi.mock("@/lib/qa/orchestrator", () => ({
@@ -20,6 +47,13 @@ vi.mock("@/lib/qa/orchestrator", () => ({
   isPostLockQaFailure: (error: unknown) =>
     error instanceof Error &&
     (error as Error & { qaLockAcquired?: boolean }).qaLockAcquired === true,
+}));
+vi.mock("@/lib/apex-mcp", () => ({ mcpGetAssetUrl }));
+vi.mock("@/lib/media/fetch-image", () => ({ fetchImageAsBase64 }));
+vi.mock("@/lib/qa/frame-extraction", () => ({ extractFrames }));
+vi.mock("@/lib/storage", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/storage")>()),
+  createObjectStorageFromEnv,
 }));
 
 import { runManagedQa } from "../run-managed-qa";
@@ -129,12 +163,90 @@ const actor = {
   actorId: "hermes-mcp",
 };
 
+function managedQaAssetRow(
+  kind: "image" | "video",
+  overrides: Record<string, unknown> = {},
+) {
+  const assetId = `${kind}-1`;
+  const directory = kind === "image" ? "images" : "videos";
+  const extension = kind === "image" ? "png" : "mp4";
+  return {
+    id: assetId,
+    mediaGenerationId: `flow-${assetId}`,
+    sceneLabel: kind === "image" ? "scene_1_store_image" : "scene_1_store",
+    prompt: "frozen managed prompt",
+    attemptNumber: 1,
+    contentRunId: "run-1",
+    contentRun: { id: "run-1", style: "style1", market: "uk" },
+    storageBucket: "managed-media",
+    storageKey: `managed-content/workspace-1/run-1/${directory}/${assetId}.${extension}`,
+    storageContentType: kind === "image" ? "image/png" : "video/mp4",
+    storageBytes: 128,
+    storageSha256: "a".repeat(64),
+    product: {
+      id: "product-1",
+      productName: "Product",
+      category: "kitchen",
+      referenceImageUrl: null,
+      batch: {
+        workspaceId: "workspace-1",
+        workspace: {
+          settings: { flowEmail: "flow@example.com" },
+          owner: { id: "owner-1" },
+        },
+      },
+    },
+    ...overrides,
+  };
+}
+
+function approvingProvider() {
+  return {
+    identifier: "test:managed-provider",
+    evaluate: vi.fn(async () => ({
+      providerModel: "test:managed-provider",
+      elapsedMs: 1,
+      result: {
+        overallScore: 95,
+        hasHardFailure: false,
+        checks: [{ name: "PRODUCT_PRESENT", passed: true, score: 95 }],
+        issues: [],
+      },
+    })),
+  };
+}
+
 beforeEach(() => {
   runQaForAsset.mockReset();
   qaPersistenceDb.flowGeneratedImage.updateMany.mockReset();
   qaPersistenceDb.flowGeneratedImage.findUnique.mockReset();
+  qaPersistenceDb.flowGeneratedImage.update.mockReset();
   qaPersistenceDb.flowGeneratedVideo.updateMany.mockReset();
   qaPersistenceDb.flowGeneratedVideo.findUnique.mockReset();
+  qaPersistenceDb.flowGeneratedVideo.update.mockReset();
+  qaPersistenceDb.qaAttempt.create.mockReset();
+  qaPersistenceDb.qaAttempt.create.mockResolvedValue({
+    id: "qa-managed",
+    decision: "APPROVE",
+  });
+  qaPersistenceDb.$transaction.mockReset();
+  qaPersistenceDb.$transaction.mockImplementation(
+    async (callback: (tx: typeof qaPersistenceDb) => unknown) => callback(qaPersistenceDb),
+  );
+  mcpGetAssetUrl.mockReset();
+  fetchImageAsBase64.mockReset();
+  fetchImageAsBase64.mockResolvedValue({ data: "AAAA", mediaType: "image/png" });
+  extractFrames.mockReset();
+  extractFrames.mockResolvedValue({
+    frames: [{ timestampMs: 0, data: "AAAA", mediaType: "image/jpeg" }],
+    durationSec: 8,
+    requestedTimestampsMs: [0],
+  });
+  createObjectStorageFromEnv.mockClear();
+  managedStorage.createSignedReadUrl.mockReset();
+  managedStorage.createSignedReadUrl.mockImplementation(
+    async (key: string) => `https://storage.example/${key}`,
+  );
 });
 
 describe("runManagedQa", () => {
@@ -240,6 +352,101 @@ describe("runManagedQa", () => {
     expect(provider.evaluate).not.toHaveBeenCalled();
   });
 
+  it.each(["image", "video"] as const)(
+    "evaluates the persisted managed %s object without resolving the Flow URL",
+    async (assetKind) => {
+      const actualOrchestrator = await vi.importActual<
+        typeof import("@/lib/qa/orchestrator")
+      >("@/lib/qa/orchestrator");
+      const delegate =
+        assetKind === "image"
+          ? qaPersistenceDb.flowGeneratedImage
+          : qaPersistenceDb.flowGeneratedVideo;
+      const row = managedQaAssetRow(assetKind);
+      const provider = approvingProvider();
+      delegate.findUnique.mockResolvedValue(row);
+      delegate.updateMany.mockResolvedValue({ count: 1 });
+
+      await expect(
+        actualOrchestrator.runQaForAsset({
+          assetId: row.id,
+          assetKind,
+          triggeredBy: "auto",
+          providerOverride: provider as never,
+          expectedContext: {
+            workspaceId: "workspace-1",
+            contentRunId: "run-1",
+            qaStatus: "NOT_QA_CHECKED",
+            managedStorage: true,
+          } as never,
+        }),
+      ).resolves.toMatchObject({ decision: "APPROVE", qaStatus: "APPROVED" });
+
+      expect(createObjectStorageFromEnv).toHaveBeenCalledTimes(1);
+      expect(managedStorage.createSignedReadUrl).toHaveBeenCalledWith(row.storageKey);
+      expect(mcpGetAssetUrl).not.toHaveBeenCalled();
+      if (assetKind === "image") {
+        expect(fetchImageAsBase64).toHaveBeenCalledWith(
+          `https://storage.example/${row.storageKey}`,
+        );
+        expect(extractFrames).not.toHaveBeenCalled();
+      } else {
+        expect(extractFrames).toHaveBeenCalledWith({
+          videoUrl: `https://storage.example/${row.storageKey}`,
+          sampling: undefined,
+        });
+      }
+      expect(provider.evaluate).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each([
+    {
+      label: "missing metadata",
+      overrides: { storageSha256: null },
+    },
+    {
+      label: "another run key",
+      overrides: {
+        storageKey: "managed-content/workspace-1/run-other/images/image-1.png",
+      },
+    },
+    {
+      label: "another bucket",
+      overrides: { storageBucket: "attacker-controlled-bucket" },
+    },
+  ])("fails closed for $label before managed asset evaluation", async ({ overrides }) => {
+    const actualOrchestrator = await vi.importActual<
+      typeof import("@/lib/qa/orchestrator")
+    >("@/lib/qa/orchestrator");
+    const row = managedQaAssetRow("image", overrides);
+    const provider = approvingProvider();
+    qaPersistenceDb.flowGeneratedImage.findUnique.mockResolvedValue(row);
+    qaPersistenceDb.flowGeneratedImage.updateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      actualOrchestrator.runQaForAsset({
+        assetId: row.id,
+        assetKind: "image",
+        triggeredBy: "auto",
+        providerOverride: provider as never,
+        expectedContext: {
+          workspaceId: "workspace-1",
+          contentRunId: "run-1",
+          qaStatus: "NOT_QA_CHECKED",
+          managedStorage: true,
+        } as never,
+      }),
+    ).rejects.toMatchObject({
+      code: "persistence_failed",
+      qaLockAcquired: true,
+    });
+
+    expect(provider.evaluate).not.toHaveBeenCalled();
+    expect(mcpGetAssetUrl).not.toHaveBeenCalled();
+    expect(managedStorage.createSignedReadUrl).not.toHaveBeenCalled();
+  });
+
   it("advances an approved first image to its dependent video action", async () => {
     const run = createRunFixture();
     const prisma = createPrisma(run);
@@ -295,6 +502,7 @@ describe("runManagedQa", () => {
         workspaceId: "workspace-1",
         contentRunId: "run-1",
         qaStatus: "NOT_QA_CHECKED",
+        managedStorage: true,
       },
     });
     expect(prisma.contentRun.updateMany).toHaveBeenCalledWith({

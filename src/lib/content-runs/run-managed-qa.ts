@@ -391,6 +391,7 @@ export async function runManagedQa(
         workspaceId: actor.workspaceId,
         contentRunId,
         qaStatus: "NOT_QA_CHECKED",
+        managedStorage: true,
       },
     });
   } catch (error) {
