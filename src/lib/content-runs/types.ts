@@ -10,6 +10,7 @@ import type {
   QA_DECISIONS,
   QA_STATUSES,
   REQUIRED_NEXT_ACTION_TYPES,
+  SLOT_DEFINITIONS,
   VIDEO_SLOTS,
 } from "./constants";
 
@@ -55,9 +56,9 @@ export interface ManagedAssetAttempt {
   };
 }
 
-export interface ManagedSlotRecord {
-  slot: ContentSlot;
-  assetType: AssetType;
+export interface ManagedSlotRecord<TSlot extends ContentSlot = ContentSlot> {
+  slot: TSlot;
+  assetType: (typeof SLOT_DEFINITIONS)[TSlot]["assetType"];
   selectedAssetId?: string;
   attempts: ManagedAssetAttempt[];
 }
@@ -80,7 +81,12 @@ export interface ContentRunProjection {
     imageModel: string;
     videoModel: string;
   };
-  slots: [ManagedSlotRecord, ManagedSlotRecord, ManagedSlotRecord, ManagedSlotRecord];
+  slots: [
+    ManagedSlotRecord<"scene_1_store_image">,
+    ManagedSlotRecord<"scene_1_store_video">,
+    ManagedSlotRecord<"scene_2_home_image">,
+    ManagedSlotRecord<"scene_2_home_video">,
+  ];
   activeOperation?: ActiveContentOperation;
   requiredNextAction: RequiredNextAction;
   terminalReason?: string;
