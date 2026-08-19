@@ -59,6 +59,7 @@ import {
   FrameExtractionError,
   LegacyAssetError,
   MediaFetchError,
+  PersistenceError,
   ProviderError,
   ProviderValidationError,
   QaError,
@@ -107,6 +108,17 @@ export interface RunQaInput {
   configOverride?: Partial<typeof DEFAULT_QA_CONFIG>;
   /** Optional frame sampling override for videos. */
   samplingOverride?: Partial<FrameSamplingOptions>;
+  /**
+   * Optional ownership fence supplied by trusted application services. It can
+   * only narrow the asset lookup: mismatches fail before the QA lock or any
+   * provider work. Managed ContentRun QA always supplies both values.
+   */
+  expectedContext?: {
+    workspaceId: string;
+    contentRunId: string;
+    /** Optional exact pre-lock state; managed V1 uses NOT_QA_CHECKED. */
+    qaStatus?: QaStatus;
+  };
 }
 
 export interface RunQaOutput {
@@ -120,6 +132,17 @@ export interface RunQaOutput {
   reason: string;
   elapsedMs: number;
   providerModel: string;
+}
+
+export interface PostLockQaFailure extends Error {
+  readonly qaLockAcquired: true;
+}
+
+export function isPostLockQaFailure(error: unknown): error is PostLockQaFailure {
+  return (
+    error instanceof Error &&
+    (error as Partial<PostLockQaFailure>).qaLockAcquired === true
+  );
 }
 
 /**
@@ -136,12 +159,25 @@ export async function runQaForAsset(input: RunQaInput): Promise<RunQaOutput> {
     assetId: input.assetId,
     assetKind: input.assetKind,
   });
+  if (
+    input.expectedContext &&
+    (asset.workspaceId !== input.expectedContext.workspaceId ||
+      asset.contentRunId !== input.expectedContext.contentRunId)
+  ) {
+    throw new PersistenceError(
+      "Asset was not found in the expected workspace and content run.",
+    );
+  }
 
   // 2. Acquire the atomic lock. Throws ConcurrencyError if
   //    another QA/regen is in flight.
   await acquireQaLock({
     assetId: input.assetId,
     assetKind: input.assetKind,
+    expectedStatus: input.expectedContext?.qaStatus,
+    expectedWorkspaceId: input.expectedContext?.workspaceId,
+    expectedContentRunId: input.expectedContext?.contentRunId,
+    expectedContentRunStatus: input.expectedContext ? "qa_running" : undefined,
   });
 
   // From here on, any error MUST end with writeQaFailure() so
@@ -296,6 +332,12 @@ export async function runQaForAsset(input: RunQaInput): Promise<RunQaOutput> {
             `Unexpected orchestrator error: ${(err as Error).message?.slice(0, 200)}`,
             { cause: err },
           );
+    Object.defineProperty(qaErr, "qaLockAcquired", {
+      value: true,
+      enumerable: false,
+      configurable: false,
+      writable: false,
+    });
     await writeQaFailure({
       asset,
       assetType,

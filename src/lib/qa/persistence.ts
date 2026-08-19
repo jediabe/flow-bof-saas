@@ -204,21 +204,47 @@ export async function loadAssetForQa(input: {
 export async function acquireQaLock(input: {
   assetId: string;
   assetKind: AssetKind;
+  /** Optional narrowing fence for managed first-pass QA. */
+  expectedStatus?: QaStatus;
+  /** Optional tenant/run fences, applied atomically with the QA status CAS. */
+  expectedWorkspaceId?: string;
+  expectedContentRunId?: string;
+  expectedContentRunStatus?: "qa_running";
 }): Promise<void> {
   const forbidden = ["QA_RUNNING", "REGEN_IN_FLIGHT"] as const;
+  const qaStatus = input.expectedStatus ?? { notIn: [...forbidden] };
+  const ownershipFenced = Boolean(
+    input.expectedWorkspaceId ||
+      input.expectedContentRunId ||
+      input.expectedContentRunStatus,
+  );
+  const ownershipWhere = {
+    ...(input.expectedContentRunId
+      ? { contentRunId: input.expectedContentRunId }
+      : {}),
+    ...(input.expectedWorkspaceId
+      ? { product: { batch: { workspaceId: input.expectedWorkspaceId } } }
+      : {}),
+    ...(input.expectedContentRunStatus
+      ? { contentRun: { status: input.expectedContentRunStatus } }
+      : {}),
+  };
   if (input.assetKind === "video") {
     const updated = await db.flowGeneratedVideo.updateMany({
       where: {
         id: input.assetId,
-        qaStatus: { notIn: [...forbidden] },
+        qaStatus,
+        ...ownershipWhere,
       },
       data: { qaStatus: "QA_RUNNING" satisfies QaStatus },
     });
     if (updated.count !== 1) {
-      const current = await db.flowGeneratedVideo.findUnique({
-        where: { id: input.assetId },
-        select: { qaStatus: true },
-      });
+      const current = ownershipFenced
+        ? null
+        : await db.flowGeneratedVideo.findUnique({
+            where: { id: input.assetId },
+            select: { qaStatus: true },
+          });
       throw new ConcurrencyError(input.assetId, current?.qaStatus);
     }
     return;
@@ -226,15 +252,18 @@ export async function acquireQaLock(input: {
   const updated = await db.flowGeneratedImage.updateMany({
     where: {
       id: input.assetId,
-      qaStatus: { notIn: [...forbidden] },
+      qaStatus,
+      ...ownershipWhere,
     },
     data: { qaStatus: "QA_RUNNING" satisfies QaStatus },
   });
   if (updated.count !== 1) {
-    const current = await db.flowGeneratedImage.findUnique({
-      where: { id: input.assetId },
-      select: { qaStatus: true },
-    });
+    const current = ownershipFenced
+      ? null
+      : await db.flowGeneratedImage.findUnique({
+          where: { id: input.assetId },
+          select: { qaStatus: true },
+        });
     throw new ConcurrencyError(input.assetId, current?.qaStatus);
   }
 }
