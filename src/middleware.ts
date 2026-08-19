@@ -18,6 +18,8 @@ import { SESSION_COOKIE_NAME } from "@/lib/auth";
  * without either credential:
  *
  *   - /api/health           — uptime probes.
+ *   - /api/hermes-mcp      — Hermes transport uses its own workspace-
+ *                             scoped Bearer credential.
  *   - /api/runner/*         — connected runner uses its own Bearer
  *                             token (see src/lib/runner-auth.ts).
  *   - /_next/*              — Next's static/image bundles.
@@ -35,6 +37,10 @@ import { SESSION_COOKIE_NAME } from "@/lib/auth";
 function isAlwaysOpen(pathname: string): boolean {
   return (
     pathname === "/api/health" ||
+    // Hermes' MCP transport authenticates its dedicated workspace-scoped
+    // Bearer credential in the route handler. Keep this exact so no sibling
+    // API route bypasses the session-cookie gate.
+    pathname === "/api/hermes-mcp" ||
     pathname.startsWith("/api/runner/") ||
     pathname.startsWith("/_next/") ||
     pathname.startsWith("/uploads/") ||
