@@ -10,6 +10,7 @@ import {
   QA_DECISIONS,
   QA_STATUSES,
   REQUIRED_NEXT_ACTION_TYPES,
+  SLOT_DEFINITIONS,
   VIDEO_SLOTS,
 } from "./constants";
 
@@ -107,14 +108,40 @@ const AssetAttemptSchema = z
   })
   .strict();
 
-const SlotRecordSchema = z
-  .object({
-    slot: ContentSlotSchema,
-    assetType: AssetTypeSchema,
-    selectedAssetId: IdSchema.optional(),
-    attempts: z.array(AssetAttemptSchema),
-  })
-  .strict();
+const createSlotRecordSchema = <
+  TSlot extends (typeof CONTENT_SLOTS)[number],
+  TAssetType extends (typeof ASSET_TYPES)[number],
+>(
+  slot: TSlot,
+  assetType: TAssetType,
+) =>
+  z
+    .object({
+      slot: z.literal(slot),
+      assetType: z.literal(assetType),
+      selectedAssetId: IdSchema.optional(),
+      attempts: z.array(AssetAttemptSchema),
+    })
+    .strict();
+
+const CanonicalSlotRecordsSchema = z.tuple([
+  createSlotRecordSchema(
+    "scene_1_store_image",
+    SLOT_DEFINITIONS.scene_1_store_image.assetType,
+  ),
+  createSlotRecordSchema(
+    "scene_1_store_video",
+    SLOT_DEFINITIONS.scene_1_store_video.assetType,
+  ),
+  createSlotRecordSchema(
+    "scene_2_home_image",
+    SLOT_DEFINITIONS.scene_2_home_image.assetType,
+  ),
+  createSlotRecordSchema(
+    "scene_2_home_video",
+    SLOT_DEFINITIONS.scene_2_home_video.assetType,
+  ),
+]);
 
 const ActiveOperationSchema = z
   .object({
@@ -136,7 +163,7 @@ export const ContentRunProjectionSchema = z
     modelSnapshot: z
       .object({ imageModel: z.string().min(1), videoModel: z.string().min(1) })
       .strict(),
-    slots: z.tuple([SlotRecordSchema, SlotRecordSchema, SlotRecordSchema, SlotRecordSchema]),
+    slots: CanonicalSlotRecordsSchema,
     activeOperation: ActiveOperationSchema.optional(),
     requiredNextAction: RequiredNextActionSchema,
     terminalReason: z.string().trim().min(1).optional(),

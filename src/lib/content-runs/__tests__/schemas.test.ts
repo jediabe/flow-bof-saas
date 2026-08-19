@@ -46,6 +46,53 @@ const validInputs = {
   content_get_run: { contentRunId: "run_1" },
 } as const;
 
+const validProjection = {
+  id: "run_1",
+  productId: "product_1",
+  objective: "Create one Style 1 piece",
+  status: "ready",
+  specVersion: "managed-style1-v1",
+  modelSnapshot: {
+    imageModel: "nano-banana-pro",
+    videoModel: "veo-3.1-lite",
+  },
+  slots: [
+    { slot: "scene_1_store_image", assetType: "STORE_IMAGE", attempts: [] },
+    { slot: "scene_1_store_video", assetType: "STORE_VIDEO", attempts: [] },
+    { slot: "scene_2_home_image", assetType: "HOME_IMAGE", attempts: [] },
+    { slot: "scene_2_home_video", assetType: "HOME_VIDEO", attempts: [] },
+  ],
+  requiredNextAction: { type: "COMPLETE" },
+} as const;
+
+const validResults = {
+  content_get_product: {
+    id: "product_1",
+    name: "Approved product",
+    reviewStatus: "approved",
+    market: "US",
+    category: "general",
+    referenceImageIds: ["reference_1"],
+  },
+  content_create_style1_run: validProjection,
+  content_generate_style1_image: {
+    operationId: "operation_image_1",
+    operationStatus: "requested",
+    run: validProjection,
+  },
+  content_generate_style1_video: {
+    operationId: "operation_video_1",
+    operationStatus: "running",
+    run: validProjection,
+  },
+  content_run_asset_qa: {
+    assetId: "asset_1",
+    qaStatus: "APPROVED",
+    run: validProjection,
+  },
+  content_get_run: validProjection,
+} as const;
+
 describe("Hermes tool input schemas", () => {
   it("defines exactly the six frozen V1 tools", () => {
     expect(Object.keys(TOOL_INPUT_SCHEMAS)).toEqual(Object.keys(validInputs));
@@ -93,6 +140,48 @@ describe("Hermes tool input schemas", () => {
       TOOL_INPUT_SCHEMAS.content_generate_style1_video.safeParse({
         ...validInputs.content_generate_style1_video,
         slot: "scene_2_home_image",
+      }).success,
+    ).toBe(false);
+  });
+});
+
+describe("Hermes tool result schemas", () => {
+  it.each(Object.entries(validResults))("%s accepts its canonical result", (toolName, result) => {
+    const schema = TOOL_RESULT_SCHEMAS[toolName as keyof typeof TOOL_RESULT_SCHEMAS];
+    expect(schema.safeParse(result).success).toBe(true);
+  });
+
+  it("rejects a projection with a missing canonical slot", () => {
+    expect(
+      TOOL_RESULT_SCHEMAS.content_get_run.safeParse({
+        ...validProjection,
+        slots: validProjection.slots.slice(0, 3),
+      }).success,
+    ).toBe(false);
+  });
+
+  it("rejects a projection with a duplicate canonical slot", () => {
+    expect(
+      TOOL_RESULT_SCHEMAS.content_get_run.safeParse({
+        ...validProjection,
+        slots: [
+          validProjection.slots[0],
+          validProjection.slots[0],
+          validProjection.slots[2],
+          validProjection.slots[3],
+        ],
+      }).success,
+    ).toBe(false);
+  });
+
+  it("rejects a projection with a mismatched slot and asset type", () => {
+    expect(
+      TOOL_RESULT_SCHEMAS.content_get_run.safeParse({
+        ...validProjection,
+        slots: [
+          { ...validProjection.slots[0], assetType: "HOME_VIDEO" },
+          ...validProjection.slots.slice(1),
+        ],
       }).success,
     ).toBe(false);
   });
