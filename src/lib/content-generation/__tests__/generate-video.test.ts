@@ -236,6 +236,91 @@ describe("generateManagedStyle1Video", () => {
     ).resolves.toMatchObject({ qaStatus: "APPROVED" });
   });
 
+  it("returns WAIT for a live self-owned pre-identity lock without calling the provider", async () => {
+    const operation = await prisma.contentOperation.create({
+      data: {
+        workspaceId,
+        contentRunId,
+        kind: "video_generation",
+        sceneLabel: "scene_1_store",
+        idempotencyKey: "live-pre-identity-lock",
+      },
+    });
+    await prisma.workspaceProviderLock.create({
+      data: {
+        workspaceId,
+        operationId: operation.id,
+        expiresAt: new Date(Date.now() + 60_000),
+      },
+    });
+    const adapter = createAdapter();
+
+    const result = await generateManagedStyle1Video(
+      { workspaceId, actorType: "service", actorId: "hermes" },
+      {
+        contentRunId,
+        slot: "scene_1_store_video",
+        idempotencyKey: "live-pre-identity-lock",
+      },
+      { prisma, objectStorage: createStorage(), createAdapter: () => adapter },
+    );
+
+    expect(result).toMatchObject({
+      operationId: operation.id,
+      operationStatus: "running",
+      requiredNextAction: { type: "WAIT_FOR_OPERATION", operationId: operation.id },
+    });
+    expect(adapter.startVideo).not.toHaveBeenCalled();
+    expect(adapter.pollVideo).not.toHaveBeenCalled();
+  });
+
+  it("reconciles an expired self-owned pre-identity lock without starting another job", async () => {
+    const operation = await prisma.contentOperation.create({
+      data: {
+        workspaceId,
+        contentRunId,
+        kind: "video_generation",
+        sceneLabel: "scene_1_store",
+        idempotencyKey: "expired-pre-identity-lock",
+      },
+    });
+    await prisma.workspaceProviderLock.create({
+      data: {
+        workspaceId,
+        operationId: operation.id,
+        acquiredAt: new Date(Date.now() - 2_000),
+        expiresAt: new Date(Date.now() - 1_000),
+      },
+    });
+    const adapter = createAdapter();
+
+    await expect(
+      generateManagedStyle1Video(
+        { workspaceId, actorType: "service", actorId: "hermes" },
+        {
+          contentRunId,
+          slot: "scene_1_store_video",
+          idempotencyKey: "expired-pre-identity-lock",
+        },
+        { prisma, objectStorage: createStorage(), createAdapter: () => adapter },
+      ),
+    ).rejects.toMatchObject({ code: "OPERATION_TERMINAL" });
+
+    expect(adapter.startVideo).not.toHaveBeenCalled();
+    expect(adapter.pollVideo).not.toHaveBeenCalled();
+    await expect(
+      prisma.contentOperation.findUniqueOrThrow({ where: { id: operation.id } }),
+    ).resolves.toMatchObject({
+      status: "failed",
+      providerJobId: null,
+      errorJson: expect.stringContaining("EXPIRED_PROVIDER_LOCK_RECOVERED"),
+    });
+    await expect(prisma.workspaceProviderLock.count()).resolves.toBe(0);
+    await expect(
+      prisma.contentRun.findUniqueOrThrow({ where: { id: contentRunId } }),
+    ).resolves.toMatchObject({ status: "failed" });
+  });
+
   it("polls the accepted job on repeated same-key calls, persists completion, and replays the asset", async () => {
     const adapter = createAdapter();
     vi.mocked(adapter.pollVideo)
@@ -301,6 +386,65 @@ describe("generateManagedStyle1Video", () => {
     await expect(
       prisma.contentRun.findUniqueOrThrow({ where: { id: contentRunId } }),
     ).resolves.toMatchObject({ status: "qa_running" });
+  });
+
+  it("preserves an accepted job after a transient poll error and resumes it to completion", async () => {
+    const adapter = createAdapter();
+    const transientPollError = Object.assign(new Error("poll transport timeout"), {
+      classification: "technical-retryable",
+      acceptedProviderIdentity: true,
+      code: "transport_failure",
+    });
+    vi.mocked(adapter.pollVideo)
+      .mockRejectedValueOnce(transientPollError)
+      .mockResolvedValueOnce({
+        status: "completed",
+        providerJobId: "provider-job-1",
+        mediaGenerationId: "flow-video-after-timeout",
+        url: "https://provider.example/video-after-timeout.mp4",
+      });
+    const command = {
+      contentRunId,
+      slot: "scene_1_store_video" as const,
+      idempotencyKey: "resume-after-transient-poll-error",
+    };
+    const dependencies = {
+      prisma,
+      objectStorage: createStorage(),
+      createAdapter: () => adapter,
+      fetchMedia: vi.fn(async () =>
+        new Response(MP4_BYTES, { headers: { "content-type": "video/mp4" } }),
+      ),
+    };
+    const actor = { workspaceId, actorType: "service" as const, actorId: "hermes" };
+
+    await generateManagedStyle1Video(actor, command, dependencies);
+    await expect(generateManagedStyle1Video(actor, command, dependencies)).rejects.toBe(
+      transientPollError,
+    );
+    await expect(
+      prisma.contentOperation.findFirstOrThrow({ where: { contentRunId } }),
+    ).resolves.toMatchObject({
+      status: "running",
+      providerJobId: "provider-job-1",
+    });
+    await expect(prisma.workspaceProviderLock.count()).resolves.toBe(1);
+
+    const completed = await generateManagedStyle1Video(actor, command, dependencies);
+
+    expect(completed).toMatchObject({
+      operationStatus: "succeeded",
+      providerJobId: "provider-job-1",
+      asset: {
+        contentRunId,
+        mediaGenerationId: "flow-video-after-timeout",
+        sourceImageId,
+      },
+      requiredNextAction: { type: "RUN_QA", slot: "scene_1_store_video" },
+    });
+    expect(adapter.startVideo).toHaveBeenCalledTimes(1);
+    expect(adapter.pollVideo).toHaveBeenCalledTimes(2);
+    await expect(prisma.workspaceProviderLock.count()).resolves.toBe(0);
   });
 
   it.each([

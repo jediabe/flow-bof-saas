@@ -373,6 +373,15 @@ async function loadApprovedSource(
   return source;
 }
 
+function isResumableAcceptedPollError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const record = error as Record<string, unknown>;
+  return (
+    record.classification === "technical-retryable" &&
+    record.acceptedProviderIdentity === true
+  );
+}
+
 function safeOperationError(error: unknown): Record<string, unknown> {
   if (error instanceof ManagedVideoGenerationError || error instanceof ContentGenerationError) {
     return { code: error.code, details: error.details };
@@ -481,6 +490,72 @@ async function resolveAdapter(
   return createAdapter({ actor, flowEmail });
 }
 
+type PreIdentityLockState = "none" | "live" | "accepted" | "recovered";
+
+async function reconcileExpiredPreIdentityLock(
+  prisma: PrismaClient,
+  workspaceId: string,
+  operationId: string,
+): Promise<PreIdentityLockState> {
+  const now = new Date();
+  return prisma.$transaction(async (tx) => {
+    const lock = await tx.workspaceProviderLock.findFirst({
+      where: { workspaceId, operationId },
+      include: {
+        operation: {
+          select: { status: true, providerJobId: true },
+        },
+      },
+    });
+    if (!lock) {
+      return "none";
+    }
+    if (lock.expiresAt.getTime() >= now.getTime()) {
+      return "live";
+    }
+    if (lock.operation.providerJobId) {
+      return "accepted";
+    }
+
+    const failed = await tx.contentOperation.updateMany({
+      where: {
+        id: operationId,
+        workspaceId,
+        status: { in: ["requested", "running"] },
+        providerJobId: null,
+      },
+      data: {
+        status: "failed",
+        completedAt: now,
+        errorJson: JSON.stringify({
+          code: "EXPIRED_PROVIDER_LOCK_RECOVERED",
+          recoveredAt: now.toISOString(),
+          recoveredByOperationId: operationId,
+        }),
+      },
+    });
+    if (failed.count !== 1) {
+      return "accepted";
+    }
+
+    const removed = await tx.workspaceProviderLock.deleteMany({
+      where: {
+        workspaceId,
+        operationId,
+        expiresAt: { lt: now },
+      },
+    });
+    if (removed.count !== 1) {
+      throw new ContentGenerationError(
+        "WORKSPACE_PROVIDER_BUSY",
+        "The expired provider lock changed during reconciliation",
+        { operationId },
+      );
+    }
+    return "recovered";
+  });
+}
+
 async function operationOwnsLock(
   prisma: PrismaClient,
   workspaceId: string,
@@ -530,6 +605,7 @@ export async function generateManagedStyle1Video(
       },
     },
   });
+  let resumedExisting: ContentOperationRecord | null = null;
   if (existing) {
     const resumed = await operations.createOrResume({
       workspaceId,
@@ -538,6 +614,7 @@ export async function generateManagedStyle1Video(
       sceneLabel: SLOT_DEFINITIONS[command.slot].persistedSceneLabel,
       idempotencyKey: command.idempotencyKey,
     });
+    resumedExisting = resumed;
     if (resumed.status === "succeeded") {
       return returnSucceededResult(prisma, actor, command, resumed);
     }
@@ -568,8 +645,41 @@ export async function generateManagedStyle1Video(
   }
 
   const run = await loadScopedRun(prisma, workspaceId, command.contentRunId);
+  if (resumedExisting && !resumedExisting.providerJobId) {
+    const lockState = await reconcileExpiredPreIdentityLock(
+      prisma,
+      workspaceId,
+      resumedExisting.id,
+    );
+    if (lockState === "live") {
+      return waitResult(resumedExisting, command);
+    }
+    if (lockState === "recovered") {
+      await markRunFailed(prisma, run.id);
+      throw new ContentGenerationError(
+        "OPERATION_TERMINAL",
+        "The expired pre-identity video operation was reconciled without restarting",
+        { operationId: resumedExisting.id, status: "failed" },
+      );
+    }
+    if (lockState === "accepted") {
+      const refreshed = await operations.findById({
+        workspaceId,
+        operationId: resumedExisting.id,
+      });
+      if (!refreshed?.providerJobId) {
+        throw new ContentGenerationError(
+          "WORKSPACE_PROVIDER_BUSY",
+          "The video operation changed during expired-lock reconciliation",
+          { operationId: resumedExisting.id },
+        );
+      }
+      resumedExisting = refreshed;
+    }
+  }
+
   let sourceAssetId: string;
-  if (existing?.providerJobId) {
+  if (resumedExisting?.providerJobId) {
     const definition = SLOT_DEFINITIONS[command.slot];
     const sourceLabel = SLOT_DEFINITIONS[definition.sourceSlot].persistedSceneLabel;
     const source = run.images
@@ -781,6 +891,9 @@ export async function generateManagedStyle1Video(
       requiredNextAction: { type: "RUN_QA", slot: command.slot, assetId: asset.id },
     };
   } catch (error) {
+    if (isResumableAcceptedPollError(error)) {
+      throw error;
+    }
     let operationSucceeded = false;
     const current = await operations.findById(scope);
     operationSucceeded = current?.status === "succeeded";
