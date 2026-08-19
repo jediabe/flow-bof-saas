@@ -109,6 +109,30 @@ describe("APEX Flow generation adapter", () => {
     });
   });
 
+  it("rejects a failed asynchronous video start even when it includes a job ID", async () => {
+    const adapter = createApexFlowAdapter(boundContext, {
+      callTool: mockCaller({
+        operation: "generate_video",
+        mode: "async",
+        jobId: "provider-job-failed",
+        status: "failed",
+        media: [],
+      }),
+    });
+
+    await expect(
+      adapter.startVideo({
+        prompt: "Animate product",
+        model: "veo-3.1-lite",
+        sourceImageMediaGenerationId: "media-image-1",
+      }),
+    ).rejects.toMatchObject({
+      classification: "terminal-nontechnical",
+      code: "malformed_output",
+      acceptedProviderIdentity: false,
+    });
+  });
+
   it.each([
     ["created", { status: "running", providerJobId: "provider-job-1" }],
     ["started", { status: "running", providerJobId: "provider-job-1" }],
@@ -151,6 +175,25 @@ describe("APEX Flow generation adapter", () => {
     await expect(
       adapter.pollVideo({ providerJobId: "provider-job-1" }),
     ).resolves.toEqual(expected);
+  });
+
+  it("rejects a video poll whose returned job ID does not match the persisted job", async () => {
+    const adapter = createApexFlowAdapter(boundContext, {
+      callTool: mockCaller({
+        jobId: "other-provider-job",
+        type: "video",
+        status: "started",
+        media: [],
+      }),
+    });
+
+    await expect(
+      adapter.pollVideo({ providerJobId: "provider-job-1" }),
+    ).rejects.toMatchObject({
+      classification: "terminal-nontechnical",
+      code: "malformed_output",
+      acceptedProviderIdentity: true,
+    });
   });
 
   it("resolves a fresh signed asset URL by stable media ID", async () => {

@@ -235,7 +235,12 @@ export function createApexFlowAdapter(
       );
       const structured = asRecord(result.structuredContent);
       const providerJobId = nonEmptyString(structured?.jobId);
-      if (!providerJobId) {
+      if (
+        structured?.operation !== "generate_video" ||
+        structured?.mode !== "async" ||
+        structured?.status !== "created" ||
+        !providerJobId
+      ) {
         throw malformed("APEX Flow returned malformed video start output", false);
       }
       return { providerJobId };
@@ -248,9 +253,15 @@ export function createApexFlowAdapter(
         true,
       );
       const structured = asRecord(result.structuredContent);
-      const providerJobId =
-        nonEmptyString(structured?.jobId) ?? input.providerJobId;
+      const providerJobId = nonEmptyString(structured?.jobId);
       const status = nonEmptyString(structured?.status);
+
+      if (
+        providerJobId !== input.providerJobId ||
+        structured?.type !== "video"
+      ) {
+        throw malformed("APEX Flow returned mismatched video job output", true);
+      }
 
       if (status === "created" || status === "started") {
         return { status: "running", providerJobId };
