@@ -37,6 +37,16 @@ services:
     restart: unless-stopped
     env_file:
       - .env.production
+    environment:
+      # Generated media uses a private, deployment-owned S3-compatible bucket.
+      # The storage service itself is external to this production compose file.
+      S3_ENDPOINT: ${S3_ENDPOINT:-}
+      S3_REGION: ${S3_REGION}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY}
+      S3_SESSION_TOKEN: ${S3_SESSION_TOKEN:-}
+      S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-false}
     # No host port: Caddy is the only thing that talks to :3000.
     # Compose's default bridge network resolves "app" by name.
     expose:
