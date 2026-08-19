@@ -13,8 +13,8 @@
  *   asset + ContentRun + Product + workspace
  *      ↓ acquireQaLock()         [throws ConcurrencyError if already QA_RUNNING]
  *   asset transitions to QA_RUNNING
- *      ↓ mcpGetAssetUrl()        [throws MediaFetchError on failure]
- *   signed URL for the asset bytes
+ *      ↓ managed storage OR mcpGetAssetUrl() [throws on failure]
+ *   signed URL for the persisted managed object or legacy asset
  *      ↓ extractFrames() OR fetchImageAsBase64()   [throws Extraction/MediaFetchError]
  *   base64 asset + optional reference image
  *      ↓ provider.evaluate()     [throws Provider* on failure]
@@ -46,7 +46,9 @@
  */
 
 import { mcpGetAssetUrl } from "@/lib/apex-mcp";
+import { MANAGED_CONTENT_STORAGE_PREFIX } from "@/lib/content-runs/constants";
 import { fetchImageAsBase64 } from "@/lib/media/fetch-image";
+import { createObjectStorageFromEnv } from "@/lib/storage";
 import {
   LlmCredentialError,
   resolveLlmCredential,
@@ -59,6 +61,7 @@ import {
   FrameExtractionError,
   LegacyAssetError,
   MediaFetchError,
+  PersistenceError,
   ProviderError,
   ProviderValidationError,
   QaError,
@@ -107,6 +110,19 @@ export interface RunQaInput {
   configOverride?: Partial<typeof DEFAULT_QA_CONFIG>;
   /** Optional frame sampling override for videos. */
   samplingOverride?: Partial<FrameSamplingOptions>;
+  /**
+   * Optional ownership fence supplied by trusted application services. It can
+   * only narrow the asset lookup: mismatches fail before the QA lock or any
+   * provider work. Managed ContentRun QA always supplies both values.
+   */
+  expectedContext?: {
+    workspaceId: string;
+    contentRunId: string;
+    /** Optional exact pre-lock state; managed V1 uses NOT_QA_CHECKED. */
+    qaStatus?: QaStatus;
+    /** Require the canonical persisted SaaS object rather than Flow provenance. */
+    managedStorage?: true;
+  };
 }
 
 export interface RunQaOutput {
@@ -120,6 +136,17 @@ export interface RunQaOutput {
   reason: string;
   elapsedMs: number;
   providerModel: string;
+}
+
+export interface PostLockQaFailure extends Error {
+  readonly qaLockAcquired: true;
+}
+
+export function isPostLockQaFailure(error: unknown): error is PostLockQaFailure {
+  return (
+    error instanceof Error &&
+    (error as Partial<PostLockQaFailure>).qaLockAcquired === true
+  );
 }
 
 /**
@@ -136,12 +163,25 @@ export async function runQaForAsset(input: RunQaInput): Promise<RunQaOutput> {
     assetId: input.assetId,
     assetKind: input.assetKind,
   });
+  if (
+    input.expectedContext &&
+    (asset.workspaceId !== input.expectedContext.workspaceId ||
+      asset.contentRunId !== input.expectedContext.contentRunId)
+  ) {
+    throw new PersistenceError(
+      "Asset was not found in the expected workspace and content run.",
+    );
+  }
 
   // 2. Acquire the atomic lock. Throws ConcurrencyError if
   //    another QA/regen is in flight.
   await acquireQaLock({
     assetId: input.assetId,
     assetKind: input.assetKind,
+    expectedStatus: input.expectedContext?.qaStatus,
+    expectedWorkspaceId: input.expectedContext?.workspaceId,
+    expectedContentRunId: input.expectedContext?.contentRunId,
+    expectedContentRunStatus: input.expectedContext ? "qa_running" : undefined,
   });
 
   // From here on, any error MUST end with writeQaFailure() so
@@ -151,23 +191,11 @@ export async function runQaForAsset(input: RunQaInput): Promise<RunQaOutput> {
   let framesJson: string | null = null;
 
   try {
-    // 3. Obtain a signed URL for the asset via MCP.
-    const workspaceFlowEmail = asset.workspaceFlowEmail;
-    if (!workspaceFlowEmail) {
-      throw new MediaFetchError(
-        `Workspace ${asset.workspaceId} has no flowEmail configured; cannot fetch asset URL from MCP.`,
-      );
-    }
-    const signedUrl = await mcpGetAssetUrl({
-      sub: asset.workspaceId,
-      flowEmail: workspaceFlowEmail,
-      mediaGenerationId: asset.mediaGenerationId,
-    });
-    if (!signedUrl) {
-      throw new MediaFetchError(
-        `MCP returned no URL for mediaGenerationId ${asset.mediaGenerationId} (asset ${asset.assetId}).`,
-      );
-    }
+    // 3. Managed runs evaluate the exact object committed by the SaaS. Flow's
+    // media ID remains provenance only. Ordinary QA keeps its existing MCP path.
+    const signedUrl = input.expectedContext?.managedStorage
+      ? await resolveManagedAssetUrl(asset)
+      : await resolveFlowAssetUrl(asset);
 
     // 4. Prepare the payload — extract frames for videos, base64
     //    the image for images. Fetch the reference image in
@@ -296,6 +324,12 @@ export async function runQaForAsset(input: RunQaInput): Promise<RunQaOutput> {
             `Unexpected orchestrator error: ${(err as Error).message?.slice(0, 200)}`,
             { cause: err },
           );
+    Object.defineProperty(qaErr, "qaLockAcquired", {
+      value: true,
+      enumerable: false,
+      configurable: false,
+      writable: false,
+    });
     await writeQaFailure({
       asset,
       assetType,
@@ -338,6 +372,89 @@ function resolveAssetType(asset: AssetForQa): AssetType {
   if (isStore) return "STORE_IMAGE";
   if (isHome) return "HOME_IMAGE";
   return "STORE_IMAGE";
+}
+
+async function resolveManagedAssetUrl(asset: AssetForQa): Promise<string> {
+  const metadata = {
+    bucket: asset.storageBucket,
+    key: asset.storageKey,
+    contentType: asset.storageContentType,
+    bytes: asset.storageBytes,
+    sha256: asset.storageSha256,
+  };
+  if (
+    !metadata.bucket ||
+    !metadata.key ||
+    !metadata.contentType ||
+    metadata.bytes === null ||
+    !Number.isInteger(metadata.bytes) ||
+    metadata.bytes <= 0 ||
+    !metadata.sha256 ||
+    !/^[a-f0-9]{64}$/i.test(metadata.sha256)
+  ) {
+    throw new PersistenceError(
+      `Managed asset ${asset.assetId} has incomplete persisted storage metadata.`,
+    );
+  }
+
+  const directory = asset.kind === "image" ? "images" : "videos";
+  const expectedKeyPrefix = [
+    MANAGED_CONTENT_STORAGE_PREFIX,
+    asset.workspaceId,
+    asset.contentRunId,
+    directory,
+    `${asset.assetId}.`,
+  ].join("/");
+  const extension = metadata.key.slice(expectedKeyPrefix.length);
+  const expectedContentTypePrefix = asset.kind === "image" ? "image/" : "video/";
+  if (
+    !metadata.key.startsWith(expectedKeyPrefix) ||
+    !/^[A-Za-z0-9]+$/.test(extension) ||
+    !metadata.contentType.startsWith(expectedContentTypePrefix)
+  ) {
+    throw new PersistenceError(
+      `Managed asset ${asset.assetId} storage metadata does not match its workspace, run, kind, and identity.`,
+    );
+  }
+
+  const storage = createObjectStorageFromEnv();
+  if (storage.bucket !== metadata.bucket) {
+    throw new PersistenceError(
+      `Managed asset ${asset.assetId} storage bucket does not match the configured managed bucket.`,
+    );
+  }
+  try {
+    const signedUrl = await storage.createSignedReadUrl(metadata.key);
+    if (!signedUrl) {
+      throw new Error("object storage returned an empty signed URL");
+    }
+    return signedUrl;
+  } catch (cause) {
+    throw new MediaFetchError(
+      `Could not create a signed read URL for managed asset ${asset.assetId}.`,
+      { cause },
+    );
+  }
+}
+
+async function resolveFlowAssetUrl(asset: AssetForQa): Promise<string> {
+  const workspaceFlowEmail = asset.workspaceFlowEmail;
+  if (!workspaceFlowEmail) {
+    throw new MediaFetchError(
+      `Workspace ${asset.workspaceId} has no flowEmail configured; cannot fetch asset URL from MCP.`,
+    );
+  }
+  const signedUrl = await mcpGetAssetUrl({
+    sub: asset.workspaceId,
+    flowEmail: workspaceFlowEmail,
+    mediaGenerationId: asset.mediaGenerationId,
+  });
+  if (!signedUrl) {
+    throw new MediaFetchError(
+      `MCP returned no URL for mediaGenerationId ${asset.mediaGenerationId} (asset ${asset.assetId}).`,
+    );
+  }
+  return signedUrl;
 }
 
 /** decision → qaStatus mapping. Kept as data so a future rule
