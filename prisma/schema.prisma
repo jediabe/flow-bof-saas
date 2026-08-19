@@ -132,6 +132,8 @@ model Workspace {
   // operator is scouting/tracking. See ShopProduct at the
   // bottom of this file.
   shopProducts   ShopProduct[]
+  contentOperations ContentOperation[]
+  providerLock      WorkspaceProviderLock?
   // Workspace-scoped API token for programmatic access from
   // external scripts (currently: flow-bof-automation's
   // scripts/fetch_tiktok_cookies.py posts freshly-captured
@@ -331,6 +333,11 @@ model WorkspaceSettings {
   // Null = no account connected yet. The /generate page and any
   // Flow-driven feature refuses to run until this is set.
   flowEmail String?
+
+  // Deterministic Google Flow defaults for managed content runs.
+  // Effective values are frozen into each ContentRun snapshot.
+  flowImageModel String @default("nano-banana-pro")
+  flowVideoModel String @default("veo-3.1-lite")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -711,7 +718,9 @@ model ContentRun {
   //   "abandoned"   - operator explicitly retired the run.
   //                   Preferred over deletion so the audit
   //                   trail survives.
-  status             String   @default("generating")
+  status             String   @default("created")
+  // Caller-supplied logical objective key, scoped to the product.
+  idempotencyKey     String
   // Snapshot of the prompt kit used at run creation
   // (Product.style1Kit JSON, style2 spec version, whatever).
   // FROZEN — regenerating Product.style1Kit later doesn't
@@ -729,12 +738,16 @@ model ContentRun {
   // ("v2 - repaired label warp", "US pilot"). Nothing in the
   // application depends on this — pure debug affordance.
   label              String?
+  completedAt        DateTime?
   createdAt          DateTime @default(now())
   // See FlowGeneratedVideo.updatedAt for the @default rationale.
   updatedAt          DateTime @default(now()) @updatedAt
 
   images             FlowGeneratedImage[]
   videos             FlowGeneratedVideo[]
+  operations         ContentOperation[]
+
+  @@unique([productId, idempotencyKey])
 
   @@index([productId, createdAt(sort: Desc)])
   @@index([productId, status])
@@ -755,6 +768,45 @@ model ContentRun {
 // so mobile posting knows which video is "Scene 1 · store" vs
 // "Scene 2 · home". Free-form "other" values allowed for future
 // styles / one-off generations.
+
+// Provider-side execution record for one managed generation command.
+model ContentOperation {
+  id                    String   @id @default(cuid())
+  workspaceId           String
+  workspace             Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  contentRunId          String
+  contentRun            ContentRun @relation(fields: [contentRunId], references: [id], onDelete: Cascade)
+  kind                  String
+  sceneLabel            String
+  status                String   @default("requested")
+  idempotencyKey        String
+  provider              String   @default("google_flow_useapi")
+  providerJobId         String?
+  technicalAttemptCount Int      @default(0)
+  resultJson            String?
+  errorJson             String?
+  startedAt             DateTime?
+  completedAt           DateTime?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @default(now()) @updatedAt
+
+  providerLock          WorkspaceProviderLock?
+
+  @@unique([workspaceId, idempotencyKey])
+  @@index([contentRunId, createdAt])
+  @@index([workspaceId, status])
+  @@index([providerJobId])
+}
+
+// One active provider generation operation per workspace.
+model WorkspaceProviderLock {
+  workspaceId String   @id
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  operationId String   @unique
+  operation   ContentOperation @relation(fields: [operationId], references: [id], onDelete: Cascade)
+  acquiredAt DateTime @default(now())
+  expiresAt  DateTime
+}
 
 model FlowGeneratedVideo {
   id                String   @id @default(cuid())
@@ -787,6 +839,14 @@ model FlowGeneratedVideo {
   // compare the still against the reference image without having
   // to re-derive it from chat history.
   imageMediaGenerationId String?
+  // Managed storage metadata and source relation. Nullable for legacy rows.
+  storageBucket      String?
+  storageKey         String?
+  storageContentType String?
+  storageBytes       Int?
+  storageSha256      String?
+  sourceImageId      String?
+  sourceImage        FlowGeneratedImage? @relation("VideoSourceImage", fields: [sourceImageId], references: [id], onDelete: SetNull)
   // Milestone 1 QA lifecycle. See src/lib/qa/types.ts for the
   // enum values:
   //   "NOT_QA_CHECKED" (default — pre-M1 rows stay here forever
@@ -828,6 +888,7 @@ model FlowGeneratedVideo {
   @@index([parentVideoId])
   @@index([deletedAt])
   @@index([contentRunId])
+  @@index([sourceImageId])
 }
 
 // Style 1 Scene 1 / Scene 2 stills the /generate agent produced
@@ -849,6 +910,12 @@ model FlowGeneratedImage {
   // "scene_1_store_image" | "scene_2_home_image" | "other".
   sceneLabel        String
   mediaGenerationId String
+  // Managed storage metadata. Nullable so pre-managed rows remain valid.
+  storageBucket      String?
+  storageKey         String?
+  storageContentType String?
+  storageBytes       Int?
+  storageSha256      String?
   prompt            String?
   notes             String?
   qaStatus          String   @default("NOT_QA_CHECKED")
@@ -859,6 +926,7 @@ model FlowGeneratedImage {
   parentImageId     String?
   parent            FlowGeneratedImage?  @relation("ImageLineage", fields: [parentImageId], references: [id], onDelete: SetNull)
   attempts          FlowGeneratedImage[] @relation("ImageLineage")
+  derivedVideos     FlowGeneratedVideo[] @relation("VideoSourceImage")
   qaAttempts        QaAttempt[]
   createdAt         DateTime @default(now())
   // See FlowGeneratedVideo.updatedAt above for why the @default
