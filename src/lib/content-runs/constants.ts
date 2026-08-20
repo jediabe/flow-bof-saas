@@ -49,6 +49,9 @@ export const REQUIRED_NEXT_ACTION_TYPES = [
   "GENERATE_IMAGE",
   "RUN_QA",
   "GENERATE_VIDEO",
+  "GENERATE_VOICEOVER",
+  "ASSEMBLE_FINAL",
+  "RUN_FINAL_QA",
   "WAIT_FOR_OPERATION",
   "HUMAN_REVIEW",
   "COMPLETE",
@@ -58,6 +61,20 @@ export const REQUIRED_NEXT_ACTION_TYPES = [
 export const OPERATION_KINDS = [
   "image_generation",
   "video_generation",
+  "voiceover_generation",
+  "final_assembly",
+] as const;
+
+export const FINAL_VIDEO_STATUSES = [
+  "PENDING",
+  "VOICEOVER_READY",
+  "ASSEMBLING",
+  "ASSEMBLED",
+  "MEDIA_VALIDATED",
+  "QA_RUNNING",
+  "APPROVED",
+  "HUMAN_REVIEW",
+  "FAILED",
 ] as const;
 
 export const OPERATION_STATUSES = [

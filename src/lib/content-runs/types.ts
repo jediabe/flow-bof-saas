@@ -2,6 +2,7 @@ import type {
   ASSET_TYPES,
   CONTENT_RUN_STATES,
   CONTENT_SLOTS,
+  FINAL_VIDEO_STATUSES,
   IMAGE_SLOTS,
   MEDIA_TYPES,
   OPERATION_KINDS,
@@ -35,6 +36,11 @@ export type RequiredNextAction =
   | { type: "HUMAN_REVIEW"; reason: string }
   | { type: "COMPLETE" }
   | { type: "FAILED"; reason: string };
+
+export type FinalOutputRequiredNextAction =
+  | { type: "GENERATE_VOICEOVER" }
+  | { type: "ASSEMBLE_FINAL"; finalVideoId: string }
+  | { type: "RUN_FINAL_QA"; finalVideoId: string };
 
 export interface SlotDefinition {
   assetType: AssetType;
@@ -96,4 +102,78 @@ export interface ServiceActorContext {
   workspaceId: string;
   actorType: "service";
   actorId: string;
+}
+
+export type FinalVideoStatus = (typeof FINAL_VIDEO_STATUSES)[number];
+
+export interface PersistedMediaAsset {
+  bucket: string;
+  key: string;
+  contentType: string;
+  bytes: number;
+  sha256: string;
+  durationSeconds: number;
+}
+
+export interface AssemblyManifest {
+  version: "assembly-manifest-v1";
+  clips: Array<{
+    order: number;
+    slotId: string;
+    assetId: string;
+    assetSha256: string;
+    approvalStatus: "APPROVED";
+    trimStartSeconds: number;
+    trimEndSeconds: number;
+    durationSeconds: number;
+    nativeAudioMode: "duck" | "mute" | "preserve";
+  }>;
+  audio: { assetId: string; assetSha256: string; durationSeconds: number };
+  output: {
+    width: number;
+    height: number;
+    fps: number;
+    voiceoverGainDb: number;
+    nativeAudioGainDb: number;
+    duckingThresholdDb: number;
+    expectedDurationSeconds: number;
+  };
+  ffmpegVersion: string;
+}
+
+export interface FinalVideoAsset {
+  id: string;
+  contentRunId: string;
+  attempt: number;
+  status: FinalVideoStatus;
+  voiceover: {
+    script: string;
+    provider: "elevenlabs";
+    voiceId: string;
+    model: string;
+  } | null;
+  audioAsset: PersistedMediaAsset | null;
+  assemblyManifest: AssemblyManifest | null;
+  finalMp4: (PersistedMediaAsset & {
+    contentType: "video/mp4";
+    width: number;
+    height: number;
+    videoCodec: string;
+    audioCodec: string;
+  }) | null;
+  mediaValidation: { passed: boolean; validatedAt: string } | null;
+  finalQa: {
+    status: "NOT_QA_CHECKED" | "QA_RUNNING" | "APPROVED" | "HUMAN_REVIEW" | "FAILED";
+    score: number | null;
+    verdict: string | null;
+    evaluatedAt: string | null;
+  } | null;
+}
+
+export interface FinalReadyInvariant {
+  requiredSourceAssetsApproved: boolean;
+  voiceoverPersisted: boolean;
+  finalMp4Persisted: boolean;
+  deterministicMediaValidationPassed: boolean;
+  finalAudiovisualQaApproved: boolean;
 }
