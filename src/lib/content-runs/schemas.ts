@@ -4,6 +4,7 @@ import {
   ASSET_TYPES,
   CONTENT_RUN_STATES,
   CONTENT_SLOTS,
+  FINAL_VIDEO_STATUSES,
   IMAGE_SLOTS,
   OPERATION_KINDS,
   OPERATION_STATUSES,
@@ -42,6 +43,9 @@ export const RequiredNextActionSchema = z.discriminatedUnion("type", [
       sourceAssetId: IdSchema,
     })
     .strict(),
+  z.object({ type: z.literal("GENERATE_VOICEOVER") }).strict(),
+  z.object({ type: z.literal("ASSEMBLE_FINAL"), finalVideoId: IdSchema }).strict(),
+  z.object({ type: z.literal("RUN_FINAL_QA"), finalVideoId: IdSchema }).strict(),
   z
     .object({ type: z.literal("WAIT_FOR_OPERATION"), operationId: IdSchema })
     .strict(),
@@ -115,6 +119,153 @@ export const ContentRunAssetQaInputSchema = z
   .object({ contentRunId: IdSchema, slot: ContentSlotSchema })
   .strict();
 export const ContentGetRunInputSchema = z.object({ contentRunId: IdSchema }).strict();
+
+const Sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
+const PositiveSecondsSchema = z.number().finite().positive().max(3600);
+const NonnegativeSecondsSchema = z.number().finite().nonnegative().max(3600);
+
+const AssemblyClipSchema = z
+  .object({
+    order: z.number().int().nonnegative(),
+    slotId: IdSchema,
+    assetId: IdSchema,
+    assetSha256: Sha256Schema,
+    approvalStatus: z.literal("APPROVED"),
+    trimStartSeconds: NonnegativeSecondsSchema,
+    trimEndSeconds: PositiveSecondsSchema,
+    durationSeconds: PositiveSecondsSchema,
+    nativeAudioMode: z.enum(["duck", "mute", "preserve"]),
+  })
+  .strict();
+
+export const AssemblyManifestSchema = z
+  .object({
+    version: z.literal("assembly-manifest-v1"),
+    clips: z.array(AssemblyClipSchema).min(1).max(20),
+    audio: z
+      .object({
+        assetId: IdSchema,
+        assetSha256: Sha256Schema,
+        durationSeconds: PositiveSecondsSchema,
+      })
+      .strict(),
+    output: z
+      .object({
+        width: z.number().int().min(240).max(4320),
+        height: z.number().int().min(240).max(4320),
+        fps: z.number().int().min(1).max(120),
+        voiceoverGainDb: z.number().finite().min(-60).max(12),
+        nativeAudioGainDb: z.number().finite().min(-60).max(12),
+        duckingThresholdDb: z.number().finite().min(-60).max(0),
+        expectedDurationSeconds: PositiveSecondsSchema,
+      })
+      .strict(),
+    ffmpegVersion: z.string().trim().min(1).max(80).regex(/^[a-zA-Z0-9_.+-]+$/),
+  })
+  .strict()
+  .superRefine((manifest, context) => {
+    if (manifest.clips.some((clip, index) => clip.order !== index)) {
+      context.addIssue({ code: "custom", path: ["clips"], message: "clip order must be contiguous" });
+    }
+    if (new Set(manifest.clips.map((clip) => clip.slotId)).size !== manifest.clips.length) {
+      context.addIssue({ code: "custom", path: ["clips"], message: "clip slots must be unique" });
+    }
+    if (new Set(manifest.clips.map((clip) => clip.assetId)).size !== manifest.clips.length) {
+      context.addIssue({ code: "custom", path: ["clips"], message: "clip assets must be unique" });
+    }
+    for (const [index, clip] of manifest.clips.entries()) {
+      if (
+        clip.trimEndSeconds <= clip.trimStartSeconds ||
+        clip.durationSeconds !== clip.trimEndSeconds - clip.trimStartSeconds
+      ) {
+        context.addIssue({ code: "custom", path: ["clips", index], message: "invalid trim bounds" });
+      }
+    }
+    const duration = manifest.clips.reduce((sum, clip) => sum + clip.durationSeconds, 0);
+    if (duration !== manifest.output.expectedDurationSeconds) {
+      context.addIssue({
+        code: "custom",
+        path: ["output", "expectedDurationSeconds"],
+        message: "expected duration must equal ordered clip duration",
+      });
+    }
+  });
+
+const PersistedMediaSchema = z
+  .object({
+    bucket: z.string().trim().min(1).max(200),
+    key: z.string().trim().min(1).max(1024),
+    contentType: z.string().trim().min(1).max(100),
+    bytes: z.number().int().positive(),
+    sha256: Sha256Schema,
+    durationSeconds: PositiveSecondsSchema,
+  })
+  .strict();
+
+export const FinalVideoStatusSchema = z.enum(FINAL_VIDEO_STATUSES);
+export const FinalVideoAssetSchema = z
+  .object({
+    id: IdSchema,
+    contentRunId: IdSchema,
+    attempt: z.number().int().positive(),
+    status: FinalVideoStatusSchema,
+    voiceover: z
+      .object({
+        script: z.string().trim().min(1).max(10000),
+        provider: z.literal("elevenlabs"),
+        voiceId: IdSchema,
+        model: IdSchema,
+      })
+      .strict()
+      .nullable()
+      .default(null),
+    audioAsset: PersistedMediaSchema.extend({ contentType: z.enum(["audio/mpeg", "audio/wav"]) })
+      .strict()
+      .nullable()
+      .default(null),
+    assemblyManifest: AssemblyManifestSchema.nullable().default(null),
+    finalMp4: PersistedMediaSchema.extend({
+      contentType: z.literal("video/mp4"),
+      width: z.number().int().min(240).max(4320),
+      height: z.number().int().min(240).max(4320),
+      videoCodec: z.string().trim().min(1).max(80),
+      audioCodec: z.string().trim().min(1).max(80),
+    })
+      .strict()
+      .nullable()
+      .default(null),
+    mediaValidation: z
+      .object({ passed: z.boolean(), validatedAt: z.string().datetime() })
+      .strict()
+      .nullable()
+      .default(null),
+    finalQa: z
+      .object({
+        status: z.enum(["NOT_QA_CHECKED", "QA_RUNNING", "APPROVED", "HUMAN_REVIEW", "FAILED"]),
+        score: z.number().int().min(0).max(100).nullable(),
+        verdict: z.string().trim().min(1).max(5000).nullable(),
+        evaluatedAt: z.string().datetime().nullable(),
+      })
+      .strict()
+      .nullable()
+      .default(null),
+  })
+  .strict();
+
+export const FinalReadyInvariantSchema = z
+  .object({
+    requiredSourceAssetsApproved: z.boolean(),
+    voiceoverPersisted: z.boolean(),
+    finalMp4Persisted: z.boolean(),
+    deterministicMediaValidationPassed: z.boolean(),
+    finalAudiovisualQaApproved: z.boolean(),
+  })
+  .strict();
+
+export function isFinalReadyInvariantSatisfied(input: z.input<typeof FinalReadyInvariantSchema>) {
+  const invariant = FinalReadyInvariantSchema.parse(input);
+  return Object.values(invariant).every((value) => value);
+}
 
 const ProductResultSchema = z
   .object({

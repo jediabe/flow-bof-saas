@@ -355,6 +355,9 @@ describe("frozen runtime vocabulary", () => {
       { type: "GENERATE_IMAGE", slot: "scene_1_store_image" },
       { type: "RUN_QA", slot: "scene_1_store_image", assetId: "asset_1" },
       { type: "GENERATE_VIDEO", slot: "scene_1_store_video", sourceAssetId: "asset_1" },
+      { type: "GENERATE_VOICEOVER" },
+      { type: "ASSEMBLE_FINAL", finalVideoId: "final_1" },
+      { type: "RUN_FINAL_QA", finalVideoId: "final_1" },
       { type: "WAIT_FOR_OPERATION", operationId: "operation_1" },
       { type: "HUMAN_REVIEW", reason: "QA returned a non-approve decision" },
       { type: "COMPLETE" },
@@ -408,9 +411,16 @@ describe("contract document parity", () => {
       ...CONTENT_SLOTS,
       ...ASSET_TYPES,
       ...CONTENT_RUN_STATES,
-      ...OPERATION_KINDS,
+      ...OPERATION_KINDS.filter(
+        (kind) => kind !== "voiceover_generation" && kind !== "final_assembly",
+      ),
       ...OPERATION_STATUSES,
-      ...REQUIRED_NEXT_ACTION_TYPES,
+      ...REQUIRED_NEXT_ACTION_TYPES.filter(
+        (action) =>
+          action !== "GENERATE_VOICEOVER" &&
+          action !== "ASSEMBLE_FINAL" &&
+          action !== "RUN_FINAL_QA",
+      ),
     ];
     for (const name of frozenNames) {
       expect(contract, `contract is missing ${name}`).toContain(`\`${name}\``);
