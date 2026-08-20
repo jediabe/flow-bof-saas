@@ -64,7 +64,7 @@ const database = vi.hoisted(() => {
 
 vi.mock("@/lib/db", () => ({ db: database.client }));
 
-import { createStyle1Run } from "../create-run";
+import { createManagedContentRun, createStyle1Run } from "../create-run";
 
 function eligibleProduct() {
   return {
@@ -356,6 +356,264 @@ describe("createStyle1Run", () => {
         workspaceId: "workspace-1",
         productId: "product-1",
         idempotencyKey: "objective-invalid-context",
+      }),
+    ).rejects.toMatchObject({ code: "INVALID_PRODUCT_CONTEXT" });
+    expect(database.client.contentRun.create).not.toHaveBeenCalled();
+  });
+});
+
+const style2Voiceover = Array.from({ length: 70 }, (_, index) => `word${index + 1}`).join(" ");
+
+function style2CompilerInput(overrides: Record<string, unknown> = {}) {
+  return {
+    styleId: "style2" as const,
+    version: "managed-style2-v1" as const,
+    variant: "handheld" as const,
+    productName: "Portable Blender",
+    productType: "skincare_beauty_makeup_haircare" as const,
+    productForm: "serum" as const,
+    productCount: 1 as const,
+    characterReferenceId: "registered-character-1",
+    productReferenceId: "reference-1",
+    seed: 101,
+    recentSceneHashes: [],
+    copy: {
+      market: "UK" as const,
+      hook_text: "WAIT, the basket voucher is live",
+      benefit_text: "Soft glide, easy routine feel",
+      cta_text: "Tap the basket voucher today",
+      voiceover: style2Voiceover,
+    },
+    ...overrides,
+  };
+}
+
+function registeredCharacterDependencies() {
+  const getCharacter = vi.fn(async ({ characterReferenceId }: { characterReferenceId: string }) => ({
+    characterReferenceId,
+    entityId: "character-entity-1",
+  }));
+  const createAdapter = vi.fn(() => ({ getCharacter }) as never);
+  return { getCharacter, createAdapter };
+}
+
+describe("createManagedContentRun", () => {
+  it("accepts strict Style 1 compiler input through the shared manifest boundary", async () => {
+    const run = await createManagedContentRun({
+      workspaceId: "workspace-1",
+      productId: "product-1",
+      idempotencyKey: "shared-style1",
+      styleId: "style1",
+      compilerInput: {
+        styleId: "style1",
+        version: "managed-style1-v1",
+        variant: "store_discovery",
+        productReferenceImageId: "reference-1",
+        style1Kit: {
+          productName: "Portable Blender",
+          market: "UK",
+          category: "Kitchen/Food",
+          copy: {
+            part1Options: ["WAIT, this Portable Blender deal is worth checking before your next busy morning."],
+            part2Options: ["It makes quick smoothies feel simple at home, and the basket voucher is available today."],
+            part3Options: ["Tap the basket"],
+          },
+          hashtags: ["#tiktokshopuk", "#AIGC"],
+          productDescription: "A compact blender.",
+          discountPercent: 20,
+          warnings: [],
+        },
+      },
+    });
+
+    const snapshot = JSON.parse(run.promptSnapshotJson!);
+    expect(run.style).toBe("style1");
+    expect(snapshot.styleManifest).toMatchObject({
+      styleId: "style1",
+      version: "managed-style1-v1",
+      variant: "store_discovery",
+    });
+    expect(snapshot.voiceoverPlan.script).toContain("Portable Blender");
+    expect(snapshot.slots).toHaveLength(4);
+  });
+
+  it("compiles and freezes the exact Style 2 manifest, prompts, attachments, model, voiceover and assembly policy", async () => {
+    const character = registeredCharacterDependencies();
+    const run = await createManagedContentRun({
+      workspaceId: "workspace-1",
+      productId: "product-1",
+      idempotencyKey: "style2-handheld",
+      styleId: "style2",
+      compilerInput: style2CompilerInput(),
+    }, character);
+
+    const snapshot = JSON.parse(run.promptSnapshotJson!);
+    expect(run).toMatchObject({ style: "style2", status: "created", market: "uk" });
+    expect(snapshot).toMatchObject({
+      objective: "create_style2_piece",
+      style: "style2",
+      specVersion: "managed-style2-v1",
+      variant: "handheld",
+      modelSnapshot: {
+        imageModel: "nano-banana-pro",
+        videoModel: "veo-3.1-lite-low-priority",
+      },
+      references: {
+        character: { id: "registered-character-1", kind: "registered_character" },
+        product: { id: "reference-1", url: "/uploads/reference-1.jpg", bytes: 12345 },
+        garment: null,
+      },
+      voiceoverPlan: {
+        scriptCompilerId: "style2.validated-copy-script.v1",
+        validationProfileId: "style2.voiceover-70-75-words.v1",
+        wordCount: 70,
+        script: style2Voiceover,
+      },
+    });
+    expect(snapshot.styleManifest.slots.map((slot: { id: string }) => slot.id)).toEqual([
+      "N1", "N2", "N3", "N4", "N5", "N6", "N7",
+    ]);
+    expect(snapshot.slots.map((slot: { slot: string }) => slot.slot)).toEqual([
+      "N1", "N2", "N3", "N4", "N5", "N6", "N7",
+    ]);
+    expect(snapshot.assemblyPolicy).toEqual(snapshot.styleManifest.assembly);
+    expect(character.createAdapter).toHaveBeenCalledWith({
+      actor: {
+        workspaceId: "workspace-1",
+        actorType: "service",
+        actorId: "managed-content-run-create",
+      },
+      flowEmail: "operator@example.test",
+    });
+    expect(character.getCharacter).toHaveBeenCalledExactlyOnceWith({
+      characterReferenceId: "registered-character-1",
+    });
+  });
+
+  it("returns the frozen managed run when mutable eligibility changes after commit", async () => {
+    const character = registeredCharacterDependencies();
+    const input = {
+      workspaceId: "workspace-1",
+      productId: "product-1",
+      idempotencyKey: "style2-replay-after-mutation",
+      styleId: "style2" as const,
+      compilerInput: style2CompilerInput(),
+    };
+    const original = await createManagedContentRun(input, character);
+
+    database.state.product = {
+      ...eligibleProduct(),
+      reviewStatus: "needs_review",
+      deletedAt: new Date("2026-08-19T13:00:00.000Z"),
+    };
+    database.state.settings = {
+      workspaceId: "workspace-1",
+      flowEmail: null,
+      flowImageModel: "invalid-after-commit",
+      flowVideoModel: "invalid-after-commit",
+    };
+
+    const replay = await createManagedContentRun(input, character);
+
+    expect(replay).toBe(original);
+    expect(replay.promptSnapshotJson).toBe(original.promptSnapshotJson);
+    expect(character.getCharacter).toHaveBeenCalledTimes(1);
+    expect(database.client.contentRun.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects reuse of a managed idempotency key for different frozen inputs", async () => {
+    const character = registeredCharacterDependencies();
+    const base = {
+      workspaceId: "workspace-1",
+      productId: "product-1",
+      idempotencyKey: "style2-idempotency-bound",
+      styleId: "style2" as const,
+    };
+    await createManagedContentRun(
+      { ...base, compilerInput: style2CompilerInput({ seed: 101 }) },
+      character,
+    );
+
+    await expect(
+      createManagedContentRun(
+        { ...base, compilerInput: style2CompilerInput({ seed: 202 }) },
+        character,
+      ),
+    ).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    expect(character.getCharacter).toHaveBeenCalledTimes(1);
+    expect(database.client.contentRun.create).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["style mismatch", { styleId: "style1" }, {}, "INVALID_REQUEST"],
+    ["unregistered character", {}, { characterReferenceId: "" }, "INVALID_PRODUCT_CONTEXT"],
+    [
+      "cross-market copy",
+      {},
+      {
+        copy: {
+          market: "US",
+          hook_text: "WAIT, the basket voucher is live",
+          benefit_text: "Soft glide, easy routine feel",
+          cta_text: "Tap the basket voucher today",
+          voiceover: Array.from({ length: 70 }, () => "okay").join(" "),
+        },
+      },
+      "INVALID_PRODUCT_CONTEXT",
+    ],
+    ["unknown product attachment", {}, { productReferenceId: "other-product-ref" }, "INVALID_PRODUCT_CONTEXT"],
+  ])("rejects %s before creating a run", async (_label, requestPatch, compilerPatch, code) => {
+    await expect(
+      createManagedContentRun({
+        workspaceId: "workspace-1",
+        productId: "product-1",
+        idempotencyKey: `invalid-${_label}`,
+        styleId: "style2",
+        compilerInput: style2CompilerInput(compilerPatch),
+        ...requestPatch,
+      } as never, registeredCharacterDependencies()),
+    ).rejects.toMatchObject({ code });
+    expect(database.client.contentRun.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects a character that is not registered to the workspace Flow account", async () => {
+    const getCharacter = vi.fn(async () => {
+      throw new Error("character not found");
+    });
+
+    await expect(
+      createManagedContentRun(
+        {
+          workspaceId: "workspace-1",
+          productId: "product-1",
+          idempotencyKey: "style2-foreign-character",
+          styleId: "style2",
+          compilerInput: style2CompilerInput(),
+        },
+        { createAdapter: () => ({ getCharacter }) as never },
+      ),
+    ).rejects.toMatchObject({
+      code: "INVALID_PRODUCT_CONTEXT",
+      details: { field: "characterReferenceId" },
+    });
+    expect(getCharacter).toHaveBeenCalledTimes(1);
+    expect(database.client.contentRun.create).not.toHaveBeenCalled();
+  });
+
+  it("requires the worn garment attachment to be a usable product-owned reference", async () => {
+    await expect(
+      createManagedContentRun({
+        workspaceId: "workspace-1",
+        productId: "product-1",
+        idempotencyKey: "style2-worn-missing-garment",
+        styleId: "style2",
+        compilerInput: style2CompilerInput({
+          variant: "worn",
+          productType: "clothing_fashion_shoes",
+          productForm: "worn",
+          productReferenceId: null,
+          garmentReferenceId: "missing-garment",
+        }),
       }),
     ).rejects.toMatchObject({ code: "INVALID_PRODUCT_CONTEXT" });
     expect(database.client.contentRun.create).not.toHaveBeenCalled();

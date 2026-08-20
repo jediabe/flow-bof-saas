@@ -10,7 +10,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import type { ApexFlowAdapter } from "../apex-flow-adapter";
 import { createOperationRepository } from "../operations";
 import type { ObjectStorage, PutManagedObjectInput } from "@/lib/storage";
-import { generateManagedStyle1Image } from "../generate-image";
+import { compileStyleManifest } from "@/lib/content-styles/registry";
+import { generateManagedImage, generateManagedStyle1Image } from "../generate-image";
 
 const PNG_BYTES = new Uint8Array([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00,
@@ -289,6 +290,91 @@ describe("generateManagedStyle1Image", () => {
       prisma.contentRun.findUniqueOrThrow({ where: { id: contentRunId } }),
     ).resolves.toMatchObject({ status: "qa_running" });
     await expect(prisma.workspaceProviderLock.count()).resolves.toBe(0);
+  });
+
+  it("generates the next Style 2 image slot from frozen character and garment attachments", async () => {
+    const manifest = compileStyleManifest("style2", "managed-style2-v1", "worn");
+    const snapshot = {
+      objective: "create_style2_piece",
+      style: "style2",
+      specVersion: "managed-style2-v1",
+      variant: "worn",
+      product: {
+        id: productId,
+        name: "product",
+        references: [
+          {
+            id: "garment-reference",
+            role: "ref2",
+            url: "https://saas.example/garment.png",
+            pathLocal: null,
+            bytes: PNG_BYTES.byteLength,
+          },
+        ],
+      },
+      modelSnapshot: {
+        imageModel: "nano-banana-pro",
+        videoModel: "veo-3.1-lite-low-priority",
+      },
+      styleManifest: manifest,
+      references: {
+        character: { id: "registered-character-1", kind: "registered_character" },
+        product: null,
+        garment: {
+          id: "garment-reference",
+          url: "https://saas.example/garment.png",
+          pathLocal: null,
+          bytes: PNG_BYTES.byteLength,
+        },
+      },
+      slots: manifest.slots.map((slot) => ({
+        slot: slot.id,
+        mediaType: slot.mediaType,
+        prompt: `frozen ${slot.id} prompt`,
+        promptCompilerId: slot.promptCompilerId,
+        generation: {
+          aspectRatio: slot.mediaType === "image" ? "9:16" : "portrait",
+          durationSeconds: slot.providerRequestDurationSeconds,
+          startImageSlot: slot.sourceDependency,
+          characterReferenceIds: ["registered-character-1"],
+          referenceAttachmentIds: ["garment-reference"],
+        },
+      })),
+    };
+    await prisma.contentRun.update({
+      where: { id: contentRunId },
+      data: {
+        style: "style2",
+        promptSnapshotJson: JSON.stringify(snapshot),
+      },
+    });
+    const adapter = createAdapter();
+
+    const result = await generateManagedImage(
+      { workspaceId, actorType: "service", actorId: "hermes" },
+      { contentRunId, slot: "N1", idempotencyKey: "style2-worn-n1" },
+      {
+        prisma,
+        objectStorage: createStorage(),
+        createAdapter: () => adapter,
+        fetchMedia: vi.fn(async () =>
+          new Response(PNG_BYTES, { headers: { "content-type": "image/png" } }),
+        ),
+      },
+    );
+
+    expect(adapter.generateImage).toHaveBeenCalledWith({
+      prompt: "frozen N1 prompt",
+      model: "nano-banana-pro",
+      aspectRatio: "9:16",
+      referenceMediaIds: ["flow-uploaded-frozen-primary"],
+      characterReferenceIds: ["registered-character-1"],
+    });
+    expect(result).toMatchObject({
+      slot: "N1",
+      asset: { sceneLabel: "N1", contentRunId },
+      requiredNextAction: { type: "RUN_QA", slot: "N1" },
+    });
   });
 
   it("uses the frozen scene 2 inputs and ignores injected prompt/model/reference fields", async () => {

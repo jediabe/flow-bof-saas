@@ -1,14 +1,10 @@
 import type { PrismaClient } from "@prisma/client";
 
 import { db } from "@/lib/db";
-import {
-  MANAGED_STYLE1_SPEC_VERSION,
-  SLOT_DEFINITIONS,
-} from "./constants";
 import { projectContentRun } from "./project-run";
 import type {
-  ContentRunProjection,
   ContentRunState,
+  ManifestAwareContentRunProjection,
   ServiceActorContext,
 } from "./types";
 import {
@@ -36,7 +32,7 @@ export interface RunManagedQaResult {
   decision: RunQaOutput["decision"];
   qaStatus: RunQaOutput["qaStatus"];
   runStatus: ContentRunState;
-  requiredNextAction: ContentRunProjection["requiredNextAction"];
+  requiredNextAction: ManifestAwareContentRunProjection["requiredNextAction"];
 }
 
 export type ManagedQaErrorCode =
@@ -171,8 +167,8 @@ async function loadScopedRun(
   return run;
 }
 
-function project(run: LoadedManagedRun): ContentRunProjection {
-  assertManagedStyle1RunIdentity(run);
+function project(run: LoadedManagedRun): ManifestAwareContentRunProjection {
+  assertManagedRunIdentity(run);
   return projectContentRun({
     run,
     images: run.images,
@@ -181,13 +177,20 @@ function project(run: LoadedManagedRun): ContentRunProjection {
   });
 }
 
-function assertManagedStyle1RunIdentity(run: LoadedManagedRun): void {
+function expectedManagedVersion(style: string): string | null {
+  if (style === "style1") return "managed-style1-v1";
+  if (style === "style2") return "managed-style2-v1";
+  return null;
+}
+
+function assertManagedRunIdentity(run: LoadedManagedRun): void {
   try {
     const snapshot = JSON.parse(run.promptSnapshotJson ?? "") as Record<string, unknown>;
+    const expectedVersion = expectedManagedVersion(run.style);
     if (
-      run.style === "style1" &&
-      snapshot.objective === "create_style1_piece" &&
-      snapshot.specVersion === MANAGED_STYLE1_SPEC_VERSION
+      expectedVersion &&
+      snapshot.objective === `create_${run.style}_piece` &&
+      snapshot.specVersion === expectedVersion
     ) {
       return;
     }
@@ -196,23 +199,24 @@ function assertManagedStyle1RunIdentity(run: LoadedManagedRun): void {
   }
   throw new ManagedQaError(
     "MANAGED_ASSET_NOT_READY",
-    "Content run is not the managed Style 1 V1 objective",
+    "Content run is not an approved managed style objective",
     { contentRunId: run.id },
   );
 }
 
-function assertManagedStyle1V1(
+function assertManagedProjection(
   run: LoadedManagedRun,
-  projection: ContentRunProjection,
+  projection: ManifestAwareContentRunProjection,
 ): void {
+  const expectedVersion = expectedManagedVersion(run.style);
   if (
-    run.style !== "style1" ||
-    projection.objective !== "create_style1_piece" ||
-    projection.specVersion !== MANAGED_STYLE1_SPEC_VERSION
+    !expectedVersion ||
+    projection.objective !== `create_${run.style}_piece` ||
+    projection.specVersion !== expectedVersion
   ) {
     throw new ManagedQaError(
       "MANAGED_ASSET_NOT_READY",
-      "Content run is not the managed Style 1 V1 objective",
+      "Content run is not an approved managed style objective",
       { contentRunId: run.id },
     );
   }
@@ -230,14 +234,16 @@ function assertQaAction(
       { contentRunId: run.id, status: run.status },
     );
   }
-  assertManagedStyle1V1(run, projection);
+  assertManagedProjection(run, projection);
   const action = projection.requiredNextAction;
-  const expectedMediaType =
-    action.type === "RUN_QA" ? SLOT_DEFINITIONS[action.slot].mediaType : null;
+  const expectedAsset =
+    command.assetKind === "image"
+      ? run.images.find((asset) => asset.id === command.assetId)
+      : run.videos.find((asset) => asset.id === command.assetId);
   if (
     action.type !== "RUN_QA" ||
     action.assetId !== command.assetId ||
-    expectedMediaType !== command.assetKind
+    !expectedAsset
   ) {
     throw new ManagedQaError(
       "MANAGED_ASSET_NOT_READY",
@@ -254,12 +260,15 @@ function assertQaAction(
 function reconciliationDecision(
   run: LoadedManagedRun,
   command: RunManagedQaCommand,
-  projection: ContentRunProjection,
+  projection: ManifestAwareContentRunProjection,
 ): Pick<RunManagedQaResult, "decision" | "qaStatus"> | null {
+  const expectedAssetIds = new Set(
+    (command.assetKind === "image" ? run.images : run.videos).map((asset) => asset.id),
+  );
   const slotIndex = projection.slots.findIndex(
     (slot) =>
       slot.selectedAssetId === command.assetId &&
-      SLOT_DEFINITIONS[slot.slot].mediaType === command.assetKind,
+      expectedAssetIds.has(command.assetId),
   );
   if (slotIndex < 0) return null;
 
@@ -276,16 +285,11 @@ function reconciliationDecision(
   const action = projection.requiredNextAction;
   const expectedActionMatches =
     attempt.qaStatus === "APPROVED"
-      ? (slotIndex === 0 &&
-          action.type === "GENERATE_VIDEO" &&
-          action.sourceAssetId === command.assetId) ||
-        (slotIndex === 1 &&
-          action.type === "GENERATE_IMAGE" &&
-          action.slot === "scene_2_home_image") ||
-        (slotIndex === 2 &&
-          action.type === "GENERATE_VIDEO" &&
-          action.sourceAssetId === command.assetId) ||
-        (slotIndex === 3 && action.type === "COMPLETE")
+      ? !(
+          (action.type === "RUN_QA" && action.assetId === command.assetId) ||
+          action.type === "FAILED" ||
+          action.type === "HUMAN_REVIEW"
+        )
       : attempt.qaStatus === "FAILED"
         ? action.type === "FAILED"
         : action.type === "HUMAN_REVIEW";
@@ -308,7 +312,7 @@ async function synchronizeRunAfterQa(
   workspaceId: string,
   contentRunId: string,
   allowQaRunning = false,
-): Promise<ContentRunProjection> {
+): Promise<ManifestAwareContentRunProjection> {
   const run = await loadScopedRun(prisma, workspaceId, contentRunId);
   const projection = project(run);
   const target = projection.status;
@@ -381,7 +385,7 @@ export async function runManagedQa(
   const run = await loadScopedRun(prisma, actor.workspaceId, contentRunId);
   const normalizedCommand = { ...command, contentRunId, assetId };
   const initialProjection = project(run);
-  assertManagedStyle1V1(run, initialProjection);
+  assertManagedProjection(run, initialProjection);
   const recovered = reconciliationDecision(run, normalizedCommand, initialProjection);
   if (recovered) {
     const projection = await synchronizeRunAfterQa(

@@ -57,6 +57,7 @@ vi.mock("@/lib/storage", async (importOriginal) => ({
 }));
 
 import { runManagedQa } from "../run-managed-qa";
+import { compileStyleManifest } from "@/lib/content-styles/registry";
 import { decide } from "@/lib/qa/decision-engine";
 import { acquireQaLock } from "@/lib/qa/persistence";
 
@@ -512,6 +513,67 @@ describe("runManagedQa", () => {
         product: { batch: { workspaceId: "workspace-1" } },
       },
       data: { status: "generating" },
+    });
+  });
+
+  it("advances an approved Style 2 no-start clip to the next manifest image slot", async () => {
+    const run = createRunFixture();
+    const manifest = compileStyleManifest("style2", "managed-style2-v1", "handheld");
+    run.style = "style2";
+    run.images = [];
+    run.videos = [
+      {
+        id: "video-n1",
+        contentRunId: "run-1",
+        sceneLabel: "N1",
+        attemptNumber: 1,
+        qaStatus: "NOT_QA_CHECKED",
+        qaScore: null,
+        qaVerdictJson: null,
+      },
+    ];
+    run.promptSnapshotJson = JSON.stringify({
+      objective: "create_style2_piece",
+      style: "style2",
+      specVersion: "managed-style2-v1",
+      variant: "handheld",
+      modelSnapshot: {
+        imageModel: "nano-banana-pro",
+        videoModel: "veo-3.1-lite-low-priority",
+      },
+      styleManifest: manifest,
+    });
+    const prisma = createPrisma(run);
+    runQaForAsset.mockImplementation(async () => {
+      run.videos[0].qaStatus = "APPROVED";
+      run.videos[0].qaScore = 95;
+      run.videos[0].qaVerdictJson = JSON.stringify({
+        decision: "APPROVE",
+        overallScore: 95,
+      });
+      return {
+        attemptId: "qa-n1",
+        assetId: "video-n1",
+        assetKind: "video",
+        decision: "APPROVE",
+        qaStatus: "APPROVED",
+        overallScore: 95,
+        attemptNumber: 1,
+        reason: "approved",
+        elapsedMs: 5,
+        providerModel: "resolved-provider",
+      };
+    });
+
+    const result = await runManagedQa(
+      actor,
+      { contentRunId: "run-1", assetId: "video-n1", assetKind: "video" },
+      { prisma: prisma as never },
+    );
+
+    expect(result).toMatchObject({
+      runStatus: "generating",
+      requiredNextAction: { type: "GENERATE_IMAGE", slot: "N2" },
     });
   });
 

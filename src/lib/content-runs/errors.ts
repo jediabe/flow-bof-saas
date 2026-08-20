@@ -6,7 +6,8 @@ export type ContentRunCreationErrorCode =
   | "PRIMARY_REFERENCE_REQUIRED"
   | "FLOW_ACCOUNT_REQUIRED"
   | "INVALID_FLOW_MODEL"
-  | "INVALID_PRODUCT_CONTEXT";
+  | "INVALID_PRODUCT_CONTEXT"
+  | "IDEMPOTENCY_CONFLICT";
 
 /** Stable, non-provider-facing failures returned by ContentRun creation. */
 export class ContentRunCreationError extends Error {
