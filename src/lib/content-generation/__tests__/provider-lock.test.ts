@@ -234,6 +234,113 @@ describe("provider workspace lock", () => {
     ).rejects.toMatchObject({ code: "WORKSPACE_PROVIDER_BUSY" });
   });
 
+  it("preserves an accepted provider job and blocks a different operation after lock expiry", async () => {
+    const repository = createProviderLockRepository(prisma);
+    const acquiredAt = new Date("2026-08-19T12:00:00.000Z");
+    await repository.acquire({
+      workspaceId: fixture.workspace1,
+      operationId: fixture.op1,
+      ttlMs: 1_000,
+      now: acquiredAt,
+    });
+    await prisma.contentOperation.update({
+      where: { id: fixture.op1 },
+      data: { status: "running", providerJobId: "provider-job-accepted" },
+    });
+
+    await expect(
+      repository.acquire({
+        workspaceId: fixture.workspace1,
+        operationId: fixture.op2,
+        ttlMs: 60_000,
+        now: new Date("2026-08-19T12:00:02.000Z"),
+      }),
+    ).rejects.toMatchObject({
+      code: "WORKSPACE_PROVIDER_BUSY",
+      details: {
+        operationId: fixture.op1,
+        contentRunId: fixture.run1,
+      },
+    });
+
+    await expect(
+      prisma.contentOperation.findUniqueOrThrow({ where: { id: fixture.op1 } }),
+    ).resolves.toMatchObject({
+      status: "running",
+      providerJobId: "provider-job-accepted",
+      errorJson: null,
+      completedAt: null,
+    });
+    await expect(
+      prisma.workspaceProviderLock.findUniqueOrThrow({
+        where: { workspaceId: fixture.workspace1 },
+      }),
+    ).resolves.toMatchObject({
+      operationId: fixture.op1,
+      expiresAt: new Date("2026-08-19T12:00:01.000Z"),
+    });
+  });
+
+  it("atomically renews an expired accepted-job lock for its operation while rejecting a concurrent different operation", async () => {
+    const repository = createProviderLockRepository(prisma);
+    const acquiredAt = new Date("2026-08-19T12:00:00.000Z");
+    const resumedAt = new Date("2026-08-19T12:00:02.000Z");
+    await repository.acquire({
+      workspaceId: fixture.workspace1,
+      operationId: fixture.op1,
+      ttlMs: 1_000,
+      now: acquiredAt,
+    });
+    await prisma.contentOperation.update({
+      where: { id: fixture.op1 },
+      data: { status: "running", providerJobId: "provider-job-accepted" },
+    });
+
+    const [sameOperation, differentOperation] = await Promise.allSettled([
+      repository.acquire({
+        workspaceId: fixture.workspace1,
+        operationId: fixture.op1,
+        ttlMs: 60_000,
+        now: resumedAt,
+      }),
+      repository.acquire({
+        workspaceId: fixture.workspace1,
+        operationId: fixture.op2,
+        ttlMs: 60_000,
+        now: resumedAt,
+      }),
+    ]);
+
+    expect(sameOperation).toMatchObject({
+      status: "fulfilled",
+      value: {
+        operationId: fixture.op1,
+        acquiredAt: resumedAt,
+        expiresAt: new Date("2026-08-19T12:01:02.000Z"),
+      },
+    });
+    expect(differentOperation).toMatchObject({
+      status: "rejected",
+      reason: {
+        code: "WORKSPACE_PROVIDER_BUSY",
+        details: { operationId: fixture.op1, contentRunId: fixture.run1 },
+      },
+    });
+    await expect(
+      prisma.contentOperation.findUniqueOrThrow({ where: { id: fixture.op1 } }),
+    ).resolves.toMatchObject({
+      status: "running",
+      providerJobId: "provider-job-accepted",
+      errorJson: null,
+      completedAt: null,
+    });
+    await expect(
+      prisma.workspaceProviderLock.findUniqueOrThrow({
+        where: { workspaceId: fixture.workspace1 },
+      }),
+    ).resolves.toMatchObject({ operationId: fixture.op1, acquiredAt: resumedAt });
+  });
+
   it("rejects an operation that does not belong to the lock workspace", async () => {
     const repository = createProviderLockRepository(prisma);
 

@@ -556,13 +556,17 @@ async function reconcileExpiredPreIdentityLock(
   });
 }
 
-async function operationOwnsLock(
+async function operationOwnsLiveLock(
   prisma: PrismaClient,
   workspaceId: string,
   operationId: string,
 ): Promise<boolean> {
   const lock = await prisma.workspaceProviderLock.findFirst({
-    where: { workspaceId, operationId },
+    where: {
+      workspaceId,
+      operationId,
+      expiresAt: { gte: new Date() },
+    },
     select: { operationId: true },
   });
   return Boolean(lock);
@@ -725,7 +729,7 @@ export async function generateManagedStyle1Video(
   const scope = { workspaceId, operationId: operation.id };
 
   if (!operation.providerJobId) {
-    if (await operationOwnsLock(prisma, workspaceId, operation.id)) {
+    if (await operationOwnsLiveLock(prisma, workspaceId, operation.id)) {
       return waitResult(operation, command);
     }
     try {
@@ -797,7 +801,7 @@ export async function generateManagedStyle1Video(
     }
   }
 
-  if (!(await operationOwnsLock(prisma, workspaceId, operation.id))) {
+  if (!(await operationOwnsLiveLock(prisma, workspaceId, operation.id))) {
     await locks.acquire({
       ...scope,
       ttlMs: dependencies.lockTtlMs ?? MANAGED_VIDEO_LOCK_TTL_MS,
