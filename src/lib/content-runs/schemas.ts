@@ -66,11 +66,47 @@ export const ContentGenerateStyle1ImageInputSchema = z
     idempotencyKey: IdempotencyKeySchema,
   })
   .strict();
+export const CreativeDirectionSchema = z
+  .object({
+    cameraMovement: z.enum([
+      "locked_off",
+      "minimal_push_in",
+      "gentle_push_in",
+      "subtle_lateral_drift",
+    ]),
+    pacing: z.enum(["steady", "unhurried", "natural"]),
+    framing: z.enum(["stable_wide", "stable_medium", "stable_close"]),
+    distance: z.enum(["hold_distance", "slight_approach", "slight_retreat"]),
+    interactionStyle: z.enum([
+      "single_gentle_tap",
+      "single_gentle_touch",
+      "minimal_hand_interaction",
+    ]),
+    movementIntensity: z.enum(["minimal", "low", "moderate"]),
+    preservationFocus: z
+      .array(
+        z.enum([
+          "label_layout",
+          "lettering_placement",
+          "nozzle_geometry",
+          "packaging_proportions",
+          "reflections",
+          "fine_product_features",
+        ]),
+      )
+      .min(1)
+      .max(6)
+      .refine((values) => new Set(values).size === values.length, {
+        message: "preservationFocus values must be unique",
+      }),
+  })
+  .strict();
 export const ContentGenerateStyle1VideoInputSchema = z
   .object({
     contentRunId: IdSchema,
     slot: VideoSlotSchema,
     idempotencyKey: IdempotencyKeySchema,
+    creativeDirection: CreativeDirectionSchema.optional(),
   })
   .strict();
 export const ContentRunAssetQaInputSchema = z

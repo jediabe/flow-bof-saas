@@ -9,6 +9,7 @@ import {
   type ContentOperationRecord,
   type CreateOperationInput,
   type OperationScope,
+  type VideoCreativeDirection,
 } from "./types";
 
 export interface OperationRepository {
@@ -86,16 +87,33 @@ function assertMutable(operation: ContentOperationRecord): void {
   }
 }
 
+function canonicalCreativeDirection(
+  direction: VideoCreativeDirection | undefined,
+): string | null {
+  if (!direction) return null;
+  return JSON.stringify({
+    cameraMovement: direction.cameraMovement,
+    pacing: direction.pacing,
+    framing: direction.framing,
+    distance: direction.distance,
+    interactionStyle: direction.interactionStyle,
+    movementIntensity: direction.movementIntensity,
+    preservationFocus: direction.preservationFocus,
+  });
+}
+
 function assertSameLogicalCommand(
   existing: ContentOperationRecord,
   input: CreateOperationInput,
 ): void {
   const provider = input.provider ?? "google_flow_useapi";
+  const creativeDirectionJson = canonicalCreativeDirection(input.creativeDirection);
   if (
     existing.contentRunId !== input.contentRunId ||
     existing.kind !== input.kind ||
     existing.sceneLabel !== input.sceneLabel ||
-    existing.provider !== provider
+    existing.provider !== provider ||
+    existing.creativeDirectionJson !== creativeDirectionJson
   ) {
     throw new ContentGenerationError(
       "IDEMPOTENCY_CONFLICT",
@@ -186,6 +204,7 @@ export function createOperationRepository(
           kind: input.kind,
           sceneLabel: input.sceneLabel,
           idempotencyKey: input.idempotencyKey,
+          creativeDirectionJson: canonicalCreativeDirection(input.creativeDirection),
           ...(input.provider ? { provider: input.provider } : {}),
         },
       }),

@@ -33,6 +33,30 @@ export type ContentOperationStatus =
   | "succeeded"
   | "failed";
 
+export interface VideoCreativeDirection {
+  cameraMovement:
+    | "locked_off"
+    | "minimal_push_in"
+    | "gentle_push_in"
+    | "subtle_lateral_drift";
+  pacing: "steady" | "unhurried" | "natural";
+  framing: "stable_wide" | "stable_medium" | "stable_close";
+  distance: "hold_distance" | "slight_approach" | "slight_retreat";
+  interactionStyle:
+    | "single_gentle_tap"
+    | "single_gentle_touch"
+    | "minimal_hand_interaction";
+  movementIntensity: "minimal" | "low" | "moderate";
+  preservationFocus: Array<
+    | "label_layout"
+    | "lettering_placement"
+    | "nozzle_geometry"
+    | "packaging_proportions"
+    | "reflections"
+    | "fine_product_features"
+  >;
+}
+
 export interface ContentOperationRecord {
   id: string;
   workspaceId: string;
@@ -44,6 +68,7 @@ export interface ContentOperationRecord {
   provider: string;
   providerJobId: string | null;
   technicalAttemptCount: number;
+  creativeDirectionJson: string | null;
   resultJson: string | null;
   errorJson: string | null;
   startedAt: Date | null;
@@ -52,14 +77,19 @@ export interface ContentOperationRecord {
   updatedAt: Date;
 }
 
-export interface CreateOperationInput {
+interface CreateOperationBaseInput {
   workspaceId: string;
   contentRunId: string;
-  kind: ContentOperationKind;
   sceneLabel: string;
   idempotencyKey: string;
   provider?: string;
 }
+
+export type CreateOperationInput = CreateOperationBaseInput &
+  (
+    | { kind: "image_generation"; creativeDirection?: never }
+    | { kind: "video_generation"; creativeDirection?: VideoCreativeDirection }
+  );
 
 export interface OperationScope {
   workspaceId: string;

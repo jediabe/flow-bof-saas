@@ -783,6 +783,7 @@ model ContentOperation {
   provider              String   @default("google_flow_useapi")
   providerJobId         String?
   technicalAttemptCount Int      @default(0)
+  creativeDirectionJson String?
   resultJson            String?
   errorJson             String?
   startedAt             DateTime?
@@ -829,6 +830,7 @@ model FlowGeneratedVideo {
   // Prompt the agent used to generate this video. Useful for
   // debugging + regenerate-with-tweak flows.
   prompt            String?
+  creativeDirectionJson String?
   // Free-form notes from the agent OR operator (e.g. "first
   // attempt, may regenerate for better lighting"). Rendered as
   // hover text in the mobile posting page's videos section.
