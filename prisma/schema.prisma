@@ -746,12 +746,61 @@ model ContentRun {
   images             FlowGeneratedImage[]
   videos             FlowGeneratedVideo[]
   operations         ContentOperation[]
+  finalVideo         FinalVideoAsset?
 
   @@unique([productId, idempotencyKey])
 
   @@index([productId, createdAt(sort: Desc)])
   @@index([productId, status])
   @@index([status])
+}
+
+// One staged, private final output per run. Nullable media columns permit
+// reserving the lifecycle row before provider or object-storage work begins.
+model FinalVideoAsset {
+  id                    String   @id @default(cuid())
+  contentRunId          String
+  contentRun            ContentRun @relation(fields: [contentRunId], references: [id], onDelete: Cascade)
+  attempt               Int      @default(1)
+  status                String   @default("PENDING")
+  voiceoverScript       String?
+  voiceoverProvider     String?
+  voiceoverVoiceId      String?
+  voiceoverModel        String?
+  audioStorageBucket    String?
+  audioStorageKey       String?
+  audioContentType      String?
+  audioBytes            Int?
+  audioSha256           String?
+  audioDurationSeconds  Float?
+  assemblyManifestJson  String?
+  finalStorageBucket    String?
+  finalStorageKey       String?
+  finalContentType      String?
+  finalBytes            Int?
+  finalSha256           String?
+  finalDurationSeconds  Float?
+  finalWidth            Int?
+  finalHeight           Int?
+  finalVideoCodec       String?
+  finalAudioCodec       String?
+  mediaValidationPassed Boolean?
+  mediaValidatedAt      DateTime?
+  finalQaStatus         String   @default("NOT_QA_CHECKED")
+  finalQaScore          Int?
+  finalQaVerdict        String?
+  finalQaEvaluatedAt    DateTime?
+  failureCode           String?
+  failureJson           String?
+  failedAt              DateTime?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @default(now()) @updatedAt
+
+  qaAttempts            QaAttempt[]
+
+  @@unique([contentRunId])
+  @@index([status])
+  @@index([finalQaStatus])
 }
 
 // ---------------------------------------------------------------------------
@@ -964,6 +1013,8 @@ model QaAttempt {
   video            FlowGeneratedVideo? @relation(fields: [videoId], references: [id], onDelete: Cascade)
   imageId          String?
   image            FlowGeneratedImage? @relation(fields: [imageId], references: [id], onDelete: Cascade)
+  finalVideoId     String?
+  finalVideo       FinalVideoAsset? @relation(fields: [finalVideoId], references: [id], onDelete: Cascade)
   // "STORE_IMAGE" | "STORE_VIDEO" | "HOME_IMAGE" | "HOME_VIDEO"
   assetType        String
   // Copy of the parent asset's attemptNumber at the time of QA.
@@ -998,6 +1049,7 @@ model QaAttempt {
 
   @@index([videoId])
   @@index([imageId])
+  @@index([finalVideoId])
   @@index([createdAt(sort: Desc)])
 }
 

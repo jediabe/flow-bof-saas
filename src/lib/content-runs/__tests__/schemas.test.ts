@@ -367,6 +367,18 @@ describe("frozen runtime vocabulary", () => {
       REQUIRED_NEXT_ACTION_TYPES,
     );
   });
+
+  it("preserves Style 1 source-image requirements while allowing manifest video roots", () => {
+    expect(
+      RequiredNextActionSchema.safeParse({
+        type: "GENERATE_VIDEO",
+        slot: "scene_1_store_video",
+      }).success,
+    ).toBe(false);
+    expect(
+      RequiredNextActionSchema.safeParse({ type: "GENERATE_VIDEO", slot: "N1" }).success,
+    ).toBe(true);
+  });
 });
 
 describe("slot definitions", () => {

@@ -986,7 +986,7 @@ describe("runManagedQa", () => {
     expect(prisma.flowGeneratedVideo.create).not.toHaveBeenCalled();
   });
 
-  it("marks a fully approved four-slot run ready without creating repair work", async () => {
+  it("returns to generation for voiceover after the fourth source slot is approved", async () => {
     const run = createRunFixture();
     run.images[0].qaStatus = "APPROVED";
     run.images.push({
@@ -1051,8 +1051,8 @@ describe("runManagedQa", () => {
     );
 
     expect(result).toMatchObject({
-      runStatus: "ready",
-      requiredNextAction: { type: "COMPLETE" },
+      runStatus: "generating",
+      requiredNextAction: { type: "GENERATE_VOICEOVER" },
     });
     expect(prisma.contentRun.updateMany).toHaveBeenCalledWith({
       where: {
@@ -1060,7 +1060,7 @@ describe("runManagedQa", () => {
         status: "qa_running",
         product: { batch: { workspaceId: "workspace-1" } },
       },
-      data: { status: "ready", completedAt: expect.any(Date) },
+      data: { status: "generating" },
     });
     expect(prisma.contentOperation.create).not.toHaveBeenCalled();
     expect(prisma.flowGeneratedImage.create).not.toHaveBeenCalled();

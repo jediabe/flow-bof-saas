@@ -1,14 +1,20 @@
 import {
-  CONTENT_SLOTS,
   QA_STATUSES,
   SLOT_DEFINITIONS,
 } from "./constants";
+import { compileStyleManifest } from "@/lib/content-styles/registry";
+import { StyleManifestSchema } from "@/lib/content-styles/schemas";
+import type { ManifestAssetSlot, StyleManifest } from "@/lib/content-styles/types";
 import type {
   ActiveContentOperation,
   ContentRunProjection,
   ContentRunState,
   ContentSlot,
+  ManifestAwareActiveContentOperation,
+  ManifestAwareContentRunProjection,
+  ManifestManagedSlotRecord,
   ManagedAssetAttempt,
+  ManagedManifestSlot,
   ManagedSlotRecord,
   OperationKind,
   OperationStatus,
@@ -18,9 +24,12 @@ import type {
 } from "./types";
 
 export class ContentRunProjectionError extends Error {
-  readonly code = "INVALID_CONTENT_RUN_PROJECTION" as const;
-
-  constructor(message: string) {
+  constructor(
+    message: string,
+    readonly code:
+      | "INVALID_CONTENT_RUN_PROJECTION"
+      | "INVALID_FROZEN_SNAPSHOT" = "INVALID_CONTENT_RUN_PROJECTION",
+  ) {
     super(message);
     this.name = "ContentRunProjectionError";
   }
@@ -47,10 +56,42 @@ interface ProjectableOperation {
   errorJson?: string | null;
 }
 
+interface ProjectableFinalVideo {
+  id: string;
+  contentRunId: string;
+  status: string;
+  audioStorageBucket: string | null;
+  audioStorageKey: string | null;
+  audioContentType: string | null;
+  audioBytes: number | null;
+  audioSha256: string | null;
+  audioDurationSeconds: number | null;
+  assemblyManifestJson: string | null;
+  finalStorageBucket: string | null;
+  finalStorageKey: string | null;
+  finalContentType: string | null;
+  finalBytes: number | null;
+  finalSha256: string | null;
+  finalDurationSeconds: number | null;
+  finalWidth: number | null;
+  finalHeight: number | null;
+  finalVideoCodec: string | null;
+  finalAudioCodec: string | null;
+  mediaValidationPassed: boolean | null;
+  mediaValidatedAt: Date | null;
+  finalQaStatus: string;
+  finalQaScore: number | null;
+  finalQaVerdict: string | null;
+  finalQaEvaluatedAt: Date | null;
+  failureCode: string | null;
+  failureJson: string | null;
+}
+
 export interface ProjectContentRunInput {
   run: {
     id: string;
     productId: string;
+    style?: string;
     status: string;
     promptSnapshotJson: string | null;
   };
@@ -58,6 +99,7 @@ export interface ProjectContentRunInput {
   videos: ProjectableAsset[];
   /** Operations should be supplied oldest-to-newest. */
   operations: ProjectableOperation[];
+  finalVideo?: ProjectableFinalVideo | null;
 }
 
 interface FrozenRunSnapshot {
@@ -65,6 +107,7 @@ interface FrozenRunSnapshot {
   specVersion: string;
   imageModel: string;
   videoModel: string;
+  styleManifest: StyleManifest;
 }
 
 const CONTENT_RUN_STATE_SET = new Set<string>([
@@ -83,7 +126,10 @@ function readNonEmptyString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
 }
 
-function parseSnapshot(snapshotJson: string | null): FrozenRunSnapshot {
+function parseSnapshot(
+  snapshotJson: string | null,
+  persistedStyleInput?: string,
+): FrozenRunSnapshot {
   if (!snapshotJson) {
     throw new ContentRunProjectionError("ContentRun has no frozen prompt snapshot.");
   }
@@ -117,7 +163,36 @@ function parseSnapshot(snapshotJson: string | null): FrozenRunSnapshot {
       "ContentRun prompt snapshot is missing objective, specVersion, or frozen models.",
     );
   }
-  return { objective, specVersion, imageModel, videoModel };
+  const snapshotStyle = readNonEmptyString(raw.style);
+  const persistedStyle = persistedStyleInput ?? snapshotStyle;
+  if (!persistedStyle) {
+    throw new ContentRunProjectionError("ContentRun has no persisted or frozen style identity.");
+  }
+  const manifestStyle = snapshotStyle ?? persistedStyle;
+  if (manifestStyle !== persistedStyle) {
+    throw new ContentRunProjectionError(
+      "ContentRun persisted style does not match its frozen managed style manifest.",
+      "INVALID_FROZEN_SNAPSHOT",
+    );
+  }
+  try {
+    const styleManifest = raw.styleManifest
+      ? StyleManifestSchema.parse(raw.styleManifest)
+      : compileStyleManifest(
+          manifestStyle,
+          specVersion,
+          readNonEmptyString(raw.variant) ??
+            (manifestStyle === "style1" ? "store_discovery" : ""),
+        );
+    if (styleManifest.styleId !== manifestStyle || styleManifest.version !== specVersion) {
+      throw new Error("manifest identity mismatch");
+    }
+    return { objective, specVersion, imageModel, videoModel, styleManifest };
+  } catch {
+    throw new ContentRunProjectionError(
+      "ContentRun snapshot does not contain an approved frozen style manifest.",
+    );
+  }
 }
 
 function parseQaStatus(value: string): QaStatus {
@@ -156,17 +231,22 @@ function parseLatestQa(asset: ProjectableAsset): ManagedAssetAttempt["latestQa"]
   return undefined;
 }
 
+function persistedSceneLabel(slot: ManifestAssetSlot): string {
+  return slot.id in SLOT_DEFINITIONS
+    ? SLOT_DEFINITIONS[slot.id as ContentSlot].persistedSceneLabel
+    : slot.id;
+}
+
 function assetsForSlot(
   runId: string,
-  slot: ContentSlot,
+  slot: ManifestAssetSlot,
   input: ProjectContentRunInput,
 ): ProjectableAsset[] {
-  const definition = SLOT_DEFINITIONS[slot];
-  const source = definition.mediaType === "image" ? input.images : input.videos;
+  const source = slot.mediaType === "image" ? input.images : input.videos;
   return source
     .filter(
       (asset) =>
-        asset.contentRunId === runId && asset.sceneLabel === definition.persistedSceneLabel,
+        asset.contentRunId === runId && asset.sceneLabel === persistedSceneLabel(slot),
     )
     .sort((left, right) =>
       left.attemptNumber === right.attemptNumber
@@ -175,16 +255,14 @@ function assetsForSlot(
     );
 }
 
-function buildSlot<TSlot extends ContentSlot>(
+function buildSlot(
   runId: string,
-  slot: TSlot,
+  definition: ManifestAssetSlot,
   input: ProjectContentRunInput,
-): ManagedSlotRecord<TSlot> {
-  const assets = assetsForSlot(runId, slot, input);
+): ManagedSlotRecord | ManifestManagedSlotRecord {
+  const assets = assetsForSlot(runId, definition, input);
   const current = assets.at(-1);
-  return {
-    slot,
-    assetType: SLOT_DEFINITIONS[slot].assetType,
+  const projected = {
     ...(current ? { selectedAssetId: current.id } : {}),
     attempts: assets.map((asset) => {
       const latestQa = parseLatestQa(asset);
@@ -198,16 +276,26 @@ function buildSlot<TSlot extends ContentSlot>(
       };
     }),
   };
+  if (definition.id in SLOT_DEFINITIONS) {
+    const slot = definition.id as ContentSlot;
+    return { slot, assetType: SLOT_DEFINITIONS[slot].assetType, ...projected } as ManagedSlotRecord;
+  }
+  const slot = definition.id as ManagedManifestSlot;
+  return { slot, assetType: slot, ...projected };
 }
 
-function slotCurrentAttempt(slot: ManagedSlotRecord): ManagedAssetAttempt | undefined {
+function slotCurrentAttempt(
+  slot: ManagedSlotRecord | ManifestManagedSlotRecord,
+): ManagedAssetAttempt | undefined {
   return slot.attempts.find((attempt) => attempt.selected);
 }
 
-function slotFromSceneLabel(sceneLabel: string): ContentSlot | undefined {
-  return CONTENT_SLOTS.find(
-    (slot) => SLOT_DEFINITIONS[slot].persistedSceneLabel === sceneLabel,
-  );
+function slotFromSceneLabel(
+  sceneLabel: string,
+  manifestSlots: ManifestAssetSlot[],
+): ContentSlot | undefined {
+  return manifestSlots.find((slot) => persistedSceneLabel(slot) === sceneLabel)
+    ?.id as ContentSlot | undefined;
 }
 
 function normalizeTerminalReason(errorJson: string | null | undefined): string {
@@ -235,14 +323,50 @@ function normalizeTerminalReason(errorJson: string | null | undefined): string {
   return JSON.stringify({ code: "OPERATION_FAILED" });
 }
 
+function finalReadyFactorsSatisfied(
+  allApproved: boolean,
+  finalVideo: ProjectableFinalVideo | null | undefined,
+): boolean {
+  return Boolean(
+    allApproved &&
+      finalVideo &&
+      finalVideo.contentRunId &&
+      finalVideo.audioStorageBucket &&
+      finalVideo.audioStorageKey &&
+      finalVideo.audioContentType &&
+      finalVideo.audioBytes &&
+      finalVideo.audioSha256 &&
+      finalVideo.audioDurationSeconds &&
+      finalVideo.assemblyManifestJson &&
+      finalVideo.finalStorageBucket &&
+      finalVideo.finalStorageKey &&
+      finalVideo.finalContentType === "video/mp4" &&
+      finalVideo.finalBytes &&
+      finalVideo.finalSha256 &&
+      finalVideo.finalDurationSeconds &&
+      finalVideo.finalWidth &&
+      finalVideo.finalHeight &&
+      finalVideo.finalVideoCodec &&
+      finalVideo.finalAudioCodec &&
+      finalVideo.mediaValidationPassed === true &&
+      finalVideo.mediaValidatedAt &&
+      finalVideo.finalQaStatus === "APPROVED" &&
+      finalVideo.finalQaScore !== null &&
+      finalVideo.finalQaVerdict &&
+      finalVideo.finalQaEvaluatedAt,
+  );
+}
+
 function deriveProjectionStateAndAction(input: {
   persistedStatus: ContentRunState;
-  slots: ContentRunProjection["slots"];
+  slots: ManifestAwareContentRunProjection["slots"];
   operations: ProjectableOperation[];
+  finalVideo?: ProjectableFinalVideo | null;
+  manifestSlots: ManifestAssetSlot[];
 }): {
   status: ContentRunState;
   action: RequiredNextAction;
-  activeOperation?: ActiveContentOperation;
+  activeOperation?: ManifestAwareActiveContentOperation;
   terminalReason?: string;
 } {
   const currentAttempts = input.slots.map(slotCurrentAttempt);
@@ -265,16 +389,21 @@ function deriveProjectionStateAndAction(input: {
     };
   }
   if (input.persistedStatus === "ready") {
-    if (allApproved) {
+    if (finalReadyFactorsSatisfied(allApproved, input.finalVideo)) {
       return { status: "ready", action: { type: "COMPLETE" } };
     }
-    const reason = JSON.stringify({ code: "READY_WITHOUT_FOUR_APPROVED_SLOTS" });
+    const reason = JSON.stringify({ code: "READY_WITHOUT_FINAL_OUTPUT_INVARIANTS" });
     return { status: "failed", action: { type: "FAILED", reason }, terminalReason: reason };
   }
 
   const invalidOperation = input.operations.find(
     (operation) =>
-      !["image_generation", "video_generation"].includes(operation.kind) ||
+      ![
+        "image_generation",
+        "video_generation",
+        "voiceover_generation",
+        "final_assembly",
+      ].includes(operation.kind) ||
       !["requested", "running", "succeeded", "failed"].includes(operation.status),
   );
   if (invalidOperation) {
@@ -302,7 +431,16 @@ function deriveProjectionStateAndAction(input: {
     .reverse()
     .find((operation) => ACTIVE_OPERATION_STATUSES.has(operation.status));
   if (activeOperation) {
-    const slot = slotFromSceneLabel(activeOperation.sceneLabel);
+    if (
+      activeOperation.kind === "voiceover_generation" ||
+      activeOperation.kind === "final_assembly"
+    ) {
+      return {
+        status: "generating",
+        action: { type: "WAIT_FOR_OPERATION", operationId: activeOperation.id },
+      };
+    }
+    const slot = slotFromSceneLabel(activeOperation.sceneLabel, input.manifestSlots);
     if (!slot) {
       const reason = JSON.stringify({
         code: "INVALID_OPERATION_SLOT",
@@ -310,7 +448,7 @@ function deriveProjectionStateAndAction(input: {
       });
       return { status: "failed", action: { type: "FAILED", reason }, terminalReason: reason };
     }
-    const projectedOperation: ActiveContentOperation = {
+    const projectedOperation: ManifestAwareActiveContentOperation = {
       id: activeOperation.id,
       kind: activeOperation.kind as OperationKind,
       status: activeOperation.status as Extract<OperationStatus, "requested" | "running">,
@@ -362,30 +500,79 @@ function deriveProjectionStateAndAction(input: {
   }
 
   if (allApproved) {
-    return { status: "ready", action: { type: "COMPLETE" } };
+    const finalVideo = input.finalVideo;
+    if (!finalVideo) {
+      return { status: "generating", action: { type: "GENERATE_VOICEOVER" } };
+    }
+    if (finalVideo.status === "FAILED") {
+      const reason = JSON.stringify({ code: finalVideo.failureCode ?? "FINAL_OUTPUT_FAILED" });
+      return { status: "failed", action: { type: "FAILED", reason }, terminalReason: reason };
+    }
+    if (finalVideo.status === "HUMAN_REVIEW" || finalVideo.finalQaStatus === "HUMAN_REVIEW") {
+      return {
+        status: "human_review",
+        action: { type: "HUMAN_REVIEW", reason: "Final video requires human review." },
+      };
+    }
+    if (finalReadyFactorsSatisfied(true, finalVideo) && finalVideo.status === "APPROVED") {
+      return { status: "ready", action: { type: "COMPLETE" } };
+    }
+    if (finalVideo.status === "PENDING") {
+      return { status: "generating", action: { type: "GENERATE_VOICEOVER" } };
+    }
+    if (["VOICEOVER_READY", "ASSEMBLING", "ASSEMBLED"].includes(finalVideo.status)) {
+      return {
+        status: "generating",
+        action: { type: "ASSEMBLE_FINAL", finalVideoId: finalVideo.id },
+      };
+    }
+    if (
+      ["MEDIA_VALIDATED", "QA_RUNNING"].includes(finalVideo.status) &&
+      finalVideo.mediaValidationPassed === true &&
+      finalVideo.finalStorageKey
+    ) {
+      return {
+        status: "qa_running",
+        action: { type: "RUN_FINAL_QA", finalVideoId: finalVideo.id },
+      };
+    }
+    const reason = JSON.stringify({ code: "INVALID_FINAL_OUTPUT_LIFECYCLE" });
+    return { status: "failed", action: { type: "FAILED", reason }, terminalReason: reason };
   }
 
   for (let index = 0; index < input.slots.length; index += 1) {
     const slot = input.slots[index];
     const current = currentAttempts[index];
     if (!current) {
-      const definition = SLOT_DEFINITIONS[slot.slot];
+      const definition = input.manifestSlots[index];
       if (definition.mediaType === "image") {
         return {
           status: "generating",
-          action: { type: "GENERATE_IMAGE", slot: slot.slot as "scene_1_store_image" | "scene_2_home_image" },
+          action: {
+            type: "GENERATE_IMAGE",
+            slot: slot.slot as "scene_1_store_image" | "scene_2_home_image" | ManagedManifestSlot,
+          },
         };
       }
-      const sourceIndex = CONTENT_SLOTS.indexOf(definition.sourceSlot!);
-      const source = currentAttempts[sourceIndex];
-      if (source?.qaStatus === "APPROVED") {
+      const sourceIndex = input.manifestSlots.findIndex(
+        (candidate) => candidate.id === definition.sourceDependency,
+      );
+      const source = sourceIndex >= 0 ? currentAttempts[sourceIndex] : undefined;
+      if (definition.sourceDependency === null || source?.qaStatus === "APPROVED") {
         return {
           status: "generating",
-          action: {
-            type: "GENERATE_VIDEO",
-            slot: slot.slot as "scene_1_store_video" | "scene_2_home_video",
-            sourceAssetId: source.assetId,
-          },
+          action:
+            definition.id in SLOT_DEFINITIONS
+              ? {
+                  type: "GENERATE_VIDEO",
+                  slot: slot.slot as "scene_1_store_video" | "scene_2_home_video",
+                  sourceAssetId: source!.assetId,
+                }
+              : {
+                  type: "GENERATE_VIDEO",
+                  slot: slot.slot as ManagedManifestSlot,
+                  ...(source ? { sourceAssetId: source.assetId } : {}),
+                },
         };
       }
     }
@@ -395,18 +582,31 @@ function deriveProjectionStateAndAction(input: {
   return { status: "failed", action: { type: "FAILED", reason }, terminalReason: reason };
 }
 
-export function projectContentRun(input: ProjectContentRunInput): ContentRunProjection {
-  const snapshot = parseSnapshot(input.run.promptSnapshotJson);
+type ProjectStyle2ContentRunInput = ProjectContentRunInput & {
+  run: ProjectContentRunInput["run"] & { style: "style2" };
+};
+type ProjectStyle1ContentRunInput = ProjectContentRunInput & {
+  run: ProjectContentRunInput["run"] & { style: "style1" };
+};
+
+export function projectContentRun(input: ProjectStyle1ContentRunInput): ContentRunProjection;
+export function projectContentRun(
+  input: ProjectStyle2ContentRunInput,
+): ManifestAwareContentRunProjection;
+export function projectContentRun(
+  input: ProjectContentRunInput,
+): ContentRunProjection;
+export function projectContentRun(
+  input: ProjectContentRunInput,
+): ManifestAwareContentRunProjection {
+  const snapshot = parseSnapshot(input.run.promptSnapshotJson, input.run.style);
   if (!CONTENT_RUN_STATE_SET.has(input.run.status)) {
     throw new ContentRunProjectionError(`Unknown ContentRun status: ${input.run.status}.`);
   }
 
-  const slots: ContentRunProjection["slots"] = [
-    buildSlot(input.run.id, "scene_1_store_image", input),
-    buildSlot(input.run.id, "scene_1_store_video", input),
-    buildSlot(input.run.id, "scene_2_home_image", input),
-    buildSlot(input.run.id, "scene_2_home_video", input),
-  ];
+  const slots = snapshot.styleManifest.slots.map((slot) =>
+    buildSlot(input.run.id, slot, input),
+  );
   const operations = input.operations.filter(
     (operation) => operation.contentRunId === input.run.id,
   );
@@ -414,6 +614,9 @@ export function projectContentRun(input: ProjectContentRunInput): ContentRunProj
     persistedStatus: input.run.status as ContentRunState,
     slots,
     operations,
+    finalVideo:
+      input.finalVideo?.contentRunId === input.run.id ? input.finalVideo : null,
+    manifestSlots: snapshot.styleManifest.slots,
   });
 
   return {

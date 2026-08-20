@@ -32,17 +32,26 @@ export const QaStatusSchema = z.enum(QA_STATUSES);
 export const QaDecisionSchema = z.enum(QA_DECISIONS);
 
 export const RequiredNextActionSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("GENERATE_IMAGE"), slot: ImageSlotSchema }).strict(),
+  z.object({ type: z.literal("GENERATE_IMAGE"), slot: IdSchema }).strict(),
   z
-    .object({ type: z.literal("RUN_QA"), slot: ContentSlotSchema, assetId: IdSchema })
+    .object({ type: z.literal("RUN_QA"), slot: IdSchema, assetId: IdSchema })
     .strict(),
   z
     .object({
       type: z.literal("GENERATE_VIDEO"),
-      slot: VideoSlotSchema,
-      sourceAssetId: IdSchema,
+      slot: IdSchema,
+      sourceAssetId: IdSchema.optional(),
     })
-    .strict(),
+    .strict()
+    .superRefine((action, context) => {
+      if (VIDEO_SLOTS.includes(action.slot as (typeof VIDEO_SLOTS)[number]) && !action.sourceAssetId) {
+        context.addIssue({
+          code: "custom",
+          path: ["sourceAssetId"],
+          message: "Style 1 video generation requires an approved source image",
+        });
+      }
+    }),
   z.object({ type: z.literal("GENERATE_VOICEOVER") }).strict(),
   z.object({ type: z.literal("ASSEMBLE_FINAL"), finalVideoId: IdSchema }).strict(),
   z.object({ type: z.literal("RUN_FINAL_QA"), finalVideoId: IdSchema }).strict(),
@@ -297,47 +306,21 @@ const AssetAttemptSchema = z
   })
   .strict();
 
-const createSlotRecordSchema = <
-  TSlot extends (typeof CONTENT_SLOTS)[number],
-  TAssetType extends (typeof ASSET_TYPES)[number],
->(
-  slot: TSlot,
-  assetType: TAssetType,
-) =>
-  z
-    .object({
-      slot: z.literal(slot),
-      assetType: z.literal(assetType),
-      selectedAssetId: IdSchema.optional(),
-      attempts: z.array(AssetAttemptSchema),
-    })
-    .strict();
-
-const CanonicalSlotRecordsSchema = z.tuple([
-  createSlotRecordSchema(
-    "scene_1_store_image",
-    SLOT_DEFINITIONS.scene_1_store_image.assetType,
-  ),
-  createSlotRecordSchema(
-    "scene_1_store_video",
-    SLOT_DEFINITIONS.scene_1_store_video.assetType,
-  ),
-  createSlotRecordSchema(
-    "scene_2_home_image",
-    SLOT_DEFINITIONS.scene_2_home_image.assetType,
-  ),
-  createSlotRecordSchema(
-    "scene_2_home_video",
-    SLOT_DEFINITIONS.scene_2_home_video.assetType,
-  ),
-]);
+const ProjectedSlotRecordSchema = z
+  .object({
+    slot: IdSchema,
+    assetType: IdSchema,
+    selectedAssetId: IdSchema.optional(),
+    attempts: z.array(AssetAttemptSchema),
+  })
+  .strict();
 
 const ActiveOperationSchema = z
   .object({
     id: IdSchema,
     kind: OperationKindSchema,
     status: z.enum(["requested", "running"]),
-    slot: ContentSlotSchema,
+    slot: IdSchema,
     providerJobId: IdSchema.optional(),
   })
   .strict();
@@ -352,12 +335,57 @@ export const ContentRunProjectionSchema = z
     modelSnapshot: z
       .object({ imageModel: z.string().min(1), videoModel: z.string().min(1) })
       .strict(),
-    slots: CanonicalSlotRecordsSchema,
+    slots: z.array(ProjectedSlotRecordSchema).min(1).max(20),
     activeOperation: ActiveOperationSchema.optional(),
     requiredNextAction: RequiredNextActionSchema,
     terminalReason: z.string().trim().min(1).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((projection, context) => {
+    const slotIds = projection.slots.map((slot) => slot.slot);
+    if (new Set(slotIds).size !== slotIds.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["slots"],
+        message: "projected slots must be unique",
+      });
+    }
+    if (projection.specVersion === "managed-style1-v1") {
+      const valid =
+        projection.slots.length === CONTENT_SLOTS.length &&
+        CONTENT_SLOTS.every((slotId, index) => {
+          const slot = projection.slots[index];
+          return slot?.slot === slotId && slot.assetType === SLOT_DEFINITIONS[slotId].assetType;
+        });
+      if (!valid) {
+        context.addIssue({
+          code: "custom",
+          path: ["slots"],
+          message: "Style 1 projection must preserve its canonical slot contract",
+        });
+      }
+    }
+    if (projection.specVersion === "managed-style2-v1") {
+      const expectedIds =
+        projection.slots.length === 6
+          ? ["N1", "N2", "N3", "N4", "N5", "N6"]
+          : ["N1", "N2", "N3", "N4", "N5", "N6", "N7"];
+      const valid =
+        projection.slots.length === expectedIds.length &&
+        expectedIds.every(
+          (slotId, index) =>
+            projection.slots[index]?.slot === slotId &&
+            projection.slots[index]?.assetType === slotId,
+        );
+      if (!valid) {
+        context.addIssue({
+          code: "custom",
+          path: ["slots"],
+          message: "Style 2 projection must preserve its frozen manifest topology",
+        });
+      }
+    }
+  });
 
 const OperationCommandResultSchema = z
   .object({
