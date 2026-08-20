@@ -223,6 +223,24 @@ describe("createStyle1Run", () => {
     expect(JSON.parse(run.promptSnapshotJson!).modelSnapshot.videoModel).toBe(videoModel);
   });
 
+  it("freezes an allowed explicit override without consulting an invalid workspace video default", async () => {
+    database.state.settings = {
+      ...database.state.settings,
+      flowVideoModel: "legacy-invalid-video-model",
+    };
+
+    const run = await createStyle1Run({
+      workspaceId: "workspace-1",
+      productId: "product-1",
+      idempotencyKey: "objective-override-invalid-workspace-default",
+      videoModel: "veo-3.1-fast",
+    });
+
+    expect(JSON.parse(run.promptSnapshotJson!).modelSnapshot.videoModel).toBe(
+      "veo-3.1-fast",
+    );
+  });
+
   it.each(["omni-flash", "custom-model", "", " veo-3.1-lite "])(
     "rejects invalid explicit video model override %j before creating a run",
     async (videoModel) => {

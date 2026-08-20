@@ -136,7 +136,10 @@ export async function createStyle1Run(input: CreateStyle1RunInput): Promise<RunR
           "Workspace requires a connected Flow account.",
         );
       }
-      if (!flow.imageModelAllowed || !flow.videoModelAllowed) {
+      if (
+        !flow.imageModelAllowed ||
+        (input.videoModel === undefined && !flow.videoModelAllowed)
+      ) {
         const field = !flow.imageModelAllowed ? "flowImageModel" : "flowVideoModel";
         throw new ContentRunCreationError(
           "INVALID_FLOW_MODEL",
