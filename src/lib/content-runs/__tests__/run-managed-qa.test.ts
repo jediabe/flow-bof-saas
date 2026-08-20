@@ -448,6 +448,70 @@ describe("runManagedQa", () => {
     expect(managedStorage.createSignedReadUrl).not.toHaveBeenCalled();
   });
 
+  it("rejects an opposite-kind command when image and video IDs collide", async () => {
+    const run = createRunFixture();
+    run.videos = [
+      {
+        id: "image-1",
+        contentRunId: "run-1",
+        sceneLabel: "scene_1_store",
+        attemptNumber: 1,
+        qaStatus: "NOT_QA_CHECKED",
+        qaScore: null,
+        qaVerdictJson: null,
+      },
+    ];
+    const prisma = createPrisma(run);
+
+    await expect(
+      runManagedQa(
+        actor,
+        { contentRunId: "run-1", assetId: "image-1", assetKind: "video" },
+        { prisma: prisma as never },
+      ),
+    ).rejects.toMatchObject({ code: "MANAGED_ASSET_NOT_READY" });
+
+    expect(runQaForAsset).not.toHaveBeenCalled();
+    expect(prisma.contentRun.updateMany).not.toHaveBeenCalled();
+    expect(run.status).toBe("qa_running");
+    expect(run.images[0].qaStatus).toBe("NOT_QA_CHECKED");
+    expect(run.videos[0].qaStatus).toBe("NOT_QA_CHECKED");
+  });
+
+  it("rejects opposite-kind reconciliation when approved image and video IDs collide", async () => {
+    const run = createRunFixture();
+    run.images[0].qaStatus = "APPROVED";
+    run.images[0].qaScore = 94;
+    run.images[0].qaVerdictJson = JSON.stringify({
+      decision: "APPROVE",
+      overallScore: 94,
+    });
+    run.videos = [
+      {
+        id: "image-1",
+        contentRunId: "run-1",
+        sceneLabel: "unrelated_collision_asset",
+        attemptNumber: 1,
+        qaStatus: "NOT_QA_CHECKED",
+        qaScore: null,
+        qaVerdictJson: null,
+      },
+    ];
+    const prisma = createPrisma(run);
+
+    await expect(
+      runManagedQa(
+        actor,
+        { contentRunId: "run-1", assetId: "image-1", assetKind: "video" },
+        { prisma: prisma as never },
+      ),
+    ).rejects.toMatchObject({ code: "MANAGED_ASSET_NOT_READY" });
+
+    expect(runQaForAsset).not.toHaveBeenCalled();
+    expect(prisma.contentRun.updateMany).not.toHaveBeenCalled();
+    expect(run.status).toBe("qa_running");
+  });
+
   it("advances an approved first image to its dependent video action", async () => {
     const run = createRunFixture();
     const prisma = createPrisma(run);

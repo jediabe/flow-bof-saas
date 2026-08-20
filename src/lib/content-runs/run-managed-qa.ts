@@ -1,7 +1,7 @@
 import type { PrismaClient } from "@prisma/client";
 
 import { db } from "@/lib/db";
-import { projectContentRun } from "./project-run";
+import { getFrozenManifestSlotMediaType, projectContentRun } from "./project-run";
 import type {
   ContentRunState,
   ManifestAwareContentRunProjection,
@@ -236,6 +236,10 @@ function assertQaAction(
   }
   assertManagedProjection(run, projection);
   const action = projection.requiredNextAction;
+  const expectedAssetKind =
+    action.type === "RUN_QA"
+      ? getFrozenManifestSlotMediaType(run.promptSnapshotJson, run.style, action.slot)
+      : null;
   const expectedAsset =
     command.assetKind === "image"
       ? run.images.find((asset) => asset.id === command.assetId)
@@ -243,6 +247,7 @@ function assertQaAction(
   if (
     action.type !== "RUN_QA" ||
     action.assetId !== command.assetId ||
+    expectedAssetKind !== command.assetKind ||
     !expectedAsset
   ) {
     throw new ManagedQaError(
@@ -268,7 +273,12 @@ function reconciliationDecision(
   const slotIndex = projection.slots.findIndex(
     (slot) =>
       slot.selectedAssetId === command.assetId &&
-      expectedAssetIds.has(command.assetId),
+      expectedAssetIds.has(command.assetId) &&
+      getFrozenManifestSlotMediaType(
+        run.promptSnapshotJson,
+        run.style,
+        slot.slot,
+      ) === command.assetKind,
   );
   if (slotIndex < 0) return null;
 
