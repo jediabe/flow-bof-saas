@@ -111,7 +111,11 @@ export function createProviderLockRepository(
             where: { workspaceId: input.workspaceId },
             include: {
               operation: {
-                select: { contentRunId: true, status: true },
+                select: {
+                  contentRunId: true,
+                  status: true,
+                  providerJobId: true,
+                },
               },
             },
           });
@@ -129,6 +133,33 @@ export function createProviderLockRepository(
 
           if (active.expiresAt.getTime() >= now.getTime()) {
             throw busyError(active);
+          }
+
+          // Expiry cannot make an accepted upstream job safe to replace: the
+          // provider may still be running it. Only that operation may renew the
+          // lease; every other operation remains fenced as busy.
+          const hasAcceptedProviderJob =
+            active.operation.status === "running" &&
+            Boolean(active.operation.providerJobId);
+          if (hasAcceptedProviderJob) {
+            if (active.operationId !== input.operationId) {
+              throw busyError(active);
+            }
+
+            const renewed = await tx.workspaceProviderLock.updateMany({
+              where: {
+                workspaceId: input.workspaceId,
+                operationId: input.operationId,
+                expiresAt: { lt: now },
+              },
+              data: { acquiredAt: now, expiresAt },
+            });
+            if (renewed.count !== 1) {
+              throw busyError(active);
+            }
+            return tx.workspaceProviderLock.findUniqueOrThrow({
+              where: { workspaceId: input.workspaceId },
+            });
           }
 
           const removed = await tx.workspaceProviderLock.deleteMany({

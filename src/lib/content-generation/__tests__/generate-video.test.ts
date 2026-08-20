@@ -236,6 +236,63 @@ describe("generateManagedStyle1Video", () => {
     ).resolves.toMatchObject({ qaStatus: "APPROVED" });
   });
 
+  it("renews an expired accepted-job lock before polling the same provider job", async () => {
+    const adapter = createAdapter();
+    const command = {
+      contentRunId,
+      slot: "scene_1_store_video" as const,
+      idempotencyKey: "expired-accepted-lock",
+    };
+    const dependencies = {
+      prisma,
+      objectStorage: createStorage(),
+      createAdapter: () => adapter,
+      lockTtlMs: 60_000,
+    };
+    const actor = { workspaceId, actorType: "service" as const, actorId: "hermes" };
+
+    const started = await generateManagedStyle1Video(actor, command, dependencies);
+    await prisma.workspaceProviderLock.update({
+      where: { workspaceId },
+      data: {
+        acquiredAt: new Date("2026-08-19T12:00:00.000Z"),
+        expiresAt: new Date("2026-08-19T12:00:01.000Z"),
+      },
+    });
+    const resumedAfter = new Date();
+
+    const resumed = await generateManagedStyle1Video(actor, command, dependencies);
+
+    expect(started.operationStatus).toBe("running");
+    expect(resumed).toMatchObject({
+      operationId: started.operationId,
+      operationStatus: "running",
+      providerJobId: "provider-job-1",
+    });
+    expect(adapter.startVideo).toHaveBeenCalledTimes(1);
+    expect(adapter.pollVideo).toHaveBeenCalledExactlyOnceWith({
+      providerJobId: "provider-job-1",
+    });
+    const renewedLock = await prisma.workspaceProviderLock.findUniqueOrThrow({
+      where: { workspaceId },
+    });
+    expect(renewedLock).toMatchObject({ operationId: started.operationId });
+    expect(renewedLock.acquiredAt.getTime()).toBeGreaterThanOrEqual(
+      resumedAfter.getTime(),
+    );
+    expect(renewedLock.expiresAt.getTime()).toBeGreaterThan(resumedAfter.getTime());
+    await expect(
+      prisma.contentOperation.findUniqueOrThrow({
+        where: { id: started.operationId },
+      }),
+    ).resolves.toMatchObject({
+      status: "running",
+      providerJobId: "provider-job-1",
+      errorJson: null,
+      completedAt: null,
+    });
+  });
+
   it("returns WAIT for a live self-owned pre-identity lock without calling the provider", async () => {
     const operation = await prisma.contentOperation.create({
       data: {
