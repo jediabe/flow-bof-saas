@@ -308,6 +308,34 @@ describe("runQaForAsset — successful image QA", () => {
       }),
     );
   });
+
+  it("resolves a stored relative product reference through the configured asset base", async () => {
+    primeHappyPath({ kind: "image" });
+    mockedDb.flowGeneratedImage.findUnique.mockResolvedValue(
+      imageRow({
+        product: {
+          ...videoRow().product,
+          referenceImageUrl: "/uploads/workspaces/ws-1/product.jpg",
+        },
+      }),
+    );
+    const previousBase = process.env.AGENT_ASSET_BASE_URL;
+    process.env.AGENT_ASSET_BASE_URL = "https://assets.example.test";
+    try {
+      await runQaForAsset({
+        assetId: "image-1",
+        assetKind: "image",
+        triggeredBy: "manual",
+        providerOverride: fakeProvider(goodResult()),
+      });
+      expect(fetchImageAsBase64).toHaveBeenCalledWith(
+        "https://assets.example.test/uploads/workspaces/ws-1/product.jpg",
+      );
+    } finally {
+      if (previousBase === undefined) delete process.env.AGENT_ASSET_BASE_URL;
+      else process.env.AGENT_ASSET_BASE_URL = previousBase;
+    }
+  });
 });
 
 // -----------------------------------------------------------------

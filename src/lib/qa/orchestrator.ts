@@ -48,6 +48,7 @@
 import { mcpGetAssetUrl } from "@/lib/apex-mcp";
 import { MANAGED_CONTENT_STORAGE_PREFIX } from "@/lib/content-runs/constants";
 import { fetchImageAsBase64 } from "@/lib/media/fetch-image";
+import { toAgentAssetUrl } from "@/lib/uploads";
 import { createObjectStorageFromEnv } from "@/lib/storage";
 import {
   LlmCredentialError,
@@ -207,7 +208,7 @@ export async function runQaForAsset(input: RunQaInput): Promise<RunQaOutput> {
       // Fetch the reference; MediaFetchError-wrap on failure so
       // the classification stays clean.
       referenceImagePromise = fetchImageAsBase64(
-        asset.product.referenceImageUrl,
+        toAgentAssetUrl(asset.product.referenceImageUrl),
       ).catch((err) => {
         throw new MediaFetchError(
           `Reference image fetch failed for product ${asset.product.id}: ${(err as Error).message?.slice(0, 200)}`,
