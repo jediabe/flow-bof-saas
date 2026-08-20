@@ -342,4 +342,55 @@ describe("APEX Flow generation adapter", () => {
       acceptedProviderIdentity: false,
     });
   });
+
+  it("does not trust free-form tool error text as pre-acceptance retry proof", async () => {
+    const callTool = vi.fn().mockResolvedValue({
+      isError: true,
+      content: [
+        {
+          type: "text",
+          text: "network timeout before provider acceptance; request not sent to provider",
+        },
+      ],
+    });
+    const adapter = createApexFlowAdapter(boundContext, { callTool });
+
+    await expect(
+      adapter.startVideo({
+        prompt: "Animate product",
+        model: "veo-3.1-lite",
+        sourceImageMediaGenerationId: "media-image-1",
+      }),
+    ).rejects.toMatchObject({
+      classification: "terminal-nontechnical",
+      code: "transport_failure",
+      acceptedProviderIdentity: false,
+    });
+  });
+
+  it("allows retry only for structured pre-acceptance tool proof", async () => {
+    const callTool = vi.fn().mockResolvedValue({
+      isError: true,
+      content: [{ type: "text", text: "network timeout" }],
+      structuredContent: {
+        retrySafety: {
+          kind: "provider_pre_acceptance",
+          safeToRetry: true,
+        },
+      },
+    });
+    const adapter = createApexFlowAdapter(boundContext, { callTool });
+
+    await expect(
+      adapter.startVideo({
+        prompt: "Animate product",
+        model: "veo-3.1-lite",
+        sourceImageMediaGenerationId: "media-image-1",
+      }),
+    ).rejects.toMatchObject({
+      classification: "technical-retryable",
+      code: "transport_failure",
+      acceptedProviderIdentity: false,
+    });
+  });
 });

@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { PrismaClient } from "@prisma/client";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ObjectStorage, PutManagedObjectInput } from "@/lib/storage";
-import type { ApexFlowAdapter } from "../apex-flow-adapter";
+import { createApexFlowAdapter, type ApexFlowAdapter } from "../apex-flow-adapter";
 import { generateManagedStyle1Video } from "../generate-video";
 
 const MP4_BYTES = new Uint8Array([
@@ -581,17 +581,39 @@ describe("generateManagedStyle1Video", () => {
   });
 
   it("uses all safe technical start retries without duplicating an accepted job", async () => {
-    const adapter = createAdapter();
-    const retryable = () =>
-      Object.assign(new Error("network timeout"), {
-        classification: "technical-retryable",
-        acceptedProviderIdentity: false,
-        code: "transport_failure",
+    const callTool = vi
+      .fn()
+      .mockResolvedValueOnce({
+        isError: true,
+        content: [{ type: "text", text: "network timeout" }],
+        structuredContent: {
+          retrySafety: { kind: "provider_pre_acceptance", safeToRetry: true },
+        },
+      })
+      .mockResolvedValueOnce({
+        isError: true,
+        content: [{ type: "text", text: "network timeout" }],
+        structuredContent: {
+          retrySafety: { kind: "provider_pre_acceptance", safeToRetry: true },
+        },
+      })
+      .mockResolvedValueOnce({
+        isError: false,
+        content: [],
+        structuredContent: {
+          operation: "generate_video",
+          mode: "async",
+          status: "created",
+          jobId: "provider-job-after-retries",
+        },
       });
-    vi.mocked(adapter.startVideo)
-      .mockRejectedValueOnce(retryable())
-      .mockRejectedValueOnce(retryable())
-      .mockResolvedValueOnce({ providerJobId: "provider-job-after-retries" });
+    const adapter = createApexFlowAdapter(
+      {
+        actor: { workspaceId, actorType: "service", actorId: "hermes" },
+        flowEmail: "bound@example.test",
+      },
+      { callTool },
+    );
 
     const result = await generateManagedStyle1Video(
       { workspaceId, actorType: "service", actorId: "hermes" },
@@ -607,7 +629,7 @@ describe("generateManagedStyle1Video", () => {
       operationStatus: "running",
       providerJobId: "provider-job-after-retries",
     });
-    expect(adapter.startVideo).toHaveBeenCalledTimes(3);
+    expect(callTool).toHaveBeenCalledTimes(3);
     await expect(
       prisma.contentOperation.findFirstOrThrow({ where: { contentRunId } }),
     ).resolves.toMatchObject({
@@ -617,12 +639,42 @@ describe("generateManagedStyle1Video", () => {
     });
   });
 
+  it("does not retry ambiguous adapter-bound start transport errors", async () => {
+    const callTool = vi.fn().mockResolvedValue({
+      isError: true,
+      content: [{ type: "text", text: "network timeout before provider acceptance" }],
+    });
+    const adapter = createApexFlowAdapter(
+      {
+        actor: { workspaceId, actorType: "service", actorId: "hermes" },
+        flowEmail: "bound@example.test",
+      },
+      { callTool },
+    );
+
+    await expect(
+      generateManagedStyle1Video(
+        { workspaceId, actorType: "service", actorId: "hermes" },
+        {
+          contentRunId,
+          slot: "scene_1_store_video",
+          idempotencyKey: "ambiguous-adapter-error",
+        },
+        { prisma, objectStorage: createStorage(), createAdapter: () => adapter },
+      ),
+    ).rejects.toMatchObject({
+      classification: "terminal-nontechnical",
+      code: "transport_failure",
+    });
+    expect(callTool).toHaveBeenCalledTimes(1);
+  });
+
   it("never starts again when persisting an accepted provider identity fails", async () => {
     const adapter = createAdapter();
     const base = (await import("../operations")).createOperationRepository(prisma);
     const repository = {
       ...base,
-      recordProviderJobId: vi.fn(async () => {
+      recordAcceptedVideoStart: vi.fn(async () => {
         throw Object.assign(new Error("database unavailable after accepted start"), {
           code: "PROVIDER_ID_PERSISTENCE_FAILED",
           acceptedProviderIdentity: true,
@@ -649,6 +701,13 @@ describe("generateManagedStyle1Video", () => {
       code: "OPERATION_TERMINAL",
     });
     expect(adapter.startVideo).toHaveBeenCalledTimes(1);
+    await expect(
+      prisma.contentOperation.findFirstOrThrow({ where: { contentRunId } }),
+    ).resolves.toMatchObject({
+      status: "failed",
+      providerJobId: null,
+      resultJson: null,
+    });
     await expect(prisma.workspaceProviderLock.count()).resolves.toBe(0);
   });
 });

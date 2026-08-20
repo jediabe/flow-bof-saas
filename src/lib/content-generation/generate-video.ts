@@ -800,22 +800,11 @@ export async function generateManagedStyle1Video(
             durationSeconds: frozen.durationSeconds,
           }),
       });
-      operation = await operations.recordProviderJobId(scope, started.providerJobId);
-      await prisma.contentOperation.updateMany({
-        where: {
-          id: operation.id,
-          workspaceId,
-          status: "running",
-          providerJobId: started.providerJobId,
-        },
-        data: {
-          resultJson: JSON.stringify({
-            sourceImageId: source.id,
-            sourceImageMediaGenerationId: source.mediaGenerationId,
-          }),
-        },
+      operation = await operations.recordAcceptedVideoStart(scope, {
+        providerJobId: started.providerJobId,
+        sourceImageId: source.id,
+        sourceImageMediaGenerationId: source.mediaGenerationId,
       });
-      operation = (await operations.findById(scope)) ?? operation;
       return waitResult(operation, command);
     } catch (error) {
       const current = await operations.findById(scope);

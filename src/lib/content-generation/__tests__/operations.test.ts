@@ -218,6 +218,56 @@ describe("content operation repository", () => {
     ).resolves.toMatchObject({ providerJobId: "job-original" });
   });
 
+  it("persists accepted video provider identity and source lineage atomically", async () => {
+    const repository = createOperationRepository(prisma);
+    const operation = await repository.createOrResume({
+      workspaceId,
+      contentRunId,
+      kind: "video_generation",
+      sceneLabel: "scene_1_store",
+      idempotencyKey: "video-atomic-lineage",
+    });
+    const scope = { workspaceId, operationId: operation.id };
+    await repository.markRunning(scope);
+
+    await expect(
+      repository.recordAcceptedVideoStart(scope, {
+        providerJobId: "job-original",
+        sourceImageId: "source-image-1",
+        sourceImageMediaGenerationId: "flow-source-image-1",
+      }),
+    ).resolves.toMatchObject({ providerJobId: "job-original" });
+
+    const persisted = await prisma.contentOperation.findUniqueOrThrow({
+      where: { id: operation.id },
+    });
+    expect(persisted.providerJobId).toBe("job-original");
+    expect(JSON.parse(persisted.resultJson ?? "null")).toEqual({
+      sourceImageId: "source-image-1",
+      sourceImageMediaGenerationId: "flow-source-image-1",
+    });
+
+    await prisma.contentOperation.update({
+      where: { id: operation.id },
+      data: { providerJobId: null, resultJson: null, status: "failed" },
+    });
+
+    await expect(
+      repository.recordAcceptedVideoStart(scope, {
+        providerJobId: "job-late",
+        sourceImageId: "source-image-1",
+        sourceImageMediaGenerationId: "flow-source-image-1",
+      }),
+    ).rejects.toMatchObject({ code: "OPERATION_TERMINAL" });
+    await expect(
+      prisma.contentOperation.findUniqueOrThrow({ where: { id: operation.id } }),
+    ).resolves.toMatchObject({
+      status: "failed",
+      providerJobId: null,
+      resultJson: null,
+    });
+  });
+
   it("serializes concurrent different-key reservations for one slot", async () => {
     const repository = createOperationRepository(prisma);
     const results = await Promise.allSettled([

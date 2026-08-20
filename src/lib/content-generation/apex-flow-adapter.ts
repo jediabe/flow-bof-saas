@@ -131,6 +131,17 @@ function looksLikeTransportFailure(error: unknown): boolean {
   );
 }
 
+function hasStructuredPreAcceptanceRetryProof(
+  structuredContent: unknown,
+): boolean {
+  const structured = asRecord(structuredContent);
+  const retrySafety = asRecord(structured?.retrySafety);
+  return (
+    retrySafety?.kind === "provider_pre_acceptance" &&
+    retrySafety.safeToRetry === true
+  );
+}
+
 function classifyThrownError(
   error: unknown,
   acceptedProviderIdentity: boolean,
@@ -160,8 +171,8 @@ function classifyToolError(
   const technical = /timed?\s*out|network|fetch failed|connection (?:reset|closed)/i.test(
     message,
   );
-  const provenPreAcceptance = /pre[- ]acceptance|before provider acceptance|not sent to provider/i.test(
-    message,
+  const provenPreAcceptance = hasStructuredPreAcceptanceRetryProof(
+    result.structuredContent,
   );
   return new ApexFlowAdapterError(
     message,

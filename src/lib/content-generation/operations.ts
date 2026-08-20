@@ -23,6 +23,14 @@ export interface OperationRepository {
     scope: OperationScope,
     providerJobId: string,
   ): Promise<ContentOperationRecord>;
+  recordAcceptedVideoStart(
+    scope: OperationScope,
+    input: {
+      providerJobId: string;
+      sourceImageId: string;
+      sourceImageMediaGenerationId: string;
+    },
+  ): Promise<ContentOperationRecord>;
   succeed(scope: OperationScope, result: unknown): Promise<ContentOperationRecord>;
   fail(scope: OperationScope, error: unknown): Promise<ContentOperationRecord>;
 }
@@ -337,6 +345,65 @@ export function createOperationRepository(
         "PROVIDER_JOB_ALREADY_ACCEPTED",
         "A concurrent call already persisted a provider job identity",
         { providerJobId: persisted.providerJobId, operationId: scope.operationId },
+      );
+    },
+
+    async recordAcceptedVideoStart(scope, input): Promise<ContentOperationRecord> {
+      const providerJobId = input.providerJobId.trim();
+      const sourceImageId = input.sourceImageId.trim();
+      const sourceImageMediaGenerationId = input.sourceImageMediaGenerationId.trim();
+      if (!providerJobId) throw new TypeError("providerJobId must not be empty");
+      if (!sourceImageId) throw new TypeError("sourceImageId must not be empty");
+      if (!sourceImageMediaGenerationId) {
+        throw new TypeError("sourceImageMediaGenerationId must not be empty");
+      }
+      const resultJson = stringify({
+        sourceImageId,
+        sourceImageMediaGenerationId,
+      });
+
+      const current = await requireScoped(scope);
+      assertMutable(current);
+      if (current.providerJobId === providerJobId && current.resultJson === resultJson) {
+        return current;
+      }
+      if (current.providerJobId) {
+        throw new ContentGenerationError(
+          "PROVIDER_JOB_ALREADY_ACCEPTED",
+          "The operation already has an accepted provider job identity",
+          { providerJobId: current.providerJobId, operationId: scope.operationId },
+        );
+      }
+
+      const changed = await prisma.contentOperation.updateMany({
+        where: {
+          id: scope.operationId,
+          workspaceId: scope.workspaceId,
+          status: "running",
+          providerJobId: null,
+        },
+        data: {
+          providerJobId,
+          resultJson,
+        },
+      });
+      const persisted = await requireScoped(scope);
+      assertMutable(persisted);
+      if (changed.count === 1) return persisted;
+      if (persisted.providerJobId === providerJobId && persisted.resultJson === resultJson) {
+        return persisted;
+      }
+      if (persisted.providerJobId) {
+        throw new ContentGenerationError(
+          "PROVIDER_JOB_ALREADY_ACCEPTED",
+          "A concurrent call already persisted a provider job identity",
+          { providerJobId: persisted.providerJobId, operationId: scope.operationId },
+        );
+      }
+      throw new ContentGenerationError(
+        "PROVIDER_VIDEO_START_PERSISTENCE_FAILED",
+        "Accepted provider job identity and source lineage were not persisted atomically",
+        { operationId: scope.operationId },
       );
     },
 
