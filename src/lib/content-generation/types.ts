@@ -106,6 +106,7 @@ export interface RecordAcceptedVideoStartInput {
   model: ManagedVideoModel;
   sourceImageId: string;
   sourceImageMediaGenerationId: string;
+  audioRetryStartToken?: string;
 }
 
 export type TerminalizeProviderAttemptInput =

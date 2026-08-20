@@ -76,6 +76,8 @@ export interface StartedVideoResult {
   providerJobId: string;
 }
 
+export type VideoPollFailureKind = "audio_generation" | "provider";
+
 export type VideoPollResult =
   | { status: "running"; providerJobId: string }
   | {
@@ -84,7 +86,13 @@ export type VideoPollResult =
       mediaGenerationId: string;
       url: string;
     }
-  | { status: "failed"; providerJobId: string; reason: string };
+  | {
+      status: "failed";
+      providerJobId: string;
+      reason: string;
+      failureKind: VideoPollFailureKind;
+      errorCode?: string;
+    };
 
 export interface ApexFlowAdapter {
   uploadAsset(input: UploadAssetInput): Promise<UploadedAssetResult>;
@@ -194,6 +202,34 @@ function malformed(
     "malformed_output",
     acceptedProviderIdentity,
   );
+}
+
+function sanitizeProviderErrorCode(value: unknown): string | null {
+  const code = nonEmptyString(value);
+  return code && /^[a-z0-9_:-]{1,80}$/i.test(code) ? code : null;
+}
+
+const AUDIO_GENERATION_ERROR_CODES = new Set([
+  "audio_generation_failed",
+  "audio_generation_error",
+  "failed_to_generate_audio",
+]);
+
+function classifyVideoPollFailure(
+  structured: Record<string, unknown>,
+  reason: string,
+): { failureKind: VideoPollFailureKind; errorCode?: string } {
+  const errorCode =
+    sanitizeProviderErrorCode(structured.errorCode) ??
+    sanitizeProviderErrorCode(structured.code) ??
+    sanitizeProviderErrorCode(structured.failureCode);
+  if (errorCode && AUDIO_GENERATION_ERROR_CODES.has(errorCode.toLowerCase())) {
+    return { failureKind: "audio_generation", errorCode };
+  }
+  if (/\b(?:audio generation failed|audio generation error|failed to generate audio)\b/i.test(reason)) {
+    return { failureKind: "audio_generation" };
+  }
+  return { failureKind: "provider" };
 }
 
 export function createApexFlowAdapter(
@@ -331,12 +367,17 @@ export function createApexFlowAdapter(
         return { status: "running", providerJobId };
       }
       if (status === "failed") {
+        const reason =
+          nonEmptyString(structured?.error) ??
+          nonEmptyString(structured?.reason) ??
+          "Provider video generation failed";
+        const failure = classifyVideoPollFailure(structured, reason);
         return {
           status: "failed",
           providerJobId,
-          reason:
-            nonEmptyString(structured?.error) ??
-            "Provider video generation failed",
+          reason,
+          failureKind: failure.failureKind,
+          ...(failure.errorCode ? { errorCode: failure.errorCode } : {}),
         };
       }
       if (status === "completed") {
