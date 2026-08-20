@@ -10,6 +10,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import type { ObjectStorage, PutManagedObjectInput } from "@/lib/storage";
 import { createApexFlowAdapter, type ApexFlowAdapter } from "../apex-flow-adapter";
 import { generateManagedStyle1Video } from "../generate-video";
+import { createOperationRepository } from "../operations";
 
 const MP4_BYTES = new Uint8Array([
   0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d,
@@ -106,6 +107,45 @@ function createStorage() {
     delete: vi.fn(),
     createSignedReadUrl: vi.fn(),
   } as unknown as ObjectStorage;
+}
+
+function withAcceptedStartPersistenceRace(racePrisma: PrismaClient): PrismaClient {
+  return new Proxy(racePrisma, {
+    get(target, prop, receiver) {
+      if (prop !== "contentOperation") return Reflect.get(target, prop, receiver);
+      const delegate = target.contentOperation;
+      return new Proxy(delegate, {
+        get(contentOperation, delegateProp, delegateReceiver) {
+          if (delegateProp !== "updateMany") {
+            return Reflect.get(contentOperation, delegateProp, delegateReceiver);
+          }
+          return async (args: Parameters<typeof delegate.updateMany>[0]) => {
+            const data = args.data as
+              | { providerJobId?: unknown; resultJson?: unknown }
+              | undefined;
+            const operationId =
+              typeof args.where?.id === "string" ? args.where.id : null;
+            if (data?.providerJobId !== "provider-job-1" || !operationId) {
+              return delegate.updateMany(args);
+            }
+            if (data.resultJson === undefined) {
+              const result = await delegate.updateMany(args);
+              await target.contentOperation.update({
+                where: { id: operationId },
+                data: { status: "failed" },
+              });
+              return result;
+            }
+            await target.contentOperation.update({
+              where: { id: operationId },
+              data: { status: "failed" },
+            });
+            return delegate.updateMany(args);
+          };
+        },
+      });
+    },
+  }) as PrismaClient;
 }
 
 beforeAll(() => {
@@ -669,18 +709,8 @@ describe("generateManagedStyle1Video", () => {
     expect(callTool).toHaveBeenCalledTimes(1);
   });
 
-  it("never starts again when persisting an accepted provider identity fails", async () => {
+  it("never starts again when accepted-start persistence races after the mutable pre-read", async () => {
     const adapter = createAdapter();
-    const base = (await import("../operations")).createOperationRepository(prisma);
-    const repository = {
-      ...base,
-      recordAcceptedVideoStart: vi.fn(async () => {
-        throw Object.assign(new Error("database unavailable after accepted start"), {
-          code: "PROVIDER_ID_PERSISTENCE_FAILED",
-          acceptedProviderIdentity: true,
-        });
-      }),
-    };
     const command = {
       contentRunId,
       slot: "scene_1_store_video" as const,
@@ -690,13 +720,15 @@ describe("generateManagedStyle1Video", () => {
       prisma,
       objectStorage: createStorage(),
       createAdapter: () => adapter,
-      operationRepository: repository,
+      operationRepository: createOperationRepository(
+        withAcceptedStartPersistenceRace(prisma),
+      ),
     };
     const actor = { workspaceId, actorType: "service" as const, actorId: "hermes" };
 
-    await expect(generateManagedStyle1Video(actor, command, dependencies)).rejects.toThrow(
-      "database unavailable after accepted start",
-    );
+    await expect(generateManagedStyle1Video(actor, command, dependencies)).rejects.toMatchObject({
+      code: "OPERATION_TERMINAL",
+    });
     await expect(generateManagedStyle1Video(actor, command, dependencies)).rejects.toMatchObject({
       code: "OPERATION_TERMINAL",
     });

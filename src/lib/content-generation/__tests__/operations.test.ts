@@ -10,6 +10,45 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { createOperationRepository } from "../operations";
 
+function withAcceptedStartRace(
+  operationId: string,
+  racePrisma: PrismaClient,
+): PrismaClient {
+  return new Proxy(racePrisma, {
+    get(target, prop, receiver) {
+      if (prop !== "contentOperation") return Reflect.get(target, prop, receiver);
+      const delegate = target.contentOperation;
+      return new Proxy(delegate, {
+        get(contentOperation, delegateProp, delegateReceiver) {
+          if (delegateProp !== "updateMany") {
+            return Reflect.get(contentOperation, delegateProp, delegateReceiver);
+          }
+          return async (args: Parameters<typeof delegate.updateMany>[0]) => {
+            const data = args.data as
+              | { providerJobId?: unknown; resultJson?: unknown }
+              | undefined;
+            if (data?.providerJobId === "job-raced" && data.resultJson === undefined) {
+              const result = await delegate.updateMany(args);
+              await target.contentOperation.update({
+                where: { id: operationId },
+                data: { status: "failed" },
+              });
+              return result;
+            }
+            if (data?.providerJobId === "job-raced") {
+              await target.contentOperation.update({
+                where: { id: operationId },
+                data: { status: "failed" },
+              });
+            }
+            return delegate.updateMany(args);
+          };
+        },
+      });
+    },
+  }) as PrismaClient;
+}
+
 const databasePath = resolve(tmpdir(), `operations-${randomUUID()}.db`);
 const databaseUrl = `file:${databasePath.replaceAll("\\", "/")}`;
 const prisma = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
@@ -262,6 +301,39 @@ describe("content operation repository", () => {
     await expect(
       prisma.contentOperation.findUniqueOrThrow({ where: { id: operation.id } }),
     ).resolves.toMatchObject({
+      status: "failed",
+      providerJobId: null,
+      resultJson: null,
+    });
+  });
+
+  it("does not leave accepted provider identity without source lineage when the guarded write races", async () => {
+    const baseRepository = createOperationRepository(prisma);
+    const operation = await baseRepository.createOrResume({
+      workspaceId,
+      contentRunId,
+      kind: "video_generation",
+      sceneLabel: "scene_1_store",
+      idempotencyKey: "video-accepted-start-race",
+    });
+    const scope = { workspaceId, operationId: operation.id };
+    await baseRepository.markRunning(scope);
+    const racingRepository = createOperationRepository(
+      withAcceptedStartRace(operation.id, prisma),
+    );
+
+    await expect(
+      racingRepository.recordAcceptedVideoStart(scope, {
+        providerJobId: "job-raced",
+        sourceImageId: "source-image-1",
+        sourceImageMediaGenerationId: "flow-source-image-1",
+      }),
+    ).rejects.toMatchObject({ code: "OPERATION_TERMINAL" });
+
+    const persisted = await prisma.contentOperation.findUniqueOrThrow({
+      where: { id: operation.id },
+    });
+    expect(persisted).toMatchObject({
       status: "failed",
       providerJobId: null,
       resultJson: null,
