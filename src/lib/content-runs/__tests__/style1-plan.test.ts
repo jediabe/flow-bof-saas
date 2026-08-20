@@ -151,6 +151,64 @@ describe("compileStyle1Plan", () => {
   );
 
   it.each([
+    [
+      "Beauty & Personal Care > Skincare > Facial Sunscreen & Sun Care",
+      "beauty_skincare",
+      "bathroom",
+      "countertop",
+    ],
+    [
+      "Phones & Electronics > Phones and Accessories > Power Banks",
+      "tech",
+      "home office",
+      "desk",
+    ],
+    [
+      "Household Appliances > Home Appliances > Electric Mops",
+      "home_storage",
+      "living room",
+      "side table",
+    ],
+    [
+      "Pet Supplies > Dogs > Grooming",
+      "pets",
+      "living room",
+      "floor",
+    ],
+  ])(
+    "canonicalizes the production taxonomy %s",
+    (category, canonicalCategory, homeSetting, homeSurface) => {
+      const plan = compileStyle1Plan({ ...ukKitchenInput, category });
+      expect(plan.context).toMatchObject({
+        category: canonicalCategory,
+        homeSetting,
+        homeSurface,
+      });
+    },
+  );
+
+  it.each([
+    "Sports & Outdoor > Fitness > Exercise Machines",
+    "Home Improvement > Security & Safety > Doorbells & Intercoms",
+    "Unsupported > Home > Other",
+    "Smartphone Accessories",
+    "Phones & Electronics Accessories",
+    "Pet Supplies-ish > Unsupported",
+    "Household Appliances and Furniture",
+    "> Beauty & Personal Care > Skincare",
+    "Beauty & Personal Care >> Skincare",
+    "Beauty & Personal Care > > Skincare",
+    "Beauty > Skincare",
+    "Home > Storage",
+    "Tools > Outdoor",
+    "Kitchen > Food",
+  ])("fails closed for unsupported hierarchy %s", (category) => {
+    expect(() => compileStyle1Plan({ ...ukKitchenInput, category })).toThrow(
+      Style1PlanValidationError,
+    );
+  });
+
+  it.each([
     ["Beauty/Skincare", "beauty_skincare", "bathroom", "countertop"],
     ["Home / Storage", "home_storage", "living room", "side table"],
     ["Tools/Outdoor", "tools_outdoor", "garage", "workbench"],

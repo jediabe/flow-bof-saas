@@ -116,6 +116,37 @@ const CATEGORY_ALIASES: Record<string, CanonicalStyle1Category> = {
   pets: "pets",
 };
 
+const HIERARCHICAL_CATEGORY_PREFIXES: ReadonlyArray<
+  readonly [prefix: string, category: CanonicalStyle1Category]
+> = [
+  ["beauty_personal_care", "beauty_skincare"],
+  ["phones_electronics", "tech"],
+  ["household_appliances", "home_storage"],
+  ["home_supplies", "home_storage"],
+  ["kitchen_food", "kitchen_food"],
+  ["home_storage", "home_storage"],
+  ["tools_outdoor", "tools_outdoor"],
+  ["pet_supplies", "pets"],
+];
+
+function normalizeCategoryKey(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replaceAll(/[^a-z0-9]+/g, "_")
+    .replaceAll(/^_+|_+$/g, "");
+}
+
+function resolveStyle1Category(
+  categoryKey: string,
+  categoryPath: readonly string[],
+): CanonicalStyle1Category | undefined {
+  if (categoryPath.length === 1) return CATEGORY_ALIASES[categoryKey];
+  return HIERARCHICAL_CATEGORY_PREFIXES.find(
+    ([prefix]) => categoryPath[0] === prefix,
+  )?.[1];
+}
+
 const HOME_PLACEMENTS: Record<
   CanonicalStyle1Category,
   { setting: string; surface: string }
@@ -136,15 +167,14 @@ export function compileStyle1Plan(input: Style1PlanInput): Style1Plan {
     typeof candidate.productReferenceImageId === "string"
       ? candidate.productReferenceImageId.trim()
       : "";
-  const categoryKey =
-    typeof candidate.category === "string"
-      ? candidate.category
-          .trim()
-          .toLowerCase()
-          .replaceAll(/[^a-z0-9]+/g, "_")
-          .replaceAll(/^_+|_+$/g, "")
-      : "";
-  const category = CATEGORY_ALIASES[categoryKey];
+  const rawCategory =
+    typeof candidate.category === "string" ? candidate.category.trim() : "";
+  const categoryKey = normalizeCategoryKey(rawCategory);
+  const categoryPath = rawCategory.split(">").map(normalizeCategoryKey);
+  const malformedCategoryPath = categoryPath.some((segment) => !segment);
+  const category = malformedCategoryPath
+    ? undefined
+    : resolveStyle1Category(categoryKey, categoryPath);
   const placement = category ? HOME_PLACEMENTS[category] : undefined;
   const issues: Style1PlanValidationIssue[] = [];
 
