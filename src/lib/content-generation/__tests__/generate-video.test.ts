@@ -1243,6 +1243,10 @@ describe("generateManagedStyle1Video", () => {
         }),
       },
     });
+    await prisma.workspaceProviderLock.update({
+      where: { workspaceId },
+      data: { expiresAt: new Date(Date.now() + 60_000) },
+    });
 
     await expect(generateManagedStyle1Video(actor, command, dependencies)).rejects.toMatchObject({
       code: "PROVIDER_VIDEO_START_PERSISTENCE_FAILED",
@@ -1252,7 +1256,115 @@ describe("generateManagedStyle1Video", () => {
     const operation = await prisma.contentOperation.findFirstOrThrow({ where: { contentRunId } });
     expect(operation.status).toBe("failed");
     expect(operation.providerJobId).toBeNull();
+    const run = await prisma.contentRun.findUniqueOrThrow({ where: { id: contentRunId } });
+    expect(run.status).toBe("failed");
     await expect(prisma.flowGeneratedVideo.count({ where: { contentRunId } })).resolves.toBe(0);
+    await expect(prisma.workspaceProviderLock.count({ where: { workspaceId } })).resolves.toBe(0);
+  });
+
+  it("does not fail a concurrently accepted newer job when expired audio-retry claim terminalization loses CAS", async () => {
+    const adapter = createAdapter();
+    vi.mocked(adapter.startVideo).mockResolvedValueOnce({ providerJobId: "provider-job-1" });
+    const command = {
+      contentRunId,
+      slot: "scene_1_store_video" as const,
+      idempotencyKey: "audio-retry-expired-claim-cas-loss",
+    };
+    const dependencies = { prisma, objectStorage: createStorage(), createAdapter: () => adapter };
+    const actor = { workspaceId, actorType: "service" as const, actorId: "hermes" };
+
+    const started = await generateManagedStyle1Video(actor, command, dependencies);
+    const repository = createOperationRepository(prisma);
+    await repository.terminalizeProviderAttempt(
+      { workspaceId, operationId: started.operationId },
+      {
+        attemptNumber: 1,
+        providerJobId: "provider-job-1",
+        status: "failed",
+        failureKind: "audio_generation",
+        errorCode: "audio_generation_failed",
+      },
+    );
+    const prepared = await repository.prepareAudioRetry(
+      { workspaceId, operationId: started.operationId },
+      { attemptNumber: 1, providerJobId: "provider-job-1" },
+    );
+    const expiredClaim = JSON.stringify({
+      code: "AUDIO_RETRY_START_IN_PROGRESS",
+      attemptNumber: 2,
+      token: "expired-claim-token",
+      claimedAt: new Date(Date.now() - 120_000).toISOString(),
+      expiresAt: new Date(Date.now() - 60_000).toISOString(),
+    });
+    await prisma.contentOperation.update({
+      where: { id: started.operationId },
+      data: { errorJson: expiredClaim },
+    });
+    await prisma.workspaceProviderLock.update({
+      where: { workspaceId },
+      data: { expiresAt: new Date(Date.now() + 60_000) },
+    });
+    const racingPrisma = new Proxy(prisma, {
+      get(target, prop, receiver) {
+        if (prop !== "contentOperation") return Reflect.get(target, prop, receiver);
+        const delegate = target.contentOperation;
+        return new Proxy(delegate, {
+          get(contentOperation, delegateProp, delegateReceiver) {
+            if (delegateProp !== "updateMany") {
+              return Reflect.get(contentOperation, delegateProp, delegateReceiver);
+            }
+            return async (args: Parameters<typeof delegate.updateMany>[0]) => {
+              const data = args.data as { status?: unknown; errorJson?: unknown } | undefined;
+              if (data?.status === "failed" && data.errorJson && args.where?.errorJson === expiredClaim) {
+                const history = JSON.parse(prepared.providerAttemptsJson);
+                await target.contentOperation.update({
+                  where: { id: started.operationId },
+                  data: {
+                    providerJobId: "provider-job-2",
+                    providerAttemptNumber: 2,
+                    providerAttemptsJson: JSON.stringify([
+                      ...history,
+                      {
+                        attemptNumber: 2,
+                        providerJobId: "provider-job-2",
+                        model: "veo-3.1-lite",
+                        transportAttemptCount: 1,
+                        status: "running",
+                        failureKind: null,
+                        errorCode: null,
+                        acceptedAt: new Date().toISOString(),
+                        completedAt: null,
+                      },
+                    ]),
+                    technicalAttemptCount: 1,
+                    resultJson: prepared.resultJson,
+                    errorJson: null,
+                  },
+                });
+              }
+              return delegate.updateMany(args);
+            };
+          },
+        });
+      },
+    }) as PrismaClient;
+
+    const resumed = await generateManagedStyle1Video(actor, command, {
+      ...dependencies,
+      prisma: racingPrisma,
+    });
+
+    expect(resumed).toMatchObject({ operationStatus: "running", providerJobId: "provider-job-2" });
+    expect(adapter.startVideo).toHaveBeenCalledTimes(1);
+    await expect(prisma.contentOperation.findFirstOrThrow({ where: { contentRunId } })).resolves.toMatchObject({
+      status: "running",
+      providerJobId: "provider-job-2",
+    });
+    await expect(prisma.contentRun.findUniqueOrThrow({ where: { id: contentRunId } })).resolves.toMatchObject({
+      status: "generating",
+    });
+    await expect(prisma.flowGeneratedVideo.count({ where: { contentRunId } })).resolves.toBe(0);
+    await expect(prisma.workspaceProviderLock.count({ where: { workspaceId } })).resolves.toBe(1);
   });
 
   it("retries exact accepted audio-generation failures up to four total attempts and persists only the eventual success", async () => {

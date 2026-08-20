@@ -302,7 +302,7 @@ async function claimAudioRetryStart(
   const existingClaim = readAudioRetryStartClaim(operation);
   if (existingClaim) {
     if (existingClaim.expiresAtMs > Date.now()) return null;
-    await prisma.contentOperation.updateMany({
+    const changed = await prisma.contentOperation.updateMany({
       where: {
         id: operation.id,
         workspaceId: operation.workspaceId,
@@ -321,7 +321,27 @@ async function claimAudioRetryStart(
         }),
       },
     });
-    throw ambiguousExpiredAudioRetryStartClaim(operation);
+    if (changed.count === 1) {
+      throw ambiguousExpiredAudioRetryStartClaim(operation);
+    }
+    const refreshed = await prisma.contentOperation.findUnique({ where: { id: operation.id } });
+    if (!refreshed) return null;
+    const record = refreshed as ContentOperationRecord;
+    if (record.providerJobId) return record;
+    const refreshedClaim = readAudioRetryStartClaim(record);
+    if (refreshedClaim && refreshedClaim.expiresAtMs > Date.now()) return null;
+    if (record.status === "failed") {
+      throw new ContentGenerationError(
+        "OPERATION_TERMINAL",
+        "The video generation operation has already failed",
+        { operationId: record.id, status: record.status },
+      );
+    }
+    throw new ContentGenerationError(
+      "PROVIDER_ATTEMPT_STALE",
+      "Audio retry expired start claim changed concurrently",
+      { operationId: operation.id, providerAttemptNumber: operation.providerAttemptNumber },
+    );
   }
   const now = new Date();
   const expiresAt = new Date(now.getTime() + ttlMs);
@@ -1014,6 +1034,21 @@ export async function generateManagedStyle1Video(
   });
   const scope = { workspaceId, operationId: operation.id };
 
+  async function claimAudioRetryStartOrCleanup(
+    candidate: ContentOperationRecord,
+  ): Promise<ContentOperationRecord | null> {
+    try {
+      return await claimAudioRetryStart(prisma, candidate, lockTtlMs);
+    } catch (error) {
+      const current = await operations.findById(scope);
+      if (current?.status === "failed" && !current.providerJobId) {
+        await markRunFailed(prisma, run.id);
+        await locks.release(scope);
+      }
+      throw error;
+    }
+  }
+
   async function startAcceptedProviderAttempt(): Promise<ContentOperationRecord> {
     operation = await operations.markRunning(scope);
     const audioRetryStartToken = isPreparedAudioRetry(operation)
@@ -1060,9 +1095,10 @@ export async function generateManagedStyle1Video(
       if (!preparedAudioRetry) {
         return waitResult(operation, command);
       }
-      const claimed = await claimAudioRetryStart(prisma, operation, lockTtlMs);
+      const claimed = await claimAudioRetryStartOrCleanup(operation);
       if (!claimed) return waitResult(operation, command);
       operation = claimed;
+      if (operation.providerJobId) return waitResult(operation, command);
     } else {
       try {
         await locks.acquire({
@@ -1097,9 +1133,10 @@ export async function generateManagedStyle1Video(
         }
         throw error;
       }
-      const claimed = await claimAudioRetryStart(prisma, operation, lockTtlMs);
+      const claimed = await claimAudioRetryStartOrCleanup(operation);
       if (!claimed) return waitResult(operation, command);
       operation = claimed;
+      if (operation.providerJobId) return waitResult(operation, command);
     }
 
     try {
