@@ -6,11 +6,16 @@ import {
 
 import {
   ContentGenerationError,
+  type AcceptedProviderAttemptAudit,
   type ContentOperationRecord,
   type CreateOperationInput,
   type OperationScope,
+  type PrepareAudioRetryInput,
+  type RecordAcceptedVideoStartInput,
+  type TerminalizeProviderAttemptInput,
   type VideoCreativeDirection,
 } from "./types";
+import { ALLOWED_MANAGED_VIDEO_MODELS } from "@/lib/content-runs/constants";
 
 export interface OperationRepository {
   createOrResume(input: CreateOperationInput): Promise<ContentOperationRecord>;
@@ -26,11 +31,15 @@ export interface OperationRepository {
   ): Promise<ContentOperationRecord>;
   recordAcceptedVideoStart(
     scope: OperationScope,
-    input: {
-      providerJobId: string;
-      sourceImageId: string;
-      sourceImageMediaGenerationId: string;
-    },
+    input: RecordAcceptedVideoStartInput,
+  ): Promise<ContentOperationRecord>;
+  terminalizeProviderAttempt(
+    scope: OperationScope,
+    input: TerminalizeProviderAttemptInput,
+  ): Promise<ContentOperationRecord>;
+  prepareAudioRetry(
+    scope: OperationScope,
+    input: PrepareAudioRetryInput,
   ): Promise<ContentOperationRecord>;
   succeed(scope: OperationScope, result: unknown): Promise<ContentOperationRecord>;
   fail(scope: OperationScope, error: unknown): Promise<ContentOperationRecord>;
@@ -126,6 +135,115 @@ function assertSameLogicalCommand(
 function stringify(value: unknown): string {
   const json = JSON.stringify(value);
   return json === undefined ? "null" : json;
+}
+
+const MAX_ACCEPTED_PROVIDER_ATTEMPTS = 4;
+const AUDIT_KEYS = [
+  "acceptedAt",
+  "attemptNumber",
+  "completedAt",
+  "errorCode",
+  "failureKind",
+  "model",
+  "providerJobId",
+  "status",
+  "transportAttemptCount",
+] as const;
+
+function requiredAuditToken(value: string, field: string, maxLength = 500): string {
+  if (
+    value !== value.trim() ||
+    !value ||
+    value.length > maxLength ||
+    /[\u0000-\u001F\u007F]/.test(value) ||
+    /:\/\//.test(value) ||
+    !/^[A-Za-z0-9._:/-]+$/.test(value)
+  ) {
+    throw new TypeError(`${field} must be a safe non-URL identifier`);
+  }
+  return value;
+}
+
+function safeErrorCode(value: string | null | undefined): string | null {
+  if (value == null) return null;
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/.test(value)) {
+    throw new TypeError("errorCode must be a safe provider code");
+  }
+  return value;
+}
+
+function requireAttemptNumber(value: number): number {
+  if (!Number.isInteger(value) || value < 1 || value > MAX_ACCEPTED_PROVIDER_ATTEMPTS) {
+    throw new RangeError(
+      `Provider attempt number must be between 1 and ${MAX_ACCEPTED_PROVIDER_ATTEMPTS}`,
+    );
+  }
+  return value;
+}
+
+function parseProviderAttempts(operation: ContentOperationRecord): AcceptedProviderAttemptAudit[] {
+  let value: unknown;
+  try {
+    value = JSON.parse(operation.providerAttemptsJson);
+  } catch {
+    value = null;
+  }
+  if (!Array.isArray(value)) {
+    throw new ContentGenerationError(
+      "PROVIDER_ATTEMPT_AUDIT_INVALID",
+      "Provider attempt history is not a valid array",
+      { operationId: operation.id },
+    );
+  }
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new ContentGenerationError(
+        "PROVIDER_ATTEMPT_AUDIT_INVALID",
+        "Provider attempt history contains an invalid entry",
+        { operationId: operation.id },
+      );
+    }
+    const record = entry as Record<string, unknown>;
+    const keys = Object.keys(record).sort();
+    const expectedKeys = [...AUDIT_KEYS].sort();
+    const valid =
+      keys.length === expectedKeys.length &&
+      keys.every((key, index) => key === expectedKeys[index]) &&
+      Number.isInteger(record.attemptNumber) &&
+      typeof record.providerJobId === "string" &&
+      typeof record.model === "string" &&
+      Number.isInteger(record.transportAttemptCount) &&
+      (record.status === "running" || record.status === "succeeded" || record.status === "failed") &&
+      (record.failureKind === null ||
+        record.failureKind === "audio_generation" ||
+        record.failureKind === "provider") &&
+      (record.errorCode === null || typeof record.errorCode === "string") &&
+      typeof record.acceptedAt === "string" &&
+      (record.completedAt === null || typeof record.completedAt === "string");
+    if (!valid) {
+      throw new ContentGenerationError(
+        "PROVIDER_ATTEMPT_AUDIT_INVALID",
+        "Provider attempt history contains an invalid entry",
+        { operationId: operation.id },
+      );
+    }
+  }
+  return value as AcceptedProviderAttemptAudit[];
+}
+
+function staleAttempt(
+  scope: OperationScope,
+  current: ContentOperationRecord,
+): ContentGenerationError {
+  return new ContentGenerationError(
+    "PROVIDER_ATTEMPT_STALE",
+    "The provider attempt identity is stale or no longer current",
+    {
+      operationId: scope.operationId,
+      providerAttemptNumber: current.providerAttemptNumber,
+      providerJobId: current.providerJobId,
+    },
+  );
 }
 
 export function createOperationRepository(
@@ -337,6 +455,13 @@ export function createOperationRepository(
 
       const current = await requireScoped(scope);
       assertMutable(current);
+      if (current.kind === "video_generation") {
+        throw new ContentGenerationError(
+          "PROVIDER_ATTEMPT_AUDIT_CONFLICT",
+          "Video provider identities must use the accepted-attempt audit API",
+          { operationId: scope.operationId },
+        );
+      }
       if (current.providerJobId === normalized) return current;
       if (current.providerJobId) {
         throw new ContentGenerationError(
@@ -368,29 +493,234 @@ export function createOperationRepository(
     },
 
     async recordAcceptedVideoStart(scope, input): Promise<ContentOperationRecord> {
-      const providerJobId = input.providerJobId.trim();
-      const sourceImageId = input.sourceImageId.trim();
-      const sourceImageMediaGenerationId = input.sourceImageMediaGenerationId.trim();
-      if (!providerJobId) throw new TypeError("providerJobId must not be empty");
-      if (!sourceImageId) throw new TypeError("sourceImageId must not be empty");
-      if (!sourceImageMediaGenerationId) {
-        throw new TypeError("sourceImageMediaGenerationId must not be empty");
+      const attemptNumber = requireAttemptNumber(input.attemptNumber);
+      const providerJobId = requiredAuditToken(input.providerJobId, "providerJobId");
+      const sourceImageId = requiredAuditToken(input.sourceImageId, "sourceImageId");
+      const sourceImageMediaGenerationId = requiredAuditToken(
+        input.sourceImageMediaGenerationId,
+        "sourceImageMediaGenerationId",
+      );
+      if (!(ALLOWED_MANAGED_VIDEO_MODELS as readonly string[]).includes(input.model)) {
+        throw new TypeError("model must be an allowed managed video model");
       }
-      const resultJson = stringify({
-        sourceImageId,
-        sourceImageMediaGenerationId,
-      });
+      const resultJson = stringify({ sourceImageId, sourceImageMediaGenerationId });
 
       const current = await requireScoped(scope);
       assertMutable(current);
-      if (current.providerJobId === providerJobId && current.resultJson === resultJson) {
+      if (current.kind !== "video_generation" || current.status !== "running") {
+        throw new ContentGenerationError(
+          "PROVIDER_ATTEMPT_AUDIT_CONFLICT",
+          "Accepted video attempts require a running video operation",
+          { operationId: scope.operationId },
+        );
+      }
+      const history = parseProviderAttempts(current);
+      const expectedAttemptNumber =
+        current.providerAttemptNumber === 0 ? 1 : current.providerAttemptNumber;
+      const last = history.at(-1);
+      if (current.providerJobId === providerJobId) {
+        if (
+          current.providerAttemptNumber === attemptNumber &&
+          current.resultJson === resultJson &&
+          last?.attemptNumber === attemptNumber &&
+          last.providerJobId === providerJobId &&
+          last.model === input.model
+        ) {
+          return current;
+        }
+        throw new ContentGenerationError(
+          "PROVIDER_ATTEMPT_AUDIT_CONFLICT",
+          "The accepted provider identity conflicts with persisted audit data",
+          { operationId: scope.operationId, providerJobId },
+        );
+      }
+      if (current.providerJobId || attemptNumber !== expectedAttemptNumber) {
+        throw staleAttempt(scope, current);
+      }
+      if (current.technicalAttemptCount < 1 || current.technicalAttemptCount > 3) {
+        throw new ContentGenerationError(
+          "PROVIDER_ATTEMPT_AUDIT_CONFLICT",
+          "An accepted provider start requires a recorded transport attempt",
+          { operationId: scope.operationId },
+        );
+      }
+      if (history.length !== attemptNumber - 1) {
+        throw new ContentGenerationError(
+          "PROVIDER_ATTEMPT_AUDIT_CONFLICT",
+          "Provider attempt numbering is not contiguous",
+          { operationId: scope.operationId, providerAttemptNumber: attemptNumber },
+        );
+      }
+      if (
+        history.length > 0 &&
+        (history[0].model !== input.model || current.resultJson !== resultJson)
+      ) {
+        throw new ContentGenerationError(
+          "PROVIDER_ATTEMPT_AUDIT_CONFLICT",
+          "Provider retry model and source lineage are immutable",
+          { operationId: scope.operationId },
+        );
+      }
+
+      const accepted: AcceptedProviderAttemptAudit = {
+        attemptNumber,
+        providerJobId,
+        model: input.model,
+        transportAttemptCount: current.technicalAttemptCount,
+        status: "running",
+        failureKind: null,
+        errorCode: null,
+        acceptedAt: new Date().toISOString(),
+        completedAt: null,
+      };
+      const providerAttemptsJson = JSON.stringify([...history, accepted]);
+      const changed = await prisma.contentOperation.updateMany({
+        where: {
+          id: scope.operationId,
+          workspaceId: scope.workspaceId,
+          kind: "video_generation",
+          status: "running",
+          providerJobId: null,
+          providerAttemptNumber: current.providerAttemptNumber,
+          providerAttemptsJson: current.providerAttemptsJson,
+          technicalAttemptCount: current.technicalAttemptCount,
+        },
+        data: {
+          providerJobId,
+          providerAttemptNumber: attemptNumber,
+          providerAttemptsJson,
+          resultJson,
+        },
+      });
+      const persisted = await requireScoped(scope);
+      assertMutable(persisted);
+      if (changed.count === 1) return persisted;
+      const persistedHistory = parseProviderAttempts(persisted);
+      const persistedLast = persistedHistory.at(-1);
+      if (
+        persisted.providerJobId === providerJobId &&
+        persisted.providerAttemptNumber === attemptNumber &&
+        persisted.resultJson === resultJson &&
+        persistedLast?.providerJobId === providerJobId &&
+        persistedLast.model === input.model
+      ) {
+        return persisted;
+      }
+      throw staleAttempt(scope, persisted);
+    },
+
+    async terminalizeProviderAttempt(scope, input): Promise<ContentOperationRecord> {
+      const attemptNumber = requireAttemptNumber(input.attemptNumber);
+      const providerJobId = requiredAuditToken(input.providerJobId, "providerJobId");
+      const failureKind = input.status === "failed" ? input.failureKind : null;
+      const errorCode = input.status === "failed" ? safeErrorCode(input.errorCode) : null;
+      const current = await requireScoped(scope);
+      assertMutable(current);
+      const history = parseProviderAttempts(current);
+      const last = history.at(-1);
+      if (
+        current.kind !== "video_generation" ||
+        current.status !== "running" ||
+        current.providerAttemptNumber !== attemptNumber ||
+        current.providerJobId !== providerJobId ||
+        last?.attemptNumber !== attemptNumber ||
+        last.providerJobId !== providerJobId
+      ) {
+        throw staleAttempt(scope, current);
+      }
+      if (last.status !== "running") {
+        if (
+          last.status === input.status &&
+          last.failureKind === failureKind &&
+          last.errorCode === errorCode
+        ) {
+          return current;
+        }
+        throw new ContentGenerationError(
+          "PROVIDER_ATTEMPT_AUDIT_CONFLICT",
+          "The provider attempt already has a different terminal audit result",
+          { operationId: scope.operationId, providerAttemptNumber: attemptNumber },
+        );
+      }
+
+      const providerAttemptsJson = JSON.stringify([
+        ...history.slice(0, -1),
+        {
+          ...last,
+          status: input.status,
+          failureKind,
+          errorCode,
+          completedAt: new Date().toISOString(),
+        },
+      ]);
+      const changed = await prisma.contentOperation.updateMany({
+        where: {
+          id: scope.operationId,
+          workspaceId: scope.workspaceId,
+          kind: "video_generation",
+          status: "running",
+          providerJobId,
+          providerAttemptNumber: attemptNumber,
+          providerAttemptsJson: current.providerAttemptsJson,
+        },
+        data: { providerAttemptsJson },
+      });
+      const persisted = await requireScoped(scope);
+      assertMutable(persisted);
+      if (changed.count === 1) return persisted;
+      const persistedLast = parseProviderAttempts(persisted).at(-1);
+      if (
+        persisted.providerJobId === providerJobId &&
+        persisted.providerAttemptNumber === attemptNumber &&
+        persistedLast?.status === input.status &&
+        persistedLast.failureKind === failureKind &&
+        persistedLast.errorCode === errorCode
+      ) {
+        return persisted;
+      }
+      throw staleAttempt(scope, persisted);
+    },
+
+    async prepareAudioRetry(scope, input): Promise<ContentOperationRecord> {
+      const attemptNumber = requireAttemptNumber(input.attemptNumber);
+      const providerJobId = requiredAuditToken(input.providerJobId, "providerJobId");
+      const current = await requireScoped(scope);
+      assertMutable(current);
+      const history = parseProviderAttempts(current);
+      const last = history.at(-1);
+      const exactAudioFailure =
+        last?.attemptNumber === attemptNumber &&
+        last.providerJobId === providerJobId &&
+        last.status === "failed" &&
+        last.failureKind === "audio_generation";
+
+      if (
+        exactAudioFailure &&
+        current.providerJobId === null &&
+        current.providerAttemptNumber === attemptNumber + 1
+      ) {
         return current;
       }
-      if (current.providerJobId) {
+      if (
+        current.kind !== "video_generation" ||
+        current.status !== "running" ||
+        current.providerAttemptNumber !== attemptNumber ||
+        current.providerJobId !== providerJobId
+      ) {
+        throw staleAttempt(scope, current);
+      }
+      if (attemptNumber >= MAX_ACCEPTED_PROVIDER_ATTEMPTS) {
         throw new ContentGenerationError(
-          "PROVIDER_JOB_ALREADY_ACCEPTED",
-          "The operation already has an accepted provider job identity",
-          { providerJobId: current.providerJobId, operationId: scope.operationId },
+          "PROVIDER_ATTEMPT_LIMIT_REACHED",
+          "The managed video operation has exhausted its accepted provider attempts",
+          { operationId: scope.operationId, providerAttemptNumber: attemptNumber },
+        );
+      }
+      if (!exactAudioFailure) {
+        throw new ContentGenerationError(
+          "AUDIO_RETRY_NOT_ALLOWED",
+          "Audio retry requires the exact current accepted job to be terminal audio failure",
+          { operationId: scope.operationId, providerAttemptNumber: attemptNumber },
         );
       }
 
@@ -398,32 +728,30 @@ export function createOperationRepository(
         where: {
           id: scope.operationId,
           workspaceId: scope.workspaceId,
+          kind: "video_generation",
           status: "running",
-          providerJobId: null,
+          providerJobId,
+          providerAttemptNumber: attemptNumber,
+          providerAttemptsJson: current.providerAttemptsJson,
         },
         data: {
-          providerJobId,
-          resultJson,
+          providerJobId: null,
+          providerAttemptNumber: attemptNumber + 1,
+          technicalAttemptCount: 0,
+          completedAt: null,
         },
       });
       const persisted = await requireScoped(scope);
       assertMutable(persisted);
       if (changed.count === 1) return persisted;
-      if (persisted.providerJobId === providerJobId && persisted.resultJson === resultJson) {
+      if (
+        persisted.providerJobId === null &&
+        persisted.providerAttemptNumber === attemptNumber + 1 &&
+        persisted.providerAttemptsJson === current.providerAttemptsJson
+      ) {
         return persisted;
       }
-      if (persisted.providerJobId) {
-        throw new ContentGenerationError(
-          "PROVIDER_JOB_ALREADY_ACCEPTED",
-          "A concurrent call already persisted a provider job identity",
-          { providerJobId: persisted.providerJobId, operationId: scope.operationId },
-        );
-      }
-      throw new ContentGenerationError(
-        "PROVIDER_VIDEO_START_PERSISTENCE_FAILED",
-        "Accepted provider job identity and source lineage were not persisted atomically",
-        { operationId: scope.operationId },
-      );
+      throw staleAttempt(scope, persisted);
     },
 
     async succeed(scope, result): Promise<ContentOperationRecord> {

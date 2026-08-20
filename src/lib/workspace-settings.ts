@@ -21,12 +21,13 @@ import {
 } from "@/lib/ai/types";
 import { maskApiKey } from "@/lib/ai/prompt-generator";
 import {
+  ALLOWED_MANAGED_VIDEO_MODELS,
   DEFAULT_FLOW_IMAGE_MODEL,
   DEFAULT_FLOW_VIDEO_MODEL,
 } from "@/lib/content-runs/constants";
 
 export const ALLOWED_FLOW_IMAGE_MODELS = [DEFAULT_FLOW_IMAGE_MODEL] as const;
-export const ALLOWED_FLOW_VIDEO_MODELS = [DEFAULT_FLOW_VIDEO_MODEL] as const;
+export const ALLOWED_FLOW_VIDEO_MODELS = ALLOWED_MANAGED_VIDEO_MODELS;
 
 export interface ServerFlowDefaults {
   imageModel: string;

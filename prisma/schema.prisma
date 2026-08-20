@@ -337,7 +337,7 @@ model WorkspaceSettings {
   // Deterministic Google Flow defaults for managed content runs.
   // Effective values are frozen into each ContentRun snapshot.
   flowImageModel String @default("nano-banana-pro")
-  flowVideoModel String @default("veo-3.1-lite")
+  flowVideoModel String @default("veo-3.1-lite-low-priority")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -782,6 +782,8 @@ model ContentOperation {
   idempotencyKey        String
   provider              String   @default("google_flow_useapi")
   providerJobId         String?
+  providerAttemptNumber Int      @default(0)
+  providerAttemptsJson  String   @default("[]")
   technicalAttemptCount Int      @default(0)
   creativeDirectionJson String?
   resultJson            String?

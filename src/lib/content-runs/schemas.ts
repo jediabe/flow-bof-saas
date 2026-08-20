@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  ALLOWED_MANAGED_VIDEO_MODELS,
   ASSET_TYPES,
   CONTENT_RUN_STATES,
   CONTENT_SLOTS,
@@ -57,6 +58,7 @@ export const ContentCreateStyle1RunInputSchema = z
     productId: IdSchema,
     objective: z.string().trim().min(1).max(1000),
     idempotencyKey: IdempotencyKeySchema,
+    videoModel: z.enum(ALLOWED_MANAGED_VIDEO_MODELS).optional(),
   })
   .strict();
 export const ContentGenerateStyle1ImageInputSchema = z

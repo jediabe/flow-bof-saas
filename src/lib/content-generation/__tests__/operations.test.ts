@@ -114,6 +114,258 @@ afterAll(async () => {
 });
 
 describe("content operation repository", () => {
+  async function createRunningVideo(idempotencyKey: string) {
+    const repository = createOperationRepository(prisma);
+    const operation = await repository.createOrResume({
+      workspaceId,
+      contentRunId,
+      kind: "video_generation",
+      sceneLabel: "scene_1_store",
+      idempotencyKey,
+    });
+    const scope = { workspaceId, operationId: operation.id };
+    await repository.markRunning(scope);
+    await repository.recordTechnicalAttempt(scope, 1);
+    return { repository, operation, scope };
+  }
+
+  it("initializes provider-attempt audit fields without changing image behavior", async () => {
+    const repository = createOperationRepository(prisma);
+    const operation = await repository.createOrResume({
+      workspaceId,
+      contentRunId,
+      kind: "image_generation",
+      sceneLabel: "scene_1_store_image",
+      idempotencyKey: "image-audit-defaults",
+    });
+
+    expect(operation).toMatchObject({
+      providerAttemptNumber: 0,
+      providerAttemptsJson: "[]",
+    });
+  });
+
+  it("atomically records one sanitized accepted video attempt with frozen lineage and model", async () => {
+    const { repository, scope } = await createRunningVideo("accepted-audit");
+    const input = {
+      attemptNumber: 1,
+      providerJobId: "job-original",
+      model: "veo-3.1-lite-low-priority" as const,
+      sourceImageId: "source-image-1",
+      sourceImageMediaGenerationId: "flow-source-image-1",
+    };
+
+    const accepted = await repository.recordAcceptedVideoStart(scope, input);
+    const replay = await repository.recordAcceptedVideoStart(scope, input);
+
+    expect(replay).toMatchObject({ id: accepted.id, providerAttemptNumber: 1 });
+    expect(JSON.parse(accepted.resultJson ?? "null")).toEqual({
+      sourceImageId: "source-image-1",
+      sourceImageMediaGenerationId: "flow-source-image-1",
+    });
+    expect(JSON.parse(accepted.providerAttemptsJson)).toEqual([
+      {
+        attemptNumber: 1,
+        providerJobId: "job-original",
+        model: "veo-3.1-lite-low-priority",
+        transportAttemptCount: 1,
+        status: "running",
+        failureKind: null,
+        errorCode: null,
+        acceptedAt: expect.any(String),
+        completedAt: null,
+      },
+    ]);
+  });
+
+  it("fences concurrent accepted identities to one exact attempt", async () => {
+    const { repository, scope } = await createRunningVideo("accepted-race");
+    const base = {
+      attemptNumber: 1,
+      model: "veo-3.1-lite-low-priority" as const,
+      sourceImageId: "source-image-1",
+      sourceImageMediaGenerationId: "flow-source-image-1",
+    };
+
+    const results = await Promise.allSettled([
+      repository.recordAcceptedVideoStart(scope, { ...base, providerJobId: "job-a" }),
+      repository.recordAcceptedVideoStart(scope, { ...base, providerJobId: "job-b" }),
+    ]);
+
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+    const persisted = await prisma.contentOperation.findUniqueOrThrow({
+      where: { id: scope.operationId },
+    });
+    expect(JSON.parse(persisted.providerAttemptsJson)).toHaveLength(1);
+    expect(JSON.parse(persisted.providerAttemptsJson)[0].providerJobId).toBe(
+      persisted.providerJobId,
+    );
+  });
+
+  it("terminalizes only the exact current accepted attempt and is idempotent", async () => {
+    const { repository, scope } = await createRunningVideo("terminal-audit");
+    await repository.recordAcceptedVideoStart(scope, {
+      attemptNumber: 1,
+      providerJobId: "job-current",
+      model: "veo-3.1-lite-low-priority",
+      sourceImageId: "source-image-1",
+      sourceImageMediaGenerationId: "flow-source-image-1",
+    });
+    const terminalInput = {
+      attemptNumber: 1,
+      providerJobId: "job-current",
+      status: "failed" as const,
+      failureKind: "audio_generation" as const,
+      errorCode: "AUDIO_GENERATION_FAILED",
+    };
+
+    const failed = await repository.terminalizeProviderAttempt(scope, terminalInput);
+    const replay = await repository.terminalizeProviderAttempt(scope, terminalInput);
+    expect(replay.providerAttemptsJson).toBe(failed.providerAttemptsJson);
+    expect(JSON.parse(failed.providerAttemptsJson)).toEqual([
+      expect.objectContaining({
+        attemptNumber: 1,
+        providerJobId: "job-current",
+        status: "failed",
+        failureKind: "audio_generation",
+        errorCode: "AUDIO_GENERATION_FAILED",
+        completedAt: expect.any(String),
+      }),
+    ]);
+
+    await expect(
+      repository.terminalizeProviderAttempt(scope, {
+        ...terminalInput,
+        providerJobId: "job-stale",
+      }),
+    ).rejects.toMatchObject({ code: "PROVIDER_ATTEMPT_STALE" });
+  });
+
+  it("prepares only an exact terminal audio failure while preserving immutable command data", async () => {
+    const { repository, scope } = await createRunningVideo("prepare-audio-retry");
+    await repository.recordAcceptedVideoStart(scope, {
+      attemptNumber: 1,
+      providerJobId: "job-audio-failed",
+      model: "veo-3.1-lite-low-priority",
+      sourceImageId: "source-image-1",
+      sourceImageMediaGenerationId: "flow-source-image-1",
+    });
+    const before = await repository.terminalizeProviderAttempt(scope, {
+      attemptNumber: 1,
+      providerJobId: "job-audio-failed",
+      status: "failed",
+      failureKind: "audio_generation",
+      errorCode: "AUDIO_GENERATION_FAILED",
+    });
+
+    const prepared = await repository.prepareAudioRetry(scope, {
+      attemptNumber: 1,
+      providerJobId: "job-audio-failed",
+    });
+
+    expect(prepared).toMatchObject({
+      status: "running",
+      providerJobId: null,
+      providerAttemptNumber: 2,
+      technicalAttemptCount: 0,
+      resultJson: before.resultJson,
+      creativeDirectionJson: before.creativeDirectionJson,
+      completedAt: null,
+    });
+    expect(prepared.providerAttemptsJson).toBe(before.providerAttemptsJson);
+  });
+
+  it("rejects audio retry preparation while the exact accepted job is still running", async () => {
+    const { repository, scope } = await createRunningVideo("retry-running-rejected");
+    await repository.recordAcceptedVideoStart(scope, {
+      attemptNumber: 1,
+      providerJobId: "job-running",
+      model: "veo-3.1-lite-low-priority",
+      sourceImageId: "source-image-1",
+      sourceImageMediaGenerationId: "flow-source-image-1",
+    });
+
+    await expect(
+      repository.prepareAudioRetry(scope, {
+        attemptNumber: 1,
+        providerJobId: "job-running",
+      }),
+    ).rejects.toMatchObject({ code: "AUDIO_RETRY_NOT_ALLOWED" });
+  });
+
+  it("allows exactly four accepted attempts with identical model and lineage", async () => {
+    const { repository, scope } = await createRunningVideo("bounded-audio-retries");
+    for (let attemptNumber = 1; attemptNumber <= 4; attemptNumber += 1) {
+      if (attemptNumber > 1) await repository.recordTechnicalAttempt(scope, 1);
+      await repository.recordAcceptedVideoStart(scope, {
+        attemptNumber,
+        providerJobId: `job-${attemptNumber}`,
+        model: "veo-3.1-lite-low-priority",
+        sourceImageId: "source-image-1",
+        sourceImageMediaGenerationId: "flow-source-image-1",
+      });
+      await repository.terminalizeProviderAttempt(scope, {
+        attemptNumber,
+        providerJobId: `job-${attemptNumber}`,
+        status: "failed",
+        failureKind: "audio_generation",
+        errorCode: "AUDIO_GENERATION_FAILED",
+      });
+      if (attemptNumber < 4) {
+        await repository.prepareAudioRetry(scope, {
+          attemptNumber,
+          providerJobId: `job-${attemptNumber}`,
+        });
+      }
+    }
+
+    await expect(
+      repository.prepareAudioRetry(scope, {
+        attemptNumber: 4,
+        providerJobId: "job-4",
+      }),
+    ).rejects.toMatchObject({ code: "PROVIDER_ATTEMPT_LIMIT_REACHED" });
+    const persisted = await prisma.contentOperation.findUniqueOrThrow({
+      where: { id: scope.operationId },
+    });
+    expect(persisted.providerAttemptNumber).toBe(4);
+    expect(JSON.parse(persisted.providerAttemptsJson)).toHaveLength(4);
+    expect(new Set(JSON.parse(persisted.providerAttemptsJson).map((entry: any) => entry.model))).toEqual(
+      new Set(["veo-3.1-lite-low-priority"]),
+    );
+  });
+
+  it("rejects unsafe audit values and model or lineage mutation", async () => {
+    const { repository, scope } = await createRunningVideo("sanitized-audit");
+    await expect(
+      repository.recordAcceptedVideoStart(scope, {
+        attemptNumber: 1,
+        providerJobId: "https://secret.example/job?id=token",
+        model: "omni-flash" as never,
+        sourceImageId: "source-image-1",
+        sourceImageMediaGenerationId: "flow-source-image-1",
+      }),
+    ).rejects.toBeInstanceOf(TypeError);
+
+    await repository.recordAcceptedVideoStart(scope, {
+      attemptNumber: 1,
+      providerJobId: "job-safe",
+      model: "veo-3.1-lite-low-priority",
+      sourceImageId: "source-image-1",
+      sourceImageMediaGenerationId: "flow-source-image-1",
+    });
+    await expect(
+      repository.terminalizeProviderAttempt(scope, {
+        attemptNumber: 1,
+        providerJobId: "job-safe",
+        status: "failed",
+        failureKind: "provider",
+        errorCode: "https://secret.example/error?token=value",
+      }),
+    ).rejects.toBeInstanceOf(TypeError);
+  });
+
   it("returns the original operation for a repeated idempotency key", async () => {
     const repository = createOperationRepository(prisma);
     const input = {
@@ -280,14 +532,14 @@ describe("content operation repository", () => {
     await expect(prisma.contentOperation.count()).resolves.toBe(0);
   });
 
-  it("preserves the first accepted provider job identity", async () => {
+  it("preserves the first accepted image provider job identity without video audit changes", async () => {
     const repository = createOperationRepository(prisma);
     const operation = await repository.createOrResume({
       workspaceId,
       contentRunId,
-      kind: "video_generation",
-      sceneLabel: "scene_1_store",
-      idempotencyKey: "video-one",
+      kind: "image_generation",
+      sceneLabel: "scene_1_store_image",
+      idempotencyKey: "image-provider-one",
     });
 
     await expect(
@@ -311,7 +563,19 @@ describe("content operation repository", () => {
 
     await expect(
       prisma.contentOperation.findUniqueOrThrow({ where: { id: operation.id } }),
-    ).resolves.toMatchObject({ providerJobId: "job-original" });
+    ).resolves.toMatchObject({
+      providerJobId: "job-original",
+      providerAttemptNumber: 0,
+      providerAttemptsJson: "[]",
+    });
+  });
+
+  it("rejects the unaudited provider identity API for video operations", async () => {
+    const { repository, scope } = await createRunningVideo("video-audit-required");
+
+    await expect(repository.recordProviderJobId(scope, "job-unaudited")).rejects.toMatchObject({
+      code: "PROVIDER_ATTEMPT_AUDIT_CONFLICT",
+    });
   });
 
   it("persists accepted video provider identity and source lineage atomically", async () => {
@@ -325,10 +589,13 @@ describe("content operation repository", () => {
     });
     const scope = { workspaceId, operationId: operation.id };
     await repository.markRunning(scope);
+    await repository.recordTechnicalAttempt(scope, 1);
 
     await expect(
       repository.recordAcceptedVideoStart(scope, {
+        attemptNumber: 1,
         providerJobId: "job-original",
+        model: "veo-3.1-lite-low-priority",
         sourceImageId: "source-image-1",
         sourceImageMediaGenerationId: "flow-source-image-1",
       }),
@@ -350,7 +617,9 @@ describe("content operation repository", () => {
 
     await expect(
       repository.recordAcceptedVideoStart(scope, {
+        attemptNumber: 1,
         providerJobId: "job-late",
+        model: "veo-3.1-lite-low-priority",
         sourceImageId: "source-image-1",
         sourceImageMediaGenerationId: "flow-source-image-1",
       }),
@@ -375,13 +644,16 @@ describe("content operation repository", () => {
     });
     const scope = { workspaceId, operationId: operation.id };
     await baseRepository.markRunning(scope);
+    await baseRepository.recordTechnicalAttempt(scope, 1);
     const racingRepository = createOperationRepository(
       withAcceptedStartRace(operation.id, prisma),
     );
 
     await expect(
       racingRepository.recordAcceptedVideoStart(scope, {
+        attemptNumber: 1,
         providerJobId: "job-raced",
+        model: "veo-3.1-lite-low-priority",
         sourceImageId: "source-image-1",
         sourceImageMediaGenerationId: "flow-source-image-1",
       }),
