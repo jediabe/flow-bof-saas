@@ -28,12 +28,6 @@ function describeNextAction(action: ContentRunProjection["requiredNextAction"]):
       return `Video generation pending for ${action.slot}`;
     case "RUN_QA":
       return `QA pending for ${action.slot}`;
-    case "GENERATE_VOICEOVER":
-      return "Final voiceover generation pending";
-    case "ASSEMBLE_FINAL":
-      return `Final assembly pending for ${action.finalVideoId}`;
-    case "RUN_FINAL_QA":
-      return `Final QA pending for ${action.finalVideoId}`;
     case "WAIT_FOR_OPERATION":
       return `Waiting for operation ${action.operationId}`;
     case "HUMAN_REVIEW":

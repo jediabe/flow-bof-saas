@@ -172,12 +172,33 @@ async function loadScopedRun(
 }
 
 function project(run: LoadedManagedRun): ContentRunProjection {
+  assertManagedStyle1RunIdentity(run);
   return projectContentRun({
     run,
     images: run.images,
     videos: run.videos,
     operations: run.operations,
   });
+}
+
+function assertManagedStyle1RunIdentity(run: LoadedManagedRun): void {
+  try {
+    const snapshot = JSON.parse(run.promptSnapshotJson ?? "") as Record<string, unknown>;
+    if (
+      run.style === "style1" &&
+      snapshot.objective === "create_style1_piece" &&
+      snapshot.specVersion === MANAGED_STYLE1_SPEC_VERSION
+    ) {
+      return;
+    }
+  } catch {
+    // The stable domain error below owns malformed and mismatched snapshots.
+  }
+  throw new ManagedQaError(
+    "MANAGED_ASSET_NOT_READY",
+    "Content run is not the managed Style 1 V1 objective",
+    { contentRunId: run.id },
+  );
 }
 
 function assertManagedStyle1V1(
@@ -264,7 +285,7 @@ function reconciliationDecision(
         (slotIndex === 2 &&
           action.type === "GENERATE_VIDEO" &&
           action.sourceAssetId === command.assetId) ||
-        (slotIndex === 3 && action.type === "GENERATE_VOICEOVER")
+        (slotIndex === 3 && action.type === "COMPLETE")
       : attempt.qaStatus === "FAILED"
         ? action.type === "FAILED"
         : action.type === "HUMAN_REVIEW";

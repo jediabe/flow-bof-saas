@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { compileStyleManifest } from "@/lib/content-styles/registry";
 import { projectContentRun, type ProjectContentRunInput } from "../project-run";
 import { ContentRunProjectionSchema } from "../schemas";
 
@@ -15,6 +16,7 @@ function baseInput(
     run: {
       id: "run-1",
       productId: "product-1",
+      style: "style1",
       status: "generating",
       promptSnapshotJson: snapshot,
     },
@@ -103,6 +105,116 @@ function finalVideo(overrides: Record<string, unknown> = {}) {
 }
 
 describe("projectContentRun", () => {
+  it("rejects persisted style disagreement with a frozen managed manifest", () => {
+    const styleManifest = compileStyleManifest("style2", "managed-style2-v1", "handheld");
+    expect(() =>
+      projectContentRun(
+        baseInput({
+          run: {
+            ...baseInput().run,
+            style: "style1",
+            promptSnapshotJson: JSON.stringify({
+              objective: "create_style2_piece",
+              style: "style2",
+              specVersion: "managed-style2-v1",
+              variant: "handheld",
+              styleManifest,
+              modelSnapshot: {
+                imageModel: "nano-banana-pro",
+                videoModel: "veo-3.1-lite",
+              },
+            }),
+          },
+        }),
+      ),
+    ).toThrow(/style/i);
+  });
+
+  it("rejects persisted Style 1 disagreement with a manifest-less Style 2 snapshot", () => {
+    expect(() =>
+      projectContentRun(
+        baseInput({
+          run: {
+            ...baseInput().run,
+            style: "style1",
+            promptSnapshotJson: JSON.stringify({
+              objective: "create_style2_piece",
+              style: "style2",
+              specVersion: "managed-style2-v1",
+              variant: "handheld",
+              modelSnapshot: {
+                imageModel: "nano-banana-pro",
+                videoModel: "veo-3.1-lite",
+              },
+            }),
+          },
+        }),
+      ),
+    ).toThrow(/style/i);
+  });
+
+  it.each(["handheld", "large_countertop", "worn"] as const)(
+    "projects the frozen Style 2 %s topology and advances only after every required slot is approved",
+    (variant) => {
+      const styleManifest = compileStyleManifest("style2", "managed-style2-v1", variant);
+      const style2Snapshot = JSON.stringify({
+        objective: "create_style2_piece",
+        style: "style2",
+        specVersion: "managed-style2-v1",
+        variant,
+        styleManifest,
+        modelSnapshot: { imageModel: "nano-banana-pro", videoModel: "veo-3.1-lite" },
+      });
+      const assets = styleManifest.slots.map((slot) => ({
+        id: `${slot.id}-asset`,
+        contentRunId: "run-1",
+        sceneLabel: slot.id,
+        attemptNumber: 1,
+        qaStatus: "APPROVED",
+        qaScore: 95,
+        qaVerdictJson: null,
+      }));
+      const approved = projectContentRun(
+        baseInput({
+          run: {
+            ...baseInput().run,
+            style: "style2",
+            promptSnapshotJson: style2Snapshot,
+          },
+          images: assets.filter((_, index) => styleManifest.slots[index].mediaType === "image"),
+          videos: assets.filter((_, index) => styleManifest.slots[index].mediaType === "video"),
+        }),
+      );
+
+      expect(approved.slots.map((slot) => slot.slot)).toEqual(
+        styleManifest.slots.map((slot) => slot.id),
+      );
+      expect(approved.requiredNextAction).toEqual({ type: "GENERATE_VOICEOVER" });
+      expect(ContentRunProjectionSchema.parse(approved)).toEqual(approved);
+
+      const missingFirst = projectContentRun(
+        baseInput({
+          run: {
+            ...baseInput().run,
+            style: "style2",
+            promptSnapshotJson: style2Snapshot,
+          },
+          images: assets
+            .slice(1)
+            .filter((asset) => styleManifest.slots.find((slot) => slot.id === asset.sceneLabel)?.mediaType === "image"),
+          videos: assets
+            .slice(1)
+            .filter((asset) => styleManifest.slots.find((slot) => slot.id === asset.sceneLabel)?.mediaType === "video"),
+        }),
+      );
+      expect(missingFirst.requiredNextAction).toMatchObject({
+        type: styleManifest.slots[0].mediaType === "image" ? "GENERATE_IMAGE" : "GENERATE_VIDEO",
+        slot: styleManifest.slots[0].id,
+      });
+      expect(ContentRunProjectionSchema.parse(missingFirst)).toEqual(missingFirst);
+    },
+  );
+
   it("starts with the store image", () => {
     const projection = projectContentRun(baseInput());
 

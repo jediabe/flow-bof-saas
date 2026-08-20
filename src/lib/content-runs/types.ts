@@ -27,14 +27,25 @@ export type OperationKind = (typeof OPERATION_KINDS)[number];
 export type OperationStatus = (typeof OPERATION_STATUSES)[number];
 export type QaStatus = (typeof QA_STATUSES)[number];
 export type QaDecision = (typeof QA_DECISIONS)[number];
+export type ManagedManifestSlot = "N1" | "N2" | "N3" | "N4" | "N5" | "N6" | "N7";
 
 export type RequiredNextAction =
-  | { type: "GENERATE_IMAGE"; slot: ImageSlot }
-  | { type: "RUN_QA"; slot: ContentSlot; assetId: string }
+  | { type: "GENERATE_IMAGE"; slot: ImageSlot | ManagedManifestSlot }
+  | { type: "RUN_QA"; slot: ContentSlot | ManagedManifestSlot; assetId: string }
   | { type: "GENERATE_VIDEO"; slot: VideoSlot; sourceAssetId: string }
+  | { type: "GENERATE_VIDEO"; slot: ManagedManifestSlot; sourceAssetId?: string }
   | { type: "GENERATE_VOICEOVER" }
   | { type: "ASSEMBLE_FINAL"; finalVideoId: string }
   | { type: "RUN_FINAL_QA"; finalVideoId: string }
+  | { type: "WAIT_FOR_OPERATION"; operationId: string }
+  | { type: "HUMAN_REVIEW"; reason: string }
+  | { type: "COMPLETE" }
+  | { type: "FAILED"; reason: string };
+
+export type LegacyStyle1RequiredNextAction =
+  | { type: "GENERATE_IMAGE"; slot: ImageSlot }
+  | { type: "RUN_QA"; slot: ContentSlot; assetId: string }
+  | { type: "GENERATE_VIDEO"; slot: VideoSlot; sourceAssetId: string }
   | { type: "WAIT_FOR_OPERATION"; operationId: string }
   | { type: "HUMAN_REVIEW"; reason: string }
   | { type: "COMPLETE" }
@@ -72,12 +83,24 @@ export interface ManagedSlotRecord<TSlot extends ContentSlot = ContentSlot> {
   attempts: ManagedAssetAttempt[];
 }
 
+export interface ManifestManagedSlotRecord {
+  slot: ManagedManifestSlot;
+  assetType: ManagedManifestSlot;
+  selectedAssetId?: string;
+  attempts: ManagedAssetAttempt[];
+}
+
 export interface ActiveContentOperation {
   id: string;
   kind: OperationKind;
   status: Extract<OperationStatus, "requested" | "running">;
   slot: ContentSlot;
   providerJobId?: string;
+}
+
+export interface ManifestAwareActiveContentOperation
+  extends Omit<ActiveContentOperation, "slot"> {
+  slot: ContentSlot | ManagedManifestSlot;
 }
 
 export interface ContentRunProjection {
@@ -97,8 +120,18 @@ export interface ContentRunProjection {
     ManagedSlotRecord<"scene_2_home_video">,
   ];
   activeOperation?: ActiveContentOperation;
-  requiredNextAction: RequiredNextAction;
+  requiredNextAction: LegacyStyle1RequiredNextAction;
   terminalReason?: string;
+}
+
+export interface ManifestAwareContentRunProjection
+  extends Omit<
+    ContentRunProjection,
+    "slots" | "activeOperation" | "requiredNextAction"
+  > {
+  slots: Array<ManagedSlotRecord | ManifestManagedSlotRecord>;
+  activeOperation?: ManifestAwareActiveContentOperation;
+  requiredNextAction: RequiredNextAction;
 }
 
 export interface ServiceActorContext {
