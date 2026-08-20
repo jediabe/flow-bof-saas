@@ -552,6 +552,40 @@ describe("runQaForAsset — extraction failure", () => {
       }),
     ).rejects.toBeInstanceOf(MediaFetchError);
   });
+
+  it("settles a fast reference failure while generated image loading is still pending", async () => {
+    primeHappyPath({ kind: "image" });
+    (fetchImageAsBase64 as ReturnType<typeof vi.fn>)
+      .mockReset()
+      .mockImplementationOnce(async () => {
+        throw new Error("reference failed immediately");
+      })
+      .mockImplementationOnce(
+        async () =>
+          new Promise((resolve) =>
+            setTimeout(
+              () => resolve({ data: "AAAA", mediaType: "image/jpeg" }),
+              10,
+            ),
+          ),
+      );
+
+    await expect(
+      runQaForAsset({
+        assetId: "image-1",
+        assetKind: "image",
+        triggeredBy: "manual",
+        providerOverride: fakeProvider(goodResult()),
+      }),
+    ).rejects.toBeInstanceOf(MediaFetchError);
+    expect(mockedDb.qaAttempt.create).toHaveBeenCalledTimes(1);
+    expect(mockedDb.flowGeneratedImage.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "image-1" },
+        data: expect.objectContaining({ qaStatus: "FAILED" }),
+      }),
+    );
+  });
 });
 
 // -----------------------------------------------------------------

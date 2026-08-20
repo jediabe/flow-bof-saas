@@ -201,20 +201,23 @@ export async function runQaForAsset(input: RunQaInput): Promise<RunQaOutput> {
     // 4. Prepare the payload — extract frames for videos, base64
     //    the image for images. Fetch the reference image in
     //    parallel with extraction.
-    let referenceImagePromise: Promise<
-      Awaited<ReturnType<typeof fetchImageAsBase64>> | null
-    > = Promise.resolve(null);
+    type ReferenceImageResult =
+      | { ok: true; value: Awaited<ReturnType<typeof fetchImageAsBase64>> | null }
+      | { ok: false; error: unknown };
+    let referenceImagePromise: Promise<ReferenceImageResult> = Promise.resolve({
+      ok: true,
+      value: null,
+    });
     if (asset.product.referenceImageUrl) {
-      // Fetch the reference; MediaFetchError-wrap on failure so
-      // the classification stays clean.
+      // Settle instead of leaving a rejected promise unobserved while generated
+      // media is prepared. A fast reference failure must still flow through the
+      // orchestrator catch/failure-persistence path rather than crash the process.
       referenceImagePromise = fetchImageAsBase64(
         toAgentAssetUrl(asset.product.referenceImageUrl),
-      ).catch((err) => {
-        throw new MediaFetchError(
-          `Reference image fetch failed for product ${asset.product.id}: ${(err as Error).message?.slice(0, 200)}`,
-          { cause: err },
-        );
-      });
+      ).then(
+        (value): ReferenceImageResult => ({ ok: true, value }),
+        (error): ReferenceImageResult => ({ ok: false, error }),
+      );
     }
 
     let assetInput: AssetInput;
@@ -239,7 +242,14 @@ export async function runQaForAsset(input: RunQaInput): Promise<RunQaOutput> {
       assetInput = { kind: "image", image: imageBytes };
     }
 
-    const referenceImage = await referenceImagePromise;
+    const referenceImageResult = await referenceImagePromise;
+    if (!referenceImageResult.ok) {
+      throw new MediaFetchError(
+        `Reference image fetch failed for product ${asset.product.id}: ${(referenceImageResult.error as Error).message?.slice(0, 200)}`,
+        { cause: referenceImageResult.error },
+      );
+    }
+    const referenceImage = referenceImageResult.value;
 
     // 5. Provider — evaluate.
     const provider =
