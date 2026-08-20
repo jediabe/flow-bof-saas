@@ -172,6 +172,25 @@ function safeErrorCode(value: string | null | undefined): string | null {
   return value;
 }
 
+function audioRetryStartTokenMatches(
+  operation: ContentOperationRecord,
+  attemptNumber: number,
+  token: string,
+): boolean {
+  try {
+    const parsed = operation.errorJson ? JSON.parse(operation.errorJson) : null;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+    const record = parsed as Record<string, unknown>;
+    return (
+      record.code === "AUDIO_RETRY_START_IN_PROGRESS" &&
+      record.attemptNumber === attemptNumber &&
+      record.token === token
+    );
+  } catch {
+    return false;
+  }
+}
+
 function requireAttemptNumber(value: number): number {
   if (!Number.isInteger(value) || value < 1 || value > MAX_ACCEPTED_PROVIDER_ATTEMPTS) {
     throw new RangeError(
@@ -500,6 +519,9 @@ export function createOperationRepository(
         input.sourceImageMediaGenerationId,
         "sourceImageMediaGenerationId",
       );
+      const audioRetryStartToken = input.audioRetryStartToken
+        ? requiredAuditToken(input.audioRetryStartToken, "audioRetryStartToken")
+        : null;
       if (!(ALLOWED_MANAGED_VIDEO_MODELS as readonly string[]).includes(input.model)) {
         throw new TypeError("model must be an allowed managed video model");
       }
@@ -535,6 +557,12 @@ export function createOperationRepository(
         );
       }
       if (current.providerJobId || attemptNumber !== expectedAttemptNumber) {
+        throw staleAttempt(scope, current);
+      }
+      if (
+        audioRetryStartToken &&
+        !audioRetryStartTokenMatches(current, attemptNumber, audioRetryStartToken)
+      ) {
         throw staleAttempt(scope, current);
       }
       if (current.technicalAttemptCount < 1 || current.technicalAttemptCount > 3) {
@@ -590,6 +618,7 @@ export function createOperationRepository(
           providerAttemptNumber: attemptNumber,
           providerAttemptsJson,
           resultJson,
+          errorJson: null,
         },
       });
       const persisted = await requireScoped(scope);

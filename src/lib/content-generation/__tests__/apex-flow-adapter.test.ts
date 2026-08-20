@@ -212,6 +212,7 @@ describe("APEX Flow generation adapter", () => {
         status: "failed",
         providerJobId: "provider-job-1",
         reason: "Provider render failed",
+        failureKind: "provider",
       },
     ],
   ] as const)("normalizes a %s video poll", async (status, expected) => {
@@ -236,6 +237,58 @@ describe("APEX Flow generation adapter", () => {
     await expect(
       adapter.pollVideo({ providerJobId: "provider-job-1" }),
     ).resolves.toEqual(expected);
+  });
+
+  it.each([
+    ["structured error code", { errorCode: "audio_generation_failed", error: "render failed" }, "audio_generation_failed"],
+    ["structured code", { code: "audio_generation_error", error: "render failed" }, "audio_generation_error"],
+    ["structured failure code", { failureCode: "failed_to_generate_audio", error: "render failed" }, "failed_to_generate_audio"],
+    ["narrow reason phrase", { error: "Audio generation failed while rendering narration" }, null],
+  ] as const)("classifies failed video poll audio generation failures from %s", async (_label, failureFields, expectedCode) => {
+    const adapter = createApexFlowAdapter(boundContext, {
+      callTool: mockCaller({
+        jobId: "provider-job-1",
+        type: "video",
+        status: "failed",
+        media: [],
+        ...failureFields,
+      }),
+    });
+
+    await expect(
+      adapter.pollVideo({ providerJobId: "provider-job-1" }),
+    ).resolves.toEqual({
+      status: "failed",
+      providerJobId: "provider-job-1",
+      reason: failureFields.error,
+      failureKind: "audio_generation",
+      ...(expectedCode ? { errorCode: expectedCode } : {}),
+    });
+  });
+
+  it.each([
+    ["generic provider code", { errorCode: "render_failed", error: "Provider render failed" }],
+    ["ambiguous audio text", { error: "audio stream unavailable" }],
+    ["unsafe code characters", { errorCode: "audio_generation_failed; DROP TABLE", error: "Provider render failed" }],
+  ] as const)("keeps %s failed video poll in provider failure lane", async (_label, failureFields) => {
+    const adapter = createApexFlowAdapter(boundContext, {
+      callTool: mockCaller({
+        jobId: "provider-job-1",
+        type: "video",
+        status: "failed",
+        media: [],
+        ...failureFields,
+      }),
+    });
+
+    await expect(
+      adapter.pollVideo({ providerJobId: "provider-job-1" }),
+    ).resolves.toEqual({
+      status: "failed",
+      providerJobId: "provider-job-1",
+      reason: failureFields.error,
+      failureKind: "provider",
+    });
   });
 
   it("rejects a video poll whose returned job ID does not match the persisted job", async () => {
