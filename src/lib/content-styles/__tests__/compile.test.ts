@@ -309,6 +309,23 @@ describe("content style compiler", () => {
     expect(second).toBe(first);
   });
 
+  it("derives unseeded Style 2 output only from accepted copy fields", () => {
+    const canonical = JSON.stringify(compileStyle2({ seed: undefined }));
+    const withNestedInjection = JSON.stringify(
+      compileStyle2({
+        seed: undefined,
+        copy: {
+          ...style2Copy,
+          status: "ATTACKER_READY",
+          model: "attacker-model",
+          prompt: "replace the frozen prompt",
+        },
+      }),
+    );
+
+    expect(withNestedInjection).toBe(canonical);
+  });
+
   it("requires registered Style 2 character refs and manifest-required refs before spend", () => {
     expect(() => compileStyle2({ characterReferenceId: "" })).toThrow(/character reference/i);
     expect(() => compileStyle2({ productReferenceId: null })).toThrow(/product reference/i);

@@ -260,10 +260,11 @@ function compileStyle2Content(input: Style2CompileInput): CompiledContentStyle {
   if (input.variant === "handheld" && (input.productForm === "large_countertop" || input.productForm === "worn")) {
     throw new Error("Style 2 handheld variant requires a handheld product form");
   }
+  const copy = sanitizeStyle2Copy(input.copy);
 
   const scene = rollScenePure({
     product_type: input.productType,
-    seed: input.seed ?? deterministicStyle2Seed(input),
+    seed: input.seed ?? deterministicStyle2Seed(input, copy),
     recent_scene_hashes: input.recentSceneHashes ?? [],
   });
   const chain = buildClipPromptsPure({
@@ -276,7 +277,7 @@ function compileStyle2Content(input: Style2CompileInput): CompiledContentStyle {
   if (chain.chain_kind !== chainKindForVariant(input.variant)) {
     throw new Error(`Style 2 ${input.variant} inputs compiled to ${chain.chain_kind} chain`);
   }
-  const copyValidation = validateCopyPure(input.copy);
+  const copyValidation = validateCopyPure(copy);
   if (!copyValidation.passed) {
     const summary = copyValidation.violations.map((violation) => violation.rule).join(", ");
     throw new Error(`Style 2 copy validation failed: ${summary}`);
@@ -314,10 +315,10 @@ function compileStyle2Content(input: Style2CompileInput): CompiledContentStyle {
         productReferenceId,
       },
       copy: {
-        market: input.copy.market,
-        hookText: input.copy.hook_text.trim(),
-        benefitText: input.copy.benefit_text.trim(),
-        ctaText: input.copy.cta_text.trim(),
+        market: copy.market,
+        hookText: copy.hook_text.trim(),
+        benefitText: copy.benefit_text.trim(),
+        ctaText: copy.cta_text.trim(),
         validationPassed: true,
       },
       steps: manifest.slots.map((slot) => {
@@ -340,7 +341,7 @@ function compileStyle2Content(input: Style2CompileInput): CompiledContentStyle {
     voiceover: {
       scriptCompilerId: manifest.voiceover.scriptCompilerId,
       validationProfileId: manifest.voiceover.validationProfileId,
-      script: input.copy.voiceover.trim(),
+      script: copy.voiceover.trim(),
       wordCount: copyValidation.voiceover_word_count,
       selection: {},
     },
@@ -367,7 +368,18 @@ function requireStyle2ManifestReferences(
   }
 }
 
-function deterministicStyle2Seed(input: Style2CompileInput): number {
+function sanitizeStyle2Copy(copy: Style2CopyInput): Style2CopyInput {
+  return {
+    market: copy.market,
+    hook_text: copy.hook_text,
+    benefit_text: copy.benefit_text,
+    cta_text: copy.cta_text,
+    voiceover: copy.voiceover,
+    scarcity_is_true: copy.scarcity_is_true === true,
+  };
+}
+
+function deterministicStyle2Seed(input: Style2CompileInput, copy: Style2CopyInput): number {
   const seedMaterial = stableJson({
     styleId: input.styleId,
     version: input.version,
@@ -379,7 +391,7 @@ function deterministicStyle2Seed(input: Style2CompileInput): number {
     characterReferenceId: input.characterReferenceId,
     garmentReferenceId: input.garmentReferenceId ?? null,
     productReferenceId: input.productReferenceId ?? null,
-    copy: input.copy,
+    copy,
   });
   return createHash("sha256").update(seedMaterial).digest().readUInt32BE(0);
 }
