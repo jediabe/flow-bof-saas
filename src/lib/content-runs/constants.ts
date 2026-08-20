@@ -129,6 +129,7 @@ export const MANAGED_STYLE1_POLICY = {
   creativeAttemptsPerSlot: 1,
   maxTechnicalRetries: 2,
   maxTransportAttempts: 3,
+  maxAcceptedProviderAttempts: 4,
   activeProviderOperationsPerWorkspace: 1,
   qaRequired: true,
   automaticSemanticRepair: false,
@@ -136,5 +137,12 @@ export const MANAGED_STYLE1_POLICY = {
 
 export const MANAGED_CONTENT_STORAGE_PREFIX = "managed-content" as const;
 export const DEFAULT_FLOW_IMAGE_MODEL = "nano-banana-pro" as const;
-export const DEFAULT_FLOW_VIDEO_MODEL = "veo-3.1-lite" as const;
+export const ALLOWED_MANAGED_VIDEO_MODELS = [
+  "veo-3.1-lite-low-priority",
+  "veo-3.1-lite",
+  "veo-3.1-fast",
+  "veo-3.1-quality",
+] as const;
+export type ManagedVideoModel = (typeof ALLOWED_MANAGED_VIDEO_MODELS)[number];
+export const DEFAULT_FLOW_VIDEO_MODEL = ALLOWED_MANAGED_VIDEO_MODELS[0];
 export const FLOW_PROVIDER = "google_flow_useapi" as const;

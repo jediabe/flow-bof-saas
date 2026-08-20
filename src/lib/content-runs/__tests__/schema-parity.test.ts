@@ -80,7 +80,7 @@ describe("managed Style 1 Prisma schema contract", () => {
         /^\s*flowImageModel\s+String\s+@default\("nano-banana-pro"\)/m,
       );
       expect(settings).toMatch(
-        /^\s*flowVideoModel\s+String\s+@default\("veo-3\.1-lite"\)/m,
+        /^\s*flowVideoModel\s+String\s+@default\("veo-3\.1-lite-low-priority"\)/m,
       );
 
       const run = modelBody(schema, "ContentRun");
@@ -96,6 +96,12 @@ describe("managed Style 1 Prisma schema contract", () => {
       const operation = modelBody(schema, "ContentOperation");
       expectField(operation, "idempotencyKey", "String");
       expectField(operation, "providerJobId", "String?");
+      expect(operation).toMatch(
+        /^\s*providerAttemptNumber\s+Int\s+@default\(0\)/m,
+      );
+      expect(operation).toMatch(
+        /^\s*providerAttemptsJson\s+String\s+@default\("\[\]"\)/m,
+      );
       expect(operation).toContain("@@unique([workspaceId, idempotencyKey])");
       expect(operation).toContain("@@index([contentRunId, createdAt])");
       expect(operation).toContain("@@index([workspaceId, status])");

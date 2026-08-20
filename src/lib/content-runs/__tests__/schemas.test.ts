@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  ALLOWED_MANAGED_VIDEO_MODELS,
   ASSET_TYPES,
   CONTENT_RUN_STATES,
   CONTENT_SLOTS,
@@ -112,7 +113,6 @@ describe("Hermes tool input schemas", () => {
     workspaceId: "workspace_attacker",
     flowEmail: "attacker@example.test",
     imageModel: "attacker-image-model",
-    videoModel: "attacker-video-model",
     qaDecision: "APPROVE",
     qaScore: 100,
     status: "ready",
@@ -133,6 +133,36 @@ describe("Hermes tool input schemas", () => {
       }
     });
   }
+
+  it("accepts exactly the approved human video model overrides on run creation", () => {
+    for (const videoModel of ALLOWED_MANAGED_VIDEO_MODELS) {
+      expect(
+        TOOL_INPUT_SCHEMAS.content_create_style1_run.safeParse({
+          ...validInputs.content_create_style1_run,
+          videoModel,
+        }).success,
+      ).toBe(true);
+    }
+    for (const videoModel of ["omni-flash", "veo-3.1", "custom-model", ""]) {
+      expect(
+        TOOL_INPUT_SCHEMAS.content_create_style1_run.safeParse({
+          ...validInputs.content_create_style1_run,
+          videoModel,
+        }).success,
+      ).toBe(false);
+    }
+  });
+
+  it("keeps video model injection forbidden outside run creation", () => {
+    for (const [toolName, input] of Object.entries(validInputs)) {
+      if (toolName === "content_create_style1_run") continue;
+      const schema = TOOL_INPUT_SCHEMAS[toolName as keyof typeof TOOL_INPUT_SCHEMAS];
+      expect(
+        schema.safeParse({ ...input, videoModel: "veo-3.1-lite" }).success,
+        `${toolName} unexpectedly accepted videoModel`,
+      ).toBe(false);
+    }
+  });
 
   it("restricts image and video commands to their own canonical slots", () => {
     expect(

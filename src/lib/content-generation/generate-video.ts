@@ -1,7 +1,11 @@
 import type { PrismaClient } from "@prisma/client";
 
 import { db } from "@/lib/db";
-import { SLOT_DEFINITIONS } from "@/lib/content-runs/constants";
+import {
+  ALLOWED_MANAGED_VIDEO_MODELS,
+  SLOT_DEFINITIONS,
+  type ManagedVideoModel,
+} from "@/lib/content-runs/constants";
 import { projectContentRun } from "@/lib/content-runs/project-run";
 import type { ServiceActorContext, VideoSlot } from "@/lib/content-runs/types";
 import {
@@ -122,7 +126,7 @@ export class ManagedVideoGenerationError extends Error {
 
 interface FrozenVideoSlot {
   prompt: string;
-  model: string;
+  model: ManagedVideoModel;
   aspectRatio: string;
   durationSeconds: number;
   sourceSlot: string;
@@ -249,6 +253,7 @@ function readFrozenVideoSlot(
   if (
     slotRecord?.mediaType !== "video" ||
     !model ||
+    !(ALLOWED_MANAGED_VIDEO_MODELS as readonly string[]).includes(model) ||
     !prompt ||
     !aspectRatio ||
     !sourceSlot ||
@@ -265,7 +270,7 @@ function readFrozenVideoSlot(
 
   return {
     prompt,
-    model,
+    model: model as ManagedVideoModel,
     aspectRatio,
     durationSeconds: durationSeconds as number,
     sourceSlot,
@@ -844,7 +849,10 @@ export async function generateManagedStyle1Video(
           }),
       });
       operation = await operations.recordAcceptedVideoStart(scope, {
+        attemptNumber:
+          operation.providerAttemptNumber === 0 ? 1 : operation.providerAttemptNumber,
         providerJobId: started.providerJobId,
+        model: frozen.model,
         sourceImageId: source.id,
         sourceImageMediaGenerationId: source.mediaGenerationId,
       });

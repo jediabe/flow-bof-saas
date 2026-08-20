@@ -1,3 +1,5 @@
+import type { ManagedVideoModel } from "@/lib/content-runs/constants";
+
 export const CONTENT_GENERATION_ERROR_CODES = [
   "WORKSPACE_PROVIDER_BUSY",
   "IDEMPOTENCY_CONFLICT",
@@ -7,6 +9,11 @@ export const CONTENT_GENERATION_ERROR_CODES = [
   "CONTENT_RUN_WORKSPACE_MISMATCH",
   "PROVIDER_JOB_ALREADY_ACCEPTED",
   "PROVIDER_VIDEO_START_PERSISTENCE_FAILED",
+  "PROVIDER_ATTEMPT_STALE",
+  "PROVIDER_ATTEMPT_AUDIT_CONFLICT",
+  "PROVIDER_ATTEMPT_AUDIT_INVALID",
+  "PROVIDER_ATTEMPT_LIMIT_REACHED",
+  "AUDIO_RETRY_NOT_ALLOWED",
   "TECHNICAL_RETRY_EXHAUSTED",
 ] as const;
 
@@ -67,6 +74,8 @@ export interface ContentOperationRecord {
   idempotencyKey: string;
   provider: string;
   providerJobId: string | null;
+  providerAttemptNumber: number;
+  providerAttemptsJson: string;
   technicalAttemptCount: number;
   creativeDirectionJson: string | null;
   resultJson: string | null;
@@ -75,6 +84,49 @@ export interface ContentOperationRecord {
   completedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
+}
+
+export type AcceptedProviderAttemptFailureKind = "audio_generation" | "provider";
+
+export interface AcceptedProviderAttemptAudit {
+  attemptNumber: number;
+  providerJobId: string;
+  model: ManagedVideoModel;
+  transportAttemptCount: number;
+  status: "running" | "succeeded" | "failed";
+  failureKind: AcceptedProviderAttemptFailureKind | null;
+  errorCode: string | null;
+  acceptedAt: string;
+  completedAt: string | null;
+}
+
+export interface RecordAcceptedVideoStartInput {
+  attemptNumber: number;
+  providerJobId: string;
+  model: ManagedVideoModel;
+  sourceImageId: string;
+  sourceImageMediaGenerationId: string;
+}
+
+export type TerminalizeProviderAttemptInput =
+  | {
+      attemptNumber: number;
+      providerJobId: string;
+      status: "succeeded";
+      failureKind?: null;
+      errorCode?: null;
+    }
+  | {
+      attemptNumber: number;
+      providerJobId: string;
+      status: "failed";
+      failureKind: AcceptedProviderAttemptFailureKind;
+      errorCode?: string | null;
+    };
+
+export interface PrepareAudioRetryInput {
+  attemptNumber: number;
+  providerJobId: string;
 }
 
 interface CreateOperationBaseInput {

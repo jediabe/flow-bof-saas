@@ -1,6 +1,10 @@
 import { db } from "@/lib/db";
 import { toServerFlowDefaults } from "@/lib/workspace-settings";
-import { MANAGED_STYLE1_POLICY } from "./constants";
+import {
+  ALLOWED_MANAGED_VIDEO_MODELS,
+  MANAGED_STYLE1_POLICY,
+  type ManagedVideoModel,
+} from "./constants";
 import {
   ContentRunCreationError,
 } from "./errors";
@@ -14,6 +18,7 @@ export interface CreateStyle1RunInput {
   workspaceId: string;
   productId: string;
   idempotencyKey: string;
+  videoModel?: ManagedVideoModel;
 }
 
 type RunResult = Awaited<ReturnType<typeof db.contentRun.create>>;
@@ -62,6 +67,16 @@ export async function createStyle1Run(input: CreateStyle1RunInput): Promise<RunR
   const workspaceId = requiredValue(input.workspaceId, "workspaceId");
   const productId = requiredValue(input.productId, "productId");
   const idempotencyKey = requiredValue(input.idempotencyKey, "idempotencyKey");
+  if (
+    input.videoModel !== undefined &&
+    !(ALLOWED_MANAGED_VIDEO_MODELS as readonly string[]).includes(input.videoModel)
+  ) {
+    throw new ContentRunCreationError(
+      "INVALID_FLOW_MODEL",
+      "The explicit video model override is not allowed for managed Style 1.",
+      { field: "videoModel" },
+    );
+  }
   const uniqueWhere = { productId_idempotencyKey: { productId, idempotencyKey } };
 
   try {
@@ -181,7 +196,7 @@ export async function createStyle1Run(input: CreateStyle1RunInput): Promise<RunR
         },
         modelSnapshot: {
           imageModel: flow.imageModel,
-          videoModel: flow.videoModel,
+          videoModel: input.videoModel ?? flow.videoModel,
         },
         prompts: plan.prompts,
         slots: plan.slots,

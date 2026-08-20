@@ -101,7 +101,7 @@ beforeEach(() => {
     workspaceId: "workspace-1",
     flowEmail: "operator@example.test",
     flowImageModel: "nano-banana-pro",
-    flowVideoModel: "veo-3.1-lite",
+    flowVideoModel: "veo-3.1-lite-low-priority",
   };
   vi.clearAllMocks();
 });
@@ -123,7 +123,7 @@ describe("createStyle1Run", () => {
     expect(snapshot.specVersion).toBe("managed-style1-v1");
     expect(snapshot.modelSnapshot).toEqual({
       imageModel: "nano-banana-pro",
-      videoModel: "veo-3.1-lite",
+      videoModel: "veo-3.1-lite-low-priority",
     });
     expect(Object.keys(snapshot.prompts)).toEqual([
       "scene_1_store_image",
@@ -186,8 +186,77 @@ describe("createStyle1Run", () => {
 
     expect(JSON.parse(run.promptSnapshotJson!).modelSnapshot).toEqual({
       imageModel: "nano-banana-pro",
-      videoModel: "veo-3.1-lite",
+      videoModel: "veo-3.1-lite-low-priority",
     });
+  });
+
+  it("freezes an allowed deterministic workspace video default when no override is supplied", async () => {
+    database.state.settings = {
+      ...database.state.settings,
+      flowVideoModel: "veo-3.1-quality",
+    };
+
+    const run = await createStyle1Run({
+      workspaceId: "workspace-1",
+      productId: "product-1",
+      idempotencyKey: "objective-workspace-video-model",
+    });
+
+    expect(JSON.parse(run.promptSnapshotJson!).modelSnapshot.videoModel).toBe(
+      "veo-3.1-quality",
+    );
+  });
+
+  it.each([
+    "veo-3.1-lite-low-priority",
+    "veo-3.1-lite",
+    "veo-3.1-fast",
+    "veo-3.1-quality",
+  ] as const)("freezes the explicit human video model override %s", async (videoModel) => {
+    const run = await createStyle1Run({
+      workspaceId: "workspace-1",
+      productId: "product-1",
+      idempotencyKey: `objective-${videoModel}`,
+      videoModel,
+    });
+
+    expect(JSON.parse(run.promptSnapshotJson!).modelSnapshot.videoModel).toBe(videoModel);
+  });
+
+  it.each(["omni-flash", "custom-model", "", " veo-3.1-lite "])(
+    "rejects invalid explicit video model override %j before creating a run",
+    async (videoModel) => {
+      await expect(
+        createStyle1Run({
+          workspaceId: "workspace-1",
+          productId: "product-1",
+          idempotencyKey: "objective-invalid-override",
+          videoModel: videoModel as never,
+        }),
+      ).rejects.toMatchObject({
+        code: "INVALID_FLOW_MODEL",
+        details: { field: "videoModel" },
+      });
+      expect(database.client.$transaction).not.toHaveBeenCalled();
+      expect(database.client.product.findFirst).not.toHaveBeenCalled();
+      expect(database.client.contentRun.create).not.toHaveBeenCalled();
+    },
+  );
+
+  it("binds an idempotency key to the first frozen explicit model", async () => {
+    const base = {
+      workspaceId: "workspace-1",
+      productId: "product-1",
+      idempotencyKey: "objective-model-bound",
+    };
+    const original = await createStyle1Run({ ...base, videoModel: "veo-3.1-fast" });
+    const replay = await createStyle1Run({ ...base, videoModel: "veo-3.1-quality" });
+
+    expect(replay).toBe(original);
+    expect(JSON.parse(replay.promptSnapshotJson!).modelSnapshot.videoModel).toBe(
+      "veo-3.1-fast",
+    );
+    expect(database.client.contentRun.create).toHaveBeenCalledTimes(1);
   });
 
   it("returns the same frozen run for the same idempotency key", async () => {

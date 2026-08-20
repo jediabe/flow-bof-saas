@@ -386,13 +386,26 @@ describe("generateManagedStyle1Video", () => {
         type: "WAIT_FOR_OPERATION",
       },
     });
-    await expect(
-      prisma.contentOperation.findFirstOrThrow({ where: { contentRunId } }),
-    ).resolves.toMatchObject({
+    const acceptedOperation = await prisma.contentOperation.findFirstOrThrow({
+      where: { contentRunId },
+    });
+    expect(acceptedOperation).toMatchObject({
       status: "running",
       providerJobId: "provider-job-1",
+      providerAttemptNumber: 1,
       technicalAttemptCount: 1,
     });
+    expect(JSON.parse(acceptedOperation.providerAttemptsJson)).toEqual([
+      expect.objectContaining({
+        attemptNumber: 1,
+        providerJobId: "provider-job-1",
+        model: "veo-3.1-lite",
+        transportAttemptCount: 1,
+        status: "running",
+        failureKind: null,
+        errorCode: null,
+      }),
+    ]);
     await expect(prisma.workspaceProviderLock.count()).resolves.toBe(1);
     await expect(
       prisma.flowGeneratedImage.findUniqueOrThrow({ where: { id: sourceImageId } }),
