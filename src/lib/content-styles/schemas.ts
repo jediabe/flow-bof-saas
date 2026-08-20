@@ -64,6 +64,191 @@ const EXPECTED_TOPOLOGIES: Record<string, readonly ExpectedSlot[]> = {
   ),
 };
 
+const frozenSlot = (
+  id: string,
+  order: number,
+  mediaType: "image" | "video",
+  sourceDependency: string | null,
+  promptCompilerId: string,
+  requiredReferences: readonly ("avatar" | "garment" | "product")[],
+  providerRequestDurationSeconds: number | null,
+) => ({
+  id,
+  order,
+  mediaType,
+  required: true,
+  sourceDependency,
+  promptCompilerId,
+  attachmentPolicy: {
+    requiredReferences: [...requiredReferences],
+    startImageFromSlot: sourceDependency,
+  },
+  providerRequestDurationSeconds,
+});
+
+const frozenStyle2Policy = (
+  variant: "handheld" | "large_countertop" | "worn",
+  slots: ReturnType<typeof frozenSlot>[],
+  clipIds: string[],
+  durations: number[],
+) => ({
+  styleId: "style2",
+  version: "managed-style2-v1",
+  variant,
+  slots,
+  creativeDirectionProfileId: "style2.locked-avatar-direction.v1",
+  voiceover: {
+    required: true,
+    scriptCompilerId: "style2.validated-copy-script.v1",
+    validationProfileId: "style2.voiceover-70-75-words.v1",
+  },
+  assembly: {
+    clips: clipIds.map((slotId, order) => ({
+      order,
+      slotId,
+      trimStartSeconds: 0,
+      trimEndSeconds: durations[order],
+      durationSeconds: durations[order],
+      nativeAudioMode: "mute",
+    })),
+    output: {
+      width: 1080,
+      height: 1920,
+      fps: 30,
+      audioMix: { voiceoverGainDb: 0, nativeAudioGainDb: -60, duckingThresholdDb: -24 },
+      finalDurationSeconds: durations.reduce((sum, duration) => sum + duration, 0),
+    },
+  },
+  qa: {
+    sceneRequired: true,
+    finalRequired: true,
+    sceneProfileId: "style2.scene-qa.v1",
+    finalProfileId: "managed.final-av-qa.v1",
+  },
+  finalOutput: { required: true, container: "mp4", videoCodec: "h264", audioCodec: "aac" },
+});
+
+const style2AlternatingSlots = (variant: "handheld" | "large_countertop") =>
+  ["N1", "N2", "N3", "N4", "N5", "N6", "N7"].map((id, index) => {
+    const mediaType = index % 2 === 0 ? "video" : "image";
+    const dependency = index > 0 && index % 2 === 0 ? `N${index}` : null;
+    const references = mediaType === "image" ? (["avatar", "product"] as const) : (["avatar"] as const);
+    return frozenSlot(
+      id,
+      index,
+      mediaType,
+      dependency,
+      `style2.${variant}.${id.toLowerCase()}.v1`,
+      references,
+      mediaType === "video" ? 8 : null,
+    );
+  });
+
+const EXPECTED_MANIFEST_POLICIES: Record<string, unknown> = {
+  "style1@managed-style1-v1/store_discovery": {
+    styleId: "style1",
+    version: "managed-style1-v1",
+    variant: "store_discovery",
+    slots: [
+      frozenSlot("scene_1_store_image", 0, "image", null, "style1.store_image.v1", ["product"], null),
+      frozenSlot(
+        "scene_1_store_video",
+        1,
+        "video",
+        "scene_1_store_image",
+        "style1.store_video.v1",
+        [],
+        8,
+      ),
+      frozenSlot("scene_2_home_image", 2, "image", null, "style1.home_image.v1", ["product"], null),
+      frozenSlot(
+        "scene_2_home_video",
+        3,
+        "video",
+        "scene_2_home_image",
+        "style1.home_video.v1",
+        [],
+        8,
+      ),
+    ],
+    creativeDirectionProfileId: "style1.bounded-direction.v1",
+    voiceover: {
+      required: true,
+      scriptCompilerId: "style1.elevenlabs-script.v1",
+      validationProfileId: "style1.voiceover.v1",
+    },
+    assembly: {
+      clips: ["scene_1_store_video", "scene_2_home_video"].map((slotId, order) => ({
+        order,
+        slotId,
+        trimStartSeconds: 0,
+        trimEndSeconds: 8,
+        durationSeconds: 8,
+        nativeAudioMode: "duck",
+      })),
+      output: {
+        width: 1080,
+        height: 1920,
+        fps: 30,
+        audioMix: { voiceoverGainDb: 0, nativeAudioGainDb: -18, duckingThresholdDb: -24 },
+        finalDurationSeconds: 16,
+      },
+    },
+    qa: {
+      sceneRequired: true,
+      finalRequired: true,
+      sceneProfileId: "style1.scene-qa.v1",
+      finalProfileId: "managed.final-av-qa.v1",
+    },
+    finalOutput: { required: true, container: "mp4", videoCodec: "h264", audioCodec: "aac" },
+  },
+  "style2@managed-style2-v1/handheld": frozenStyle2Policy(
+    "handheld",
+    style2AlternatingSlots("handheld"),
+    ["N1", "N3", "N5", "N7"],
+    [4, 6, 6, 6],
+  ),
+  "style2@managed-style2-v1/large_countertop": frozenStyle2Policy(
+    "large_countertop",
+    style2AlternatingSlots("large_countertop"),
+    ["N1", "N3", "N5", "N7"],
+    [4, 6, 6, 6],
+  ),
+  "style2@managed-style2-v1/worn": frozenStyle2Policy(
+    "worn",
+    ["N1", "N2", "N3", "N4", "N5", "N6"].map((id, index) => {
+      const mediaType = index % 2 === 0 ? "image" : "video";
+      const dependency = index % 2 === 1 ? `N${index}` : null;
+      return frozenSlot(
+        id,
+        index,
+        mediaType,
+        dependency,
+        `style2.worn.${id.toLowerCase()}.v1`,
+        ["avatar", "garment"],
+        mediaType === "video" ? 8 : null,
+      );
+    }),
+    ["N2", "N4", "N6"],
+    [6, 6, 6],
+  ),
+};
+
+const canonicalJson = (value: unknown): string => {
+  const canonicalize = (entry: unknown): unknown => {
+    if (Array.isArray(entry)) return entry.map(canonicalize);
+    if (entry !== null && typeof entry === "object") {
+      return Object.fromEntries(
+        Object.entries(entry)
+          .sort(([left], [right]) => left.localeCompare(right))
+          .map(([key, nested]) => [key, canonicalize(nested)]),
+      );
+    }
+    return entry;
+  };
+  return JSON.stringify(canonicalize(value));
+};
+
 const ManifestAssetSlotSchema = z
   .object({
     id: IdentifierSchema,
@@ -150,6 +335,14 @@ export const StyleManifestSchema = z
   .strict()
   .superRefine((manifest, context) => {
     const topologyKey = `${manifest.styleId}@${manifest.version}/${manifest.variant}`;
+    const expectedPolicy = EXPECTED_MANIFEST_POLICIES[topologyKey];
+    if (!expectedPolicy || canonicalJson(manifest) !== canonicalJson(expectedPolicy)) {
+      context.addIssue({
+        code: "custom",
+        path: [],
+        message: "manifest must match the frozen style policy",
+      });
+    }
     const expectedTopology = EXPECTED_TOPOLOGIES[topologyKey];
     if (
       !expectedTopology ||

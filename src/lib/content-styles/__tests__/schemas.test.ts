@@ -78,4 +78,139 @@ describe("persistable style manifest schema", () => {
     manifest.creativeDirectionProfileId = "custom.direction";
     expect(StyleManifestSchema.safeParse(manifest).success).toBe(false);
   });
+
+  it.each([
+    [
+      "style1 attachment policy",
+      "style1",
+      "managed-style1-v1",
+      "store_discovery",
+      (manifest: any) => (manifest.slots[0].attachmentPolicy.requiredReferences = []),
+    ],
+    [
+      "style1 provider duration",
+      "style1",
+      "managed-style1-v1",
+      "store_discovery",
+      (manifest: any) => (manifest.slots[1].providerRequestDurationSeconds = 7),
+    ],
+    [
+      "style1 native-audio policy",
+      "style1",
+      "managed-style1-v1",
+      "store_discovery",
+      (manifest: any) => (manifest.assembly.clips[0].nativeAudioMode = "preserve"),
+    ],
+    [
+      "style1 output policy",
+      "style1",
+      "managed-style1-v1",
+      "store_discovery",
+      (manifest: any) => {
+        manifest.assembly.output.width = 1920;
+        manifest.assembly.output.height = 1080;
+      },
+    ],
+    [
+      "style1 creative-direction profile",
+      "style1",
+      "managed-style1-v1",
+      "store_discovery",
+      (manifest: any) => (manifest.creativeDirectionProfileId = "style2.locked-avatar-direction.v1"),
+    ],
+    [
+      "style1 voiceover policy",
+      "style1",
+      "managed-style1-v1",
+      "store_discovery",
+      (manifest: any) => {
+        manifest.voiceover.scriptCompilerId = "style2.validated-copy-script.v1";
+        manifest.voiceover.validationProfileId = "style2.voiceover-70-75-words.v1";
+      },
+    ],
+    [
+      "style1 scene-QA profile",
+      "style1",
+      "managed-style1-v1",
+      "store_discovery",
+      (manifest: any) => (manifest.qa.sceneProfileId = "style2.scene-qa.v1"),
+    ],
+    [
+      "handheld self-consistent trim policy",
+      "style2",
+      "managed-style2-v1",
+      "handheld",
+      (manifest: any) => {
+        manifest.assembly.clips[0].trimEndSeconds = 5;
+        manifest.assembly.clips[0].durationSeconds = 5;
+        manifest.assembly.output.finalDurationSeconds = 23;
+      },
+    ],
+    [
+      "handheld ordered assembly policy",
+      "style2",
+      "managed-style2-v1",
+      "handheld",
+      (manifest: any) => {
+        const firstSlotId = manifest.assembly.clips[0].slotId;
+        manifest.assembly.clips[0].slotId = manifest.assembly.clips[1].slotId;
+        manifest.assembly.clips[1].slotId = firstSlotId;
+      },
+    ],
+    [
+      "large-countertop provider duration",
+      "style2",
+      "managed-style2-v1",
+      "large_countertop",
+      (manifest: any) => (manifest.slots[0].providerRequestDurationSeconds = 7),
+    ],
+    [
+      "large-countertop attachment policy",
+      "style2",
+      "managed-style2-v1",
+      "large_countertop",
+      (manifest: any) => (manifest.slots[1].attachmentPolicy.requiredReferences = ["avatar"]),
+    ],
+    [
+      "worn creative-direction profile",
+      "style2",
+      "managed-style2-v1",
+      "worn",
+      (manifest: any) => (manifest.creativeDirectionProfileId = "style1.bounded-direction.v1"),
+    ],
+    [
+      "worn voiceover policy",
+      "style2",
+      "managed-style2-v1",
+      "worn",
+      (manifest: any) => {
+        manifest.voiceover.scriptCompilerId = "style1.elevenlabs-script.v1";
+        manifest.voiceover.validationProfileId = "style1.voiceover.v1";
+      },
+    ],
+    [
+      "worn scene-QA profile",
+      "style2",
+      "managed-style2-v1",
+      "worn",
+      (manifest: any) => (manifest.qa.sceneProfileId = "style1.scene-qa.v1"),
+    ],
+    [
+      "worn output policy",
+      "style2",
+      "managed-style2-v1",
+      "worn",
+      (manifest: any) => {
+        manifest.assembly.output.width = 1920;
+        manifest.assembly.output.height = 1080;
+      },
+    ],
+  ])(
+    "rejects frozen-policy drift in %s",
+    (_label, styleId, version, variant, mutate) => {
+      const manifest: any = clone(compileStyleManifest(styleId, version, variant));
+      mutate(manifest);
+      expect(StyleManifestSchema.safeParse(manifest).success).toBe(false);
+    },
+  );
 });
