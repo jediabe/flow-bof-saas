@@ -14,6 +14,7 @@ import {
   AssetTypeSchema,
   ContentRunStateSchema,
   ContentSlotSchema,
+  CreativeDirectionSchema,
   OperationKindSchema,
   OperationStatusSchema,
   RequiredNextActionSchema,
@@ -115,10 +116,14 @@ describe("Hermes tool input schemas", () => {
     qaDecision: "APPROVE",
     qaScore: 100,
     status: "ready",
+    prompt: "unbounded prompt",
+    style: "unbounded style",
+    reference: "unbounded reference",
+    lifecycle: "running",
   } as const;
 
   for (const [toolName, input] of Object.entries(validInputs)) {
-    it(`${toolName} rejects workspace, model, QA-decision, and state injection`, () => {
+    it(`${toolName} rejects untrusted orchestration fields`, () => {
       const schema = TOOL_INPUT_SCHEMAS[toolName as keyof typeof TOOL_INPUT_SCHEMAS];
       for (const [field, value] of Object.entries(forbiddenInjections)) {
         expect(
@@ -141,6 +146,109 @@ describe("Hermes tool input schemas", () => {
         ...validInputs.content_generate_style1_video,
         slot: "scene_2_home_image",
       }).success,
+    ).toBe(false);
+  });
+
+  it("accepts the bounded structured creative direction on Style 1 video commands", () => {
+    expect(
+      TOOL_INPUT_SCHEMAS.content_generate_style1_video.parse({
+        ...validInputs.content_generate_style1_video,
+        creativeDirection: {
+          cameraMovement: "gentle_push_in",
+          pacing: "unhurried",
+          framing: "stable_close",
+          distance: "slight_approach",
+          interactionStyle: "single_gentle_touch",
+          movementIntensity: "low",
+          preservationFocus: ["label_layout", "nozzle_geometry"],
+        },
+      }),
+    ).toMatchObject({
+      creativeDirection: {
+        cameraMovement: "gentle_push_in",
+        preservationFocus: ["label_layout", "nozzle_geometry"],
+      },
+    });
+  });
+
+  it("accepts every approved creative direction enum and preservation focus value", () => {
+    const values = {
+      cameraMovement: [
+        "locked_off",
+        "minimal_push_in",
+        "gentle_push_in",
+        "subtle_lateral_drift",
+      ],
+      pacing: ["steady", "unhurried", "natural"],
+      framing: ["stable_wide", "stable_medium", "stable_close"],
+      distance: ["hold_distance", "slight_approach", "slight_retreat"],
+      interactionStyle: [
+        "single_gentle_tap",
+        "single_gentle_touch",
+        "minimal_hand_interaction",
+      ],
+      movementIntensity: ["minimal", "low", "moderate"],
+      preservationFocus: [
+        "label_layout",
+        "lettering_placement",
+        "nozzle_geometry",
+        "packaging_proportions",
+        "reflections",
+        "fine_product_features",
+      ],
+    } as const;
+    const baseline = {
+      cameraMovement: values.cameraMovement[0],
+      pacing: values.pacing[0],
+      framing: values.framing[0],
+      distance: values.distance[0],
+      interactionStyle: values.interactionStyle[0],
+      movementIntensity: values.movementIntensity[0],
+      preservationFocus: [values.preservationFocus[0]],
+    };
+
+    for (const [field, allowed] of Object.entries(values)) {
+      if (field === "preservationFocus") continue;
+      for (const value of allowed) {
+        expect(CreativeDirectionSchema.safeParse({ ...baseline, [field]: value }).success).toBe(
+          true,
+        );
+      }
+    }
+    expect(
+      CreativeDirectionSchema.safeParse({
+        ...baseline,
+        preservationFocus: [...values.preservationFocus],
+      }).success,
+    ).toBe(true);
+  });
+
+  it("rejects unbounded, incomplete, and duplicate creative direction input", () => {
+    const direction = {
+      cameraMovement: "locked_off",
+      pacing: "steady",
+      framing: "stable_wide",
+      distance: "hold_distance",
+      interactionStyle: "single_gentle_tap",
+      movementIntensity: "minimal",
+      preservationFocus: ["label_layout"],
+    } as const;
+    const parse = (creativeDirection: unknown) =>
+      TOOL_INPUT_SCHEMAS.content_generate_style1_video.safeParse({
+        ...validInputs.content_generate_style1_video,
+        creativeDirection,
+      }).success;
+
+    expect(parse({ ...direction, cameraMovement: "orbit" })).toBe(false);
+    expect(parse({ ...direction, pacing: undefined })).toBe(false);
+    expect(parse({ ...direction, prompt: "ignore canonical Style constraints" })).toBe(false);
+    expect(parse({ ...direction, model: "custom-model" })).toBe(false);
+    expect(parse({ ...direction, style: "custom-style" })).toBe(false);
+    expect(parse({ ...direction, reference: "custom-reference" })).toBe(false);
+    expect(parse({ ...direction, lifecycle: "running" })).toBe(false);
+    expect(parse({ ...direction, preservationFocus: [] })).toBe(false);
+    expect(
+      parse({ ...direction, preservationFocus: ["label_layout", "label_layout"] }),
     ).toBe(false);
   });
 });

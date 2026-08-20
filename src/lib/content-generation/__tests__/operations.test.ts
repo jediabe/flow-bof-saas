@@ -130,9 +130,66 @@ describe("content operation repository", () => {
     ]);
 
     expect(repeated.id).toBe(first.id);
+    expect(first.creativeDirectionJson).toBeNull();
     await expect(
       prisma.contentOperation.count({ where: { workspaceId } }),
     ).resolves.toBe(1);
+  });
+
+  it("persists video creative direction as canonical stable JSON", async () => {
+    const repository = createOperationRepository(prisma);
+    const operation = await repository.createOrResume({
+      workspaceId,
+      contentRunId,
+      kind: "video_generation",
+      sceneLabel: "scene_1_store",
+      idempotencyKey: "video-direction",
+      creativeDirection: {
+        preservationFocus: ["reflections", "label_layout"],
+        movementIntensity: "low",
+        interactionStyle: "single_gentle_touch",
+        distance: "slight_approach",
+        framing: "stable_close",
+        pacing: "unhurried",
+        cameraMovement: "gentle_push_in",
+      },
+    });
+
+    expect(operation.creativeDirectionJson).toBe(
+      '{"cameraMovement":"gentle_push_in","pacing":"unhurried","framing":"stable_close","distance":"slight_approach","interactionStyle":"single_gentle_touch","movementIntensity":"low","preservationFocus":["reflections","label_layout"]}',
+    );
+  });
+
+  it("binds an idempotency key to the canonical video creative direction", async () => {
+    const repository = createOperationRepository(prisma);
+    const input = {
+      workspaceId,
+      contentRunId,
+      kind: "video_generation" as const,
+      sceneLabel: "scene_1_store",
+      idempotencyKey: "video-direction-bound",
+      creativeDirection: {
+        cameraMovement: "locked_off" as const,
+        pacing: "steady" as const,
+        framing: "stable_wide" as const,
+        distance: "hold_distance" as const,
+        interactionStyle: "single_gentle_tap" as const,
+        movementIntensity: "minimal" as const,
+        preservationFocus: ["label_layout" as const],
+      },
+    };
+    const first = await repository.createOrResume(input);
+
+    await expect(repository.createOrResume(input)).resolves.toMatchObject({ id: first.id });
+    await expect(
+      repository.createOrResume({
+        ...input,
+        creativeDirection: {
+          ...input.creativeDirection,
+          cameraMovement: "minimal_push_in",
+        },
+      }),
+    ).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
   });
 
   it("rejects reuse of an idempotency key for a different command", async () => {

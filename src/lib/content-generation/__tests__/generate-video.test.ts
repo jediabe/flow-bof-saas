@@ -11,6 +11,7 @@ import type { ObjectStorage, PutManagedObjectInput } from "@/lib/storage";
 import { createApexFlowAdapter, type ApexFlowAdapter } from "../apex-flow-adapter";
 import { generateManagedStyle1Video } from "../generate-video";
 import { createOperationRepository } from "../operations";
+import type { VideoCreativeDirection } from "../types";
 
 const MP4_BYTES = new Uint8Array([
   0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d,
@@ -18,6 +19,16 @@ const MP4_BYTES = new Uint8Array([
 const databasePath = resolve(tmpdir(), `generate-video-${randomUUID()}.db`);
 const databaseUrl = `file:${databasePath.replaceAll("\\", "/")}`;
 const prisma = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
+
+const creativeDirection: VideoCreativeDirection = {
+  cameraMovement: "gentle_push_in",
+  pacing: "unhurried",
+  framing: "stable_close",
+  distance: "slight_approach",
+  interactionStyle: "single_gentle_touch",
+  movementIntensity: "low",
+  preservationFocus: ["label_layout", "nozzle_geometry"],
+};
 
 let workspaceId: string;
 let contentRunId: string;
@@ -226,6 +237,46 @@ afterAll(async () => {
 });
 
 describe("generateManagedStyle1Video", () => {
+  it("binds creative direction to the reservation and rejects a changed same-key replay before provider work", async () => {
+    const adapter = createAdapter();
+    const actor = { workspaceId, actorType: "service" as const, actorId: "hermes" };
+    const dependencies = {
+      prisma,
+      objectStorage: createStorage(),
+      createAdapter: () => adapter,
+    };
+    const command = {
+      contentRunId,
+      slot: "scene_1_store_video" as const,
+      idempotencyKey: "direction-bound-video",
+      creativeDirection,
+    };
+
+    await generateManagedStyle1Video(actor, command, dependencies);
+
+    await expect(
+      prisma.contentOperation.findFirstOrThrow({ where: { contentRunId } }),
+    ).resolves.toMatchObject({
+      creativeDirectionJson: JSON.stringify(creativeDirection),
+    });
+
+    await expect(
+      generateManagedStyle1Video(
+        actor,
+        {
+          ...command,
+          creativeDirection: {
+            ...creativeDirection,
+            cameraMovement: "locked_off",
+          },
+        },
+        dependencies,
+      ),
+    ).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    expect(adapter.startVideo).toHaveBeenCalledTimes(1);
+    expect(adapter.pollVideo).not.toHaveBeenCalled();
+  });
+
   it("starts one async provider job from the approved same-run source and returns WAIT_FOR_OPERATION", async () => {
     const adapter = createAdapter();
 

@@ -514,6 +514,7 @@ model ContentOperation {
   provider              String   @default("google_flow_useapi")
   providerJobId         String?
   technicalAttemptCount Int      @default(0)
+  creativeDirectionJson String?
   resultJson            String?
   errorJson             String?
   startedAt             DateTime?
@@ -551,6 +552,7 @@ model FlowGeneratedVideo {
   sceneLabel        String
   mediaGenerationId String
   prompt            String?
+  creativeDirectionJson String?
   notes             String?
   // Source Nano image that produced this video (startImage fed
   // to google_flow_generate_video). Nullable for pre-M1 rows.

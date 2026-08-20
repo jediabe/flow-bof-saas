@@ -25,7 +25,11 @@ import {
   type ProviderLockRepository,
 } from "./provider-lock";
 import { executeWithTechnicalRetries } from "./technical-retry";
-import { ContentGenerationError, type ContentOperationRecord } from "./types";
+import {
+  ContentGenerationError,
+  type ContentOperationRecord,
+  type VideoCreativeDirection,
+} from "./types";
 
 export const MANAGED_VIDEO_LOCK_TTL_MS = 30 * 60 * 1_000;
 
@@ -33,6 +37,7 @@ export interface GenerateManagedStyle1VideoCommand {
   contentRunId: string;
   slot: VideoSlot;
   idempotencyKey: string;
+  creativeDirection?: VideoCreativeDirection;
 }
 
 export interface ManagedGeneratedVideoAsset {
@@ -606,6 +611,7 @@ export async function generateManagedStyle1Video(
     contentRunId: requireNonEmpty(rawCommand.contentRunId, "contentRunId"),
     slot: rawCommand.slot,
     idempotencyKey: requireNonEmpty(rawCommand.idempotencyKey, "idempotencyKey"),
+    creativeDirection: rawCommand.creativeDirection,
   };
   if (
     !(Object.keys(SLOT_DEFINITIONS) as string[]).includes(command.slot) ||
@@ -641,6 +647,7 @@ export async function generateManagedStyle1Video(
       kind: "video_generation",
       sceneLabel: SLOT_DEFINITIONS[command.slot].persistedSceneLabel,
       idempotencyKey: command.idempotencyKey,
+      creativeDirection: command.creativeDirection,
     });
     resumedExisting = resumed;
     if (resumed.status === "succeeded") {
@@ -741,6 +748,7 @@ export async function generateManagedStyle1Video(
     kind: "video_generation",
     sceneLabel: SLOT_DEFINITIONS[command.slot].persistedSceneLabel,
     idempotencyKey: command.idempotencyKey,
+    creativeDirection: command.creativeDirection,
   });
   const scope = { workspaceId, operationId: operation.id };
 
