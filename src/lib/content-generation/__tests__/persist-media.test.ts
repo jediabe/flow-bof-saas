@@ -146,6 +146,8 @@ describe("persistGeneratedMedia", () => {
         mediaGenerationId: "flow_video_1",
         sourceImageId: "image_asset_1",
         imageMediaGenerationId: "flow_image_1",
+        prompt: "compiled video prompt",
+        creativeDirectionJson: '{"cameraMovement":"minimal_push_in"}',
       },
       {
         objectStorage: storage,
@@ -176,6 +178,8 @@ describe("persistGeneratedMedia", () => {
         mediaGenerationId: "flow_video_1",
         sourceImageId: "image_asset_1",
         imageMediaGenerationId: "flow_image_1",
+        prompt: "compiled video prompt",
+        creativeDirectionJson: '{"cameraMovement":"minimal_push_in"}',
         storageBucket: "managed-media",
         storageKey: expectedKey,
         storageContentType: "video/mp4",
