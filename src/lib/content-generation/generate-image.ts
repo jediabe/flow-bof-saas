@@ -5,7 +5,11 @@ import { extname, isAbsolute, resolve } from "node:path";
 import { db } from "@/lib/db";
 import { SLOT_DEFINITIONS } from "@/lib/content-runs/constants";
 import { projectContentRun } from "@/lib/content-runs/project-run";
-import type { ImageSlot, ServiceActorContext } from "@/lib/content-runs/types";
+import type {
+  ImageSlot,
+  ManagedManifestSlot,
+  ServiceActorContext,
+} from "@/lib/content-runs/types";
 import {
   createObjectStorageFromEnv,
   type ObjectStorage,
@@ -33,9 +37,9 @@ import {
 
 export const MANAGED_IMAGE_LOCK_TTL_MS = 5 * 60 * 1_000;
 
-export interface GenerateManagedStyle1ImageCommand {
+export interface GenerateManagedImageCommand {
   contentRunId: string;
-  slot: ImageSlot;
+  slot: ImageSlot | ManagedManifestSlot;
   idempotencyKey: string;
 }
 
@@ -54,21 +58,21 @@ export interface ManagedGeneratedImageAsset {
   storageSha256: string | null;
 }
 
-export interface GenerateManagedStyle1ImageResult {
+export interface GenerateManagedImageResult {
   operationId: string;
   contentRunId: string;
-  slot: ImageSlot;
+  slot: ImageSlot | ManagedManifestSlot;
   asset: ManagedGeneratedImageAsset;
   requiredNextAction: {
     type: "RUN_QA";
-    slot: ImageSlot;
+    slot: ImageSlot | ManagedManifestSlot;
     assetId: string;
   };
 }
 
 type PersistMedia = typeof persistGeneratedMedia;
 
-export interface GenerateManagedStyle1ImageDependencies {
+export interface GenerateManagedImageDependencies {
   prisma?: PrismaClient;
   objectStorage?: ObjectStorage;
   createAdapter?: (context: ApexFlowBoundContext) => ApexFlowAdapter;
@@ -79,6 +83,13 @@ export interface GenerateManagedStyle1ImageDependencies {
   createAssetId?: PersistGeneratedMediaDependencies["createAssetId"];
   lockTtlMs?: number;
 }
+
+export type GenerateManagedStyle1ImageCommand = Omit<
+  GenerateManagedImageCommand,
+  "slot"
+> & { slot: ImageSlot };
+export type GenerateManagedStyle1ImageResult = GenerateManagedImageResult;
+export type GenerateManagedStyle1ImageDependencies = GenerateManagedImageDependencies;
 
 export type ManagedImageGenerationErrorCode =
   | "INVALID_IMAGE_GENERATION_REQUEST"
@@ -107,6 +118,7 @@ interface FrozenImageSlot {
   model: string;
   aspectRatio: string;
   productReferenceImageIds: string[];
+  characterReferenceIds: string[];
   references: FrozenProductReference[];
 }
 
@@ -176,7 +188,7 @@ function nonEmptyString(value: unknown): string | null {
 
 function readFrozenImageSlot(
   snapshotJson: string | null,
-  slot: ImageSlot,
+  slot: ImageSlot | ManagedManifestSlot,
   expectedProductId: string,
   persistedStyle: string,
 ): FrozenImageSlot {
@@ -196,16 +208,19 @@ function readFrozenImageSlot(
   }
 
   const snapshotProduct = asRecord(snapshot.product);
+  const expectedObjective = `create_${persistedStyle}_piece`;
+  const expectedVersion =
+    persistedStyle === "style1" ? "managed-style1-v1" : "managed-style2-v1";
   if (
-    persistedStyle !== "style1" ||
-    snapshot.style !== "style1" ||
-    snapshot.objective !== "create_style1_piece" ||
-    snapshot.specVersion !== "managed-style1-v1" ||
+    (persistedStyle !== "style1" && persistedStyle !== "style2") ||
+    snapshot.style !== persistedStyle ||
+    snapshot.objective !== expectedObjective ||
+    snapshot.specVersion !== expectedVersion ||
     snapshotProduct?.id !== expectedProductId
   ) {
     throw new ManagedImageGenerationError(
       "INVALID_FROZEN_SNAPSHOT",
-      "Content run is not the managed Style 1 V1 objective",
+      "Content run is not an approved managed style objective",
       { slot },
     );
   }
@@ -219,8 +234,14 @@ function readFrozenImageSlot(
   const generation = asRecord(slotRecord?.generation);
   const prompt = nonEmptyString(slotRecord?.prompt);
   const aspectRatio = nonEmptyString(generation?.aspectRatio);
-  const references = Array.isArray(generation?.productReferenceImageIds)
-    ? generation.productReferenceImageIds.map(nonEmptyString)
+  const rawReferenceIds = Array.isArray(generation?.referenceAttachmentIds)
+    ? generation.referenceAttachmentIds
+    : Array.isArray(generation?.productReferenceImageIds)
+      ? generation.productReferenceImageIds
+      : [];
+  const references = rawReferenceIds.map(nonEmptyString);
+  const characterReferences = Array.isArray(generation?.characterReferenceIds)
+    ? generation.characterReferenceIds.map(nonEmptyString)
     : [];
   const product = asRecord(snapshot.product);
   const productReferences = Array.isArray(product?.references)
@@ -232,8 +253,9 @@ function readFrozenImageSlot(
     !model ||
     !prompt ||
     !aspectRatio ||
-    references.length === 0 ||
-    references.some((reference) => !reference)
+    references.some((reference) => !reference) ||
+    characterReferences.some((reference) => !reference) ||
+    (persistedStyle === "style1" && references.length === 0)
   ) {
     throw new ManagedImageGenerationError(
       "INVALID_FROZEN_SNAPSHOT",
@@ -247,6 +269,7 @@ function readFrozenImageSlot(
     model,
     aspectRatio,
     productReferenceImageIds: references as string[],
+    characterReferenceIds: characterReferences as string[],
     references: (references as string[]).map((id) => {
       const reference = productReferences.find((candidate) => candidate?.id === id);
       return {
@@ -407,7 +430,10 @@ async function loadScopedRun(
   return run;
 }
 
-function assertSlotReady(run: LoadedRun, slot: ImageSlot): void {
+function assertSlotReady(
+  run: LoadedRun,
+  slot: ImageSlot | ManagedManifestSlot,
+): void {
   if (run.status !== "created" && run.status !== "generating") {
     throw new ManagedImageGenerationError(
       "INVALID_CONTENT_RUN_STATE",
@@ -469,9 +495,9 @@ function parseSucceededAssetId(operation: ContentOperationRecord): string {
 async function returnSucceededResult(
   prisma: PrismaClient,
   actor: ServiceActorContext,
-  command: GenerateManagedStyle1ImageCommand,
+  command: GenerateManagedImageCommand,
   operation: ContentOperationRecord,
-): Promise<GenerateManagedStyle1ImageResult> {
+): Promise<GenerateManagedImageResult> {
   const assetId = parseSucceededAssetId(operation);
   const asset = await prisma.flowGeneratedImage.findFirst({
     where: {
@@ -508,26 +534,26 @@ async function markRunFailed(prisma: PrismaClient, runId: string): Promise<void>
 }
 
 /**
- * Execute one managed Style 1 image slot. The caller supplies only objective
+ * Execute one managed manifest image slot. The caller supplies only objective
  * identity; prompt, model, references and Flow account binding are loaded from
  * persisted SaaS state.
  */
-export async function generateManagedStyle1Image(
+export async function generateManagedImage(
   actor: ServiceActorContext,
-  rawCommand: GenerateManagedStyle1ImageCommand,
-  dependencies: GenerateManagedStyle1ImageDependencies = {},
-): Promise<GenerateManagedStyle1ImageResult> {
+  rawCommand: GenerateManagedImageCommand,
+  dependencies: GenerateManagedImageDependencies = {},
+): Promise<GenerateManagedImageResult> {
   const workspaceId = requireNonEmpty(actor.workspaceId, "workspaceId");
-  const command: GenerateManagedStyle1ImageCommand = {
+  const command: GenerateManagedImageCommand = {
     contentRunId: requireNonEmpty(rawCommand.contentRunId, "contentRunId"),
     slot: rawCommand.slot,
     idempotencyKey: requireNonEmpty(rawCommand.idempotencyKey, "idempotencyKey"),
   };
-  if (!(Object.keys(SLOT_DEFINITIONS) as string[]).includes(command.slot) ||
-      SLOT_DEFINITIONS[command.slot].mediaType !== "image") {
+  const legacyDefinition = SLOT_DEFINITIONS[command.slot as ImageSlot];
+  if (legacyDefinition?.mediaType !== "image" && !/^N[1-7]$/.test(command.slot)) {
     throw new ManagedImageGenerationError(
       "INVALID_IMAGE_GENERATION_REQUEST",
-      "slot must identify a managed Style 1 image slot",
+      "slot must identify a managed manifest image slot",
       { slot: String(command.slot) },
     );
   }
@@ -704,6 +730,9 @@ export async function generateManagedStyle1Image(
               model: frozen.model,
               aspectRatio: frozen.aspectRatio,
               referenceMediaIds: uploadedReferenceMediaIds,
+              ...(frozen.characterReferenceIds.length
+                ? { characterReferenceIds: frozen.characterReferenceIds }
+                : {}),
             }),
         });
 
@@ -813,4 +842,13 @@ export async function generateManagedStyle1Image(
   } finally {
     await locks.release(scope);
   }
+}
+
+/** Backward-compatible Style 1 wrapper over the shared managed engine. */
+export function generateManagedStyle1Image(
+  actor: ServiceActorContext,
+  command: GenerateManagedStyle1ImageCommand,
+  dependencies: GenerateManagedStyle1ImageDependencies = {},
+): Promise<GenerateManagedStyle1ImageResult> {
+  return generateManagedImage(actor, command, dependencies);
 }

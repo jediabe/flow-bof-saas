@@ -43,6 +43,7 @@ export interface GenerateImageInput {
   model: string;
   aspectRatio?: string;
   referenceMediaIds?: string[];
+  characterReferenceIds?: string[];
 }
 
 export interface GeneratedMediaResult {
@@ -64,10 +65,17 @@ export interface UploadedAssetResult {
   sizeBytes: number;
 }
 
+export interface RegisteredCharacterResult {
+  characterReferenceId: string;
+  entityId: string | null;
+}
+
 export interface StartVideoInput {
   prompt: string;
   model: string;
-  sourceImageMediaGenerationId: string;
+  sourceImageMediaGenerationId?: string;
+  referenceImageMediaGenerationIds?: string[];
+  characterReferenceIds?: string[];
   aspectRatio?: string;
   durationSeconds?: number;
 }
@@ -96,6 +104,9 @@ export type VideoPollResult =
 
 export interface ApexFlowAdapter {
   uploadAsset(input: UploadAssetInput): Promise<UploadedAssetResult>;
+  getCharacter(input: {
+    characterReferenceId: string;
+  }): Promise<RegisteredCharacterResult>;
   generateImage(input: GenerateImageInput): Promise<GeneratedMediaResult>;
   startVideo(input: StartVideoInput): Promise<StartedVideoResult>;
   pollVideo(input: { providerJobId: string }): Promise<VideoPollResult>;
@@ -292,6 +303,33 @@ export function createApexFlowAdapter(
       return { mediaGenerationId, kind, mimeType, sizeBytes };
     },
 
+    async getCharacter(input): Promise<RegisteredCharacterResult> {
+      const result = await invoke(
+        "google_flow_get_character",
+        {
+          character_ref: input.characterReferenceId,
+          response_format: "json",
+        },
+        true,
+      );
+      const structured = asRecord(result.structuredContent);
+      const character = nonEmptyString(structured?.character);
+      const entityId = nonEmptyString(structured?.entityId);
+      if (
+        input.characterReferenceId !== character &&
+        input.characterReferenceId !== entityId
+      ) {
+        throw malformed(
+          "APEX Flow returned a mismatched registered character identity",
+          true,
+        );
+      }
+      return {
+        characterReferenceId: character ?? input.characterReferenceId,
+        entityId,
+      };
+    },
+
     async generateImage(input): Promise<GeneratedMediaResult> {
       const result = await invoke(
         "google_flow_generate_image",
@@ -302,6 +340,9 @@ export function createApexFlowAdapter(
           count: 1,
           ...(input.referenceMediaIds
             ? { references: input.referenceMediaIds }
+            : {}),
+          ...(input.characterReferenceIds?.length
+            ? { characters: input.characterReferenceIds }
             : {}),
           response_format: "json",
         },
@@ -319,12 +360,32 @@ export function createApexFlowAdapter(
     },
 
     async startVideo(input): Promise<StartedVideoResult> {
+      if (
+        input.sourceImageMediaGenerationId &&
+        ((input.referenceImageMediaGenerationIds?.length ?? 0) > 0 ||
+          (input.characterReferenceIds?.length ?? 0) > 0)
+      ) {
+        throw new ApexFlowAdapterError(
+          "Flow start-image video requests cannot include reference images or characters",
+          "terminal-nontechnical",
+          "invalid_input",
+          false,
+        );
+      }
       const result = await invoke(
         "google_flow_generate_video",
         {
           prompt: input.prompt,
           model: input.model,
-          start_image: input.sourceImageMediaGenerationId,
+          ...(input.sourceImageMediaGenerationId
+            ? { start_image: input.sourceImageMediaGenerationId }
+            : {}),
+          ...(input.referenceImageMediaGenerationIds?.length
+            ? { reference_images: input.referenceImageMediaGenerationIds }
+            : {}),
+          ...(input.characterReferenceIds?.length
+            ? { characters: input.characterReferenceIds }
+            : {}),
           ...(input.aspectRatio ? { aspect_ratio: input.aspectRatio } : {}),
           ...(input.durationSeconds ? { duration: input.durationSeconds } : {}),
           count: 1,

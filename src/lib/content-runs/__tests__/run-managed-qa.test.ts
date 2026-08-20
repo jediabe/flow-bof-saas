@@ -57,6 +57,7 @@ vi.mock("@/lib/storage", async (importOriginal) => ({
 }));
 
 import { runManagedQa } from "../run-managed-qa";
+import { compileStyleManifest } from "@/lib/content-styles/registry";
 import { decide } from "@/lib/qa/decision-engine";
 import { acquireQaLock } from "@/lib/qa/persistence";
 
@@ -447,6 +448,70 @@ describe("runManagedQa", () => {
     expect(managedStorage.createSignedReadUrl).not.toHaveBeenCalled();
   });
 
+  it("rejects an opposite-kind command when image and video IDs collide", async () => {
+    const run = createRunFixture();
+    run.videos = [
+      {
+        id: "image-1",
+        contentRunId: "run-1",
+        sceneLabel: "scene_1_store",
+        attemptNumber: 1,
+        qaStatus: "NOT_QA_CHECKED",
+        qaScore: null,
+        qaVerdictJson: null,
+      },
+    ];
+    const prisma = createPrisma(run);
+
+    await expect(
+      runManagedQa(
+        actor,
+        { contentRunId: "run-1", assetId: "image-1", assetKind: "video" },
+        { prisma: prisma as never },
+      ),
+    ).rejects.toMatchObject({ code: "MANAGED_ASSET_NOT_READY" });
+
+    expect(runQaForAsset).not.toHaveBeenCalled();
+    expect(prisma.contentRun.updateMany).not.toHaveBeenCalled();
+    expect(run.status).toBe("qa_running");
+    expect(run.images[0].qaStatus).toBe("NOT_QA_CHECKED");
+    expect(run.videos[0].qaStatus).toBe("NOT_QA_CHECKED");
+  });
+
+  it("rejects opposite-kind reconciliation when approved image and video IDs collide", async () => {
+    const run = createRunFixture();
+    run.images[0].qaStatus = "APPROVED";
+    run.images[0].qaScore = 94;
+    run.images[0].qaVerdictJson = JSON.stringify({
+      decision: "APPROVE",
+      overallScore: 94,
+    });
+    run.videos = [
+      {
+        id: "image-1",
+        contentRunId: "run-1",
+        sceneLabel: "unrelated_collision_asset",
+        attemptNumber: 1,
+        qaStatus: "NOT_QA_CHECKED",
+        qaScore: null,
+        qaVerdictJson: null,
+      },
+    ];
+    const prisma = createPrisma(run);
+
+    await expect(
+      runManagedQa(
+        actor,
+        { contentRunId: "run-1", assetId: "image-1", assetKind: "video" },
+        { prisma: prisma as never },
+      ),
+    ).rejects.toMatchObject({ code: "MANAGED_ASSET_NOT_READY" });
+
+    expect(runQaForAsset).not.toHaveBeenCalled();
+    expect(prisma.contentRun.updateMany).not.toHaveBeenCalled();
+    expect(run.status).toBe("qa_running");
+  });
+
   it("advances an approved first image to its dependent video action", async () => {
     const run = createRunFixture();
     const prisma = createPrisma(run);
@@ -512,6 +577,67 @@ describe("runManagedQa", () => {
         product: { batch: { workspaceId: "workspace-1" } },
       },
       data: { status: "generating" },
+    });
+  });
+
+  it("advances an approved Style 2 no-start clip to the next manifest image slot", async () => {
+    const run = createRunFixture();
+    const manifest = compileStyleManifest("style2", "managed-style2-v1", "handheld");
+    run.style = "style2";
+    run.images = [];
+    run.videos = [
+      {
+        id: "video-n1",
+        contentRunId: "run-1",
+        sceneLabel: "N1",
+        attemptNumber: 1,
+        qaStatus: "NOT_QA_CHECKED",
+        qaScore: null,
+        qaVerdictJson: null,
+      },
+    ];
+    run.promptSnapshotJson = JSON.stringify({
+      objective: "create_style2_piece",
+      style: "style2",
+      specVersion: "managed-style2-v1",
+      variant: "handheld",
+      modelSnapshot: {
+        imageModel: "nano-banana-pro",
+        videoModel: "veo-3.1-lite-low-priority",
+      },
+      styleManifest: manifest,
+    });
+    const prisma = createPrisma(run);
+    runQaForAsset.mockImplementation(async () => {
+      run.videos[0].qaStatus = "APPROVED";
+      run.videos[0].qaScore = 95;
+      run.videos[0].qaVerdictJson = JSON.stringify({
+        decision: "APPROVE",
+        overallScore: 95,
+      });
+      return {
+        attemptId: "qa-n1",
+        assetId: "video-n1",
+        assetKind: "video",
+        decision: "APPROVE",
+        qaStatus: "APPROVED",
+        overallScore: 95,
+        attemptNumber: 1,
+        reason: "approved",
+        elapsedMs: 5,
+        providerModel: "resolved-provider",
+      };
+    });
+
+    const result = await runManagedQa(
+      actor,
+      { contentRunId: "run-1", assetId: "video-n1", assetKind: "video" },
+      { prisma: prisma as never },
+    );
+
+    expect(result).toMatchObject({
+      runStatus: "generating",
+      requiredNextAction: { type: "GENERATE_IMAGE", slot: "N2" },
     });
   });
 

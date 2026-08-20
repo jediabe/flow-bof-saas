@@ -35,8 +35,8 @@ export interface PersistImageInput extends CommonPersistMediaInput {
 
 export interface PersistVideoInput extends CommonPersistMediaInput {
   mediaType: "video";
-  sourceImageId: string;
-  imageMediaGenerationId: string;
+  sourceImageId: string | null;
+  imageMediaGenerationId: string | null;
   creativeDirectionJson?: string | null;
 }
 

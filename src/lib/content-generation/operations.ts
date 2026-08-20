@@ -514,18 +514,44 @@ export function createOperationRepository(
     async recordAcceptedVideoStart(scope, input): Promise<ContentOperationRecord> {
       const attemptNumber = requireAttemptNumber(input.attemptNumber);
       const providerJobId = requiredAuditToken(input.providerJobId, "providerJobId");
-      const sourceImageId = requiredAuditToken(input.sourceImageId, "sourceImageId");
-      const sourceImageMediaGenerationId = requiredAuditToken(
-        input.sourceImageMediaGenerationId,
-        "sourceImageMediaGenerationId",
+      const sourceImageId = input.sourceImageId
+        ? requiredAuditToken(input.sourceImageId, "sourceImageId")
+        : null;
+      const sourceImageMediaGenerationId = input.sourceImageMediaGenerationId
+        ? requiredAuditToken(
+            input.sourceImageMediaGenerationId,
+            "sourceImageMediaGenerationId",
+          )
+        : null;
+      if (Boolean(sourceImageId) !== Boolean(sourceImageMediaGenerationId)) {
+        throw new TypeError("source image ID and media generation ID must be supplied together");
+      }
+      const characterReferenceIds = (input.characterReferenceIds ?? []).map((value) =>
+        requiredAuditToken(value, "characterReferenceId"),
       );
+      const referenceImageMediaGenerationIds = (
+        input.referenceImageMediaGenerationIds ?? []
+      ).map((value) => requiredAuditToken(value, "referenceImageMediaGenerationId"));
+      if (
+        sourceImageId &&
+        (characterReferenceIds.length > 0 || referenceImageMediaGenerationIds.length > 0)
+      ) {
+        throw new TypeError("start-image video audit cannot include reference attachments");
+      }
       const audioRetryStartToken = input.audioRetryStartToken
         ? requiredAuditToken(input.audioRetryStartToken, "audioRetryStartToken")
         : null;
       if (!(ALLOWED_MANAGED_VIDEO_MODELS as readonly string[]).includes(input.model)) {
         throw new TypeError("model must be an allowed managed video model");
       }
-      const resultJson = stringify({ sourceImageId, sourceImageMediaGenerationId });
+      const resultJson = sourceImageId
+        ? stringify({ sourceImageId, sourceImageMediaGenerationId })
+        : stringify({
+            sourceImageId: null,
+            sourceImageMediaGenerationId: null,
+            characterReferenceIds,
+            referenceImageMediaGenerationIds,
+          });
 
       const current = await requireScoped(scope);
       assertMutable(current);

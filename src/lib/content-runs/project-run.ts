@@ -195,6 +195,15 @@ function parseSnapshot(
   }
 }
 
+export function getFrozenManifestSlotMediaType(
+  snapshotJson: string | null,
+  persistedStyle: string,
+  slotId: string,
+): "image" | "video" | null {
+  const snapshot = parseSnapshot(snapshotJson, persistedStyle);
+  return snapshot.styleManifest.slots.find((slot) => slot.id === slotId)?.mediaType ?? null;
+}
+
 function parseQaStatus(value: string): QaStatus {
   return QA_STATUS_SET.has(value) ? (value as QaStatus) : "FAILED";
 }

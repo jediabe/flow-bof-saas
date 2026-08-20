@@ -9,7 +9,11 @@ import {
   type ManagedVideoModel,
 } from "@/lib/content-runs/constants";
 import { projectContentRun } from "@/lib/content-runs/project-run";
-import type { ServiceActorContext, VideoSlot } from "@/lib/content-runs/types";
+import type {
+  ManagedManifestSlot,
+  ServiceActorContext,
+  VideoSlot,
+} from "@/lib/content-runs/types";
 import {
   createObjectStorageFromEnv,
   type ObjectStorage,
@@ -45,9 +49,9 @@ import {
 
 export const MANAGED_VIDEO_LOCK_TTL_MS = 30 * 60 * 1_000;
 
-export interface GenerateManagedStyle1VideoCommand {
+export interface GenerateManagedVideoCommand {
   contentRunId: string;
-  slot: VideoSlot;
+  slot: VideoSlot | ManagedManifestSlot;
   idempotencyKey: string;
   creativeDirection?: VideoCreativeDirection;
 }
@@ -69,12 +73,12 @@ export interface ManagedGeneratedVideoAsset {
   storageSha256: string | null;
 }
 
-export type GenerateManagedStyle1VideoResult =
+export type GenerateManagedVideoResult =
   | {
       operationId: string;
       operationStatus: "running";
       contentRunId: string;
-      slot: VideoSlot;
+      slot: VideoSlot | ManagedManifestSlot;
       providerJobId?: string;
       requiredNextAction: { type: "WAIT_FOR_OPERATION"; operationId: string };
     }
@@ -82,15 +86,19 @@ export type GenerateManagedStyle1VideoResult =
       operationId: string;
       operationStatus: "succeeded";
       contentRunId: string;
-      slot: VideoSlot;
+      slot: VideoSlot | ManagedManifestSlot;
       providerJobId: string;
       asset: ManagedGeneratedVideoAsset;
-      requiredNextAction: { type: "RUN_QA"; slot: VideoSlot; assetId: string };
+      requiredNextAction: {
+        type: "RUN_QA";
+        slot: VideoSlot | ManagedManifestSlot;
+        assetId: string;
+      };
     };
 
 type PersistMedia = typeof persistGeneratedMedia;
 
-export interface GenerateManagedStyle1VideoDependencies {
+export interface GenerateManagedVideoDependencies {
   prisma?: PrismaClient;
   objectStorage?: ObjectStorage;
   createAdapter?: (context: ApexFlowBoundContext) => ApexFlowAdapter;
@@ -101,6 +109,13 @@ export interface GenerateManagedStyle1VideoDependencies {
   createAssetId?: PersistGeneratedMediaDependencies["createAssetId"];
   lockTtlMs?: number;
 }
+
+export type GenerateManagedStyle1VideoCommand = Omit<
+  GenerateManagedVideoCommand,
+  "slot"
+> & { slot: VideoSlot };
+export type GenerateManagedStyle1VideoResult = GenerateManagedVideoResult;
+export type GenerateManagedStyle1VideoDependencies = GenerateManagedVideoDependencies;
 
 export type ManagedVideoGenerationErrorCode =
   | "INVALID_VIDEO_GENERATION_REQUEST"
@@ -131,8 +146,10 @@ interface FrozenVideoSlot {
   model: ManagedVideoModel;
   aspectRatio: string;
   durationSeconds: number;
-  sourceSlot: string;
+  sourceSlot: string | null;
   productName: string;
+  characterReferenceIds: string[];
+  referenceAttachmentIds: string[];
 }
 
 interface SourceImage {
@@ -144,8 +161,10 @@ interface SourceImage {
 }
 
 interface StartedVideoLineage {
-  sourceImageId: string;
-  sourceImageMediaGenerationId: string;
+  sourceImageId: string | null;
+  sourceImageMediaGenerationId: string | null;
+  characterReferenceIds: string[];
+  referenceImageMediaGenerationIds: string[];
 }
 
 interface LoadedRun {
@@ -203,6 +222,10 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 
 function nonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function persistedVideoSceneLabel(slot: VideoSlot | ManagedManifestSlot): string {
+  return SLOT_DEFINITIONS[slot as VideoSlot]?.persistedSceneLabel ?? slot;
 }
 
 interface ProviderAttemptAuditSnapshot {
@@ -404,7 +427,7 @@ async function claimAudioRetryStart(
 
 function readFrozenVideoSlot(
   snapshotJson: string | null,
-  slot: VideoSlot,
+  slot: VideoSlot | ManagedManifestSlot,
   expectedProductId: string,
   persistedStyle: string,
 ): FrozenVideoSlot {
@@ -424,17 +447,20 @@ function readFrozenVideoSlot(
   }
 
   const product = asRecord(snapshot.product);
+  const expectedObjective = `create_${persistedStyle}_piece`;
+  const expectedVersion =
+    persistedStyle === "style1" ? "managed-style1-v1" : "managed-style2-v1";
   if (
-    persistedStyle !== "style1" ||
-    snapshot.style !== "style1" ||
-    snapshot.objective !== "create_style1_piece" ||
-    snapshot.specVersion !== "managed-style1-v1" ||
+    (persistedStyle !== "style1" && persistedStyle !== "style2") ||
+    snapshot.style !== persistedStyle ||
+    snapshot.objective !== expectedObjective ||
+    snapshot.specVersion !== expectedVersion ||
     product?.id !== expectedProductId ||
     !nonEmptyString(product?.name)
   ) {
     throw new ManagedVideoGenerationError(
       "INVALID_FROZEN_SNAPSHOT",
-      "Content run is not the managed Style 1 V1 objective",
+      "Content run is not an approved managed style objective",
       { slot },
     );
   }
@@ -447,6 +473,12 @@ function readFrozenVideoSlot(
   const prompt = nonEmptyString(slotRecord?.prompt);
   const aspectRatio = nonEmptyString(generation?.aspectRatio);
   const sourceSlot = nonEmptyString(generation?.startImageSlot);
+  const characterReferenceIds = Array.isArray(generation?.characterReferenceIds)
+    ? generation.characterReferenceIds.map(nonEmptyString)
+    : [];
+  const referenceAttachmentIds = Array.isArray(generation?.referenceAttachmentIds)
+    ? generation.referenceAttachmentIds.map(nonEmptyString)
+    : [];
   const durationSeconds = generation?.durationSeconds;
 
   if (
@@ -455,10 +487,12 @@ function readFrozenVideoSlot(
     !(ALLOWED_MANAGED_VIDEO_MODELS as readonly string[]).includes(model) ||
     !prompt ||
     !aspectRatio ||
-    !sourceSlot ||
     !Number.isSafeInteger(durationSeconds) ||
     (durationSeconds as number) <= 0 ||
-    sourceSlot !== SLOT_DEFINITIONS[slot].sourceSlot
+    characterReferenceIds.some((value) => !value) ||
+    referenceAttachmentIds.some((value) => !value) ||
+    (persistedStyle === "style1" &&
+      sourceSlot !== SLOT_DEFINITIONS[slot as VideoSlot].sourceSlot)
   ) {
     throw new ManagedVideoGenerationError(
       "INVALID_FROZEN_SNAPSHOT",
@@ -474,6 +508,8 @@ function readFrozenVideoSlot(
     durationSeconds: durationSeconds as number,
     sourceSlot,
     productName: nonEmptyString(product.name) as string,
+    characterReferenceIds: characterReferenceIds as string[],
+    referenceAttachmentIds: referenceAttachmentIds as string[],
   };
 }
 
@@ -536,7 +572,10 @@ async function loadScopedRun(
   return run;
 }
 
-function assertSlotReady(run: LoadedRun, slot: VideoSlot): string {
+function assertSlotReady(
+  run: LoadedRun,
+  slot: VideoSlot | ManagedManifestSlot,
+): string | null {
   if (run.status !== "generating") {
     throw new ManagedVideoGenerationError(
       "INVALID_CONTENT_RUN_STATE",
@@ -558,23 +597,24 @@ function assertSlotReady(run: LoadedRun, slot: VideoSlot): string {
       { contentRunId: run.id, slot, requiredNextAction: action.type },
     );
   }
-  return action.sourceAssetId;
+  return action.sourceAssetId ?? null;
 }
 
 async function loadApprovedSource(
   prisma: PrismaClient,
   workspaceId: string,
   run: LoadedRun,
-  slot: VideoSlot,
+  slot: VideoSlot | ManagedManifestSlot,
+  sourceSlot: string,
   expectedSourceId: string,
 ): Promise<SourceImage> {
-  const definition = SLOT_DEFINITIONS[slot];
-  const sourceDefinition = SLOT_DEFINITIONS[definition.sourceSlot];
+  const sourceDefinition = SLOT_DEFINITIONS[sourceSlot as keyof typeof SLOT_DEFINITIONS];
+  const sourceSceneLabel = sourceDefinition?.persistedSceneLabel ?? sourceSlot;
   const source = await prisma.flowGeneratedImage.findFirst({
     where: {
       id: expectedSourceId,
       contentRunId: run.id,
-      sceneLabel: sourceDefinition.persistedSceneLabel,
+      sceneLabel: sourceSceneLabel,
       qaStatus: "APPROVED",
       product: { batch: { workspaceId } },
     },
@@ -631,8 +671,8 @@ function safeOperationError(error: unknown): Record<string, unknown> {
 
 function waitResult(
   operation: ContentOperationRecord,
-  command: GenerateManagedStyle1VideoCommand,
-): GenerateManagedStyle1VideoResult {
+  command: GenerateManagedVideoCommand,
+): GenerateManagedVideoResult {
   return {
     operationId: operation.id,
     operationStatus: "running",
@@ -668,8 +708,34 @@ function parseStartedLineage(
     const sourceImageMediaGenerationId = nonEmptyString(
       record?.sourceImageMediaGenerationId,
     );
+    const characterReferenceIds = Array.isArray(record?.characterReferenceIds)
+      ? record.characterReferenceIds.map(nonEmptyString)
+      : [];
+    const referenceImageMediaGenerationIds = Array.isArray(
+      record?.referenceImageMediaGenerationIds,
+    )
+      ? record.referenceImageMediaGenerationIds.map(nonEmptyString)
+      : [];
     if (sourceImageId && sourceImageMediaGenerationId) {
-      return { sourceImageId, sourceImageMediaGenerationId };
+      return {
+        sourceImageId,
+        sourceImageMediaGenerationId,
+        characterReferenceIds: [],
+        referenceImageMediaGenerationIds: [],
+      };
+    }
+    if (
+      record?.sourceImageId === null &&
+      record?.sourceImageMediaGenerationId === null &&
+      characterReferenceIds.every(Boolean) &&
+      referenceImageMediaGenerationIds.every(Boolean)
+    ) {
+      return {
+        sourceImageId: null,
+        sourceImageMediaGenerationId: null,
+        characterReferenceIds: characterReferenceIds as string[],
+        referenceImageMediaGenerationIds: referenceImageMediaGenerationIds as string[],
+      };
     }
   } catch {
     // A malformed running lineage is handled by the caller as missing lineage.
@@ -680,9 +746,9 @@ function parseStartedLineage(
 async function returnSucceededResult(
   prisma: PrismaClient,
   actor: ServiceActorContext,
-  command: GenerateManagedStyle1VideoCommand,
+  command: GenerateManagedVideoCommand,
   operation: ContentOperationRecord,
-): Promise<GenerateManagedStyle1VideoResult> {
+): Promise<GenerateManagedVideoResult> {
   const assetId = parseSucceededAssetId(operation);
   const asset = await prisma.flowGeneratedVideo.findFirst({
     where: {
@@ -860,11 +926,11 @@ async function operationOwnsLiveLock(
   return Boolean(lock);
 }
 
-export async function generateManagedStyle1Video(
+export async function generateManagedVideo(
   actor: ServiceActorContext,
-  rawCommand: GenerateManagedStyle1VideoCommand,
-  dependencies: GenerateManagedStyle1VideoDependencies = {},
-): Promise<GenerateManagedStyle1VideoResult> {
+  rawCommand: GenerateManagedVideoCommand,
+  dependencies: GenerateManagedVideoDependencies = {},
+): Promise<GenerateManagedVideoResult> {
   const workspaceId = requireNonEmpty(actor.workspaceId, "workspaceId");
   let creativeDirection: VideoCreativeDirection | undefined;
   try {
@@ -882,19 +948,17 @@ export async function generateManagedStyle1Video(
     }
     throw cause;
   }
-  const command: GenerateManagedStyle1VideoCommand = {
+  const command: GenerateManagedVideoCommand = {
     contentRunId: requireNonEmpty(rawCommand.contentRunId, "contentRunId"),
     slot: rawCommand.slot,
     idempotencyKey: requireNonEmpty(rawCommand.idempotencyKey, "idempotencyKey"),
     creativeDirection,
   };
-  if (
-    !(Object.keys(SLOT_DEFINITIONS) as string[]).includes(command.slot) ||
-    SLOT_DEFINITIONS[command.slot].mediaType !== "video"
-  ) {
+  const legacyDefinition = SLOT_DEFINITIONS[command.slot as VideoSlot];
+  if (legacyDefinition?.mediaType !== "video" && !/^N[1-7]$/.test(command.slot)) {
     throw new ManagedVideoGenerationError(
       "INVALID_VIDEO_GENERATION_REQUEST",
-      "slot must identify a managed Style 1 video slot",
+      "slot must identify a managed manifest video slot",
       { slot: String(command.slot) },
     );
   }
@@ -921,7 +985,7 @@ export async function generateManagedStyle1Video(
       workspaceId,
       contentRunId: command.contentRunId,
       kind: "video_generation",
-      sceneLabel: SLOT_DEFINITIONS[command.slot].persistedSceneLabel,
+      sceneLabel: persistedVideoSceneLabel(command.slot),
       idempotencyKey: command.idempotencyKey,
       creativeDirection: command.creativeDirection,
     });
@@ -942,7 +1006,7 @@ export async function generateManagedStyle1Video(
         workspaceId,
         contentRunId: command.contentRunId,
         kind: "video_generation",
-        sceneLabel: SLOT_DEFINITIONS[command.slot].persistedSceneLabel,
+        sceneLabel: persistedVideoSceneLabel(command.slot),
       },
       select: { id: true },
     });
@@ -989,14 +1053,20 @@ export async function generateManagedStyle1Video(
     }
   }
 
-  let sourceAssetId: string;
+  const frozen = readFrozenVideoSlot(
+    run.promptSnapshotJson,
+    command.slot,
+    run.productId,
+    run.style,
+  );
+  let sourceAssetId: string | null;
   let acceptedLineage: StartedVideoLineage | null = null;
   if (resumedExisting && (resumedExisting.providerJobId || isPreparedAudioRetry(resumedExisting))) {
     acceptedLineage = parseStartedLineage(resumedExisting);
     if (!acceptedLineage) {
       throw new ManagedVideoGenerationError(
         "COMPLETED_OPERATION_ASSET_MISSING",
-        "Accepted video operation is missing immutable source lineage",
+        "Accepted video operation is missing immutable frozen request lineage",
         { operationId: resumedExisting.id },
       );
     }
@@ -1004,31 +1074,36 @@ export async function generateManagedStyle1Video(
   } else {
     sourceAssetId = assertSlotReady(run, command.slot);
   }
-  const frozen = readFrozenVideoSlot(
-    run.promptSnapshotJson,
-    command.slot,
-    run.productId,
-    run.style,
-  );
+  if (Boolean(frozen.sourceSlot) !== Boolean(sourceAssetId)) {
+    throw new ManagedVideoGenerationError(
+      "INVALID_FROZEN_SNAPSHOT",
+      "Frozen video source policy does not match the manifest next action",
+      { slot: command.slot },
+    );
+  }
   const finalPrompt = compileVideoPrompt({
     canonicalPrompt: frozen.prompt,
     creativeDirection: command.creativeDirection,
     productName: frozen.productName,
   });
   const creativeDirectionJson = serializeVideoCreativeDirection(command.creativeDirection);
-  const source = await loadApprovedSource(
-    prisma,
-    workspaceId,
-    run,
-    command.slot,
-    sourceAssetId,
-  );
+  const source =
+    sourceAssetId && frozen.sourceSlot
+      ? await loadApprovedSource(
+          prisma,
+          workspaceId,
+          run,
+          command.slot,
+          frozen.sourceSlot,
+          sourceAssetId,
+        )
+      : null;
 
   let operation = await operations.createOrResume({
     workspaceId,
     contentRunId: command.contentRunId,
     kind: "video_generation",
-    sceneLabel: SLOT_DEFINITIONS[command.slot].persistedSceneLabel,
+    sceneLabel: persistedVideoSceneLabel(command.slot),
     idempotencyKey: command.idempotencyKey,
     creativeDirection: command.creativeDirection,
   });
@@ -1061,8 +1136,14 @@ export async function generateManagedStyle1Video(
       createAdapter,
     );
     const sourceImageMediaGenerationId =
-      acceptedLineage?.sourceImageMediaGenerationId ?? source.mediaGenerationId;
-    const sourceImageId = acceptedLineage?.sourceImageId ?? source.id;
+      acceptedLineage?.sourceImageMediaGenerationId ?? source?.mediaGenerationId ?? null;
+    const sourceImageId = acceptedLineage?.sourceImageId ?? source?.id ?? null;
+    const characterReferenceIds = acceptedLineage
+      ? acceptedLineage.characterReferenceIds
+      : frozen.characterReferenceIds;
+    const referenceImageMediaGenerationIds = acceptedLineage
+      ? acceptedLineage.referenceImageMediaGenerationIds
+      : [];
     const started = await executeWithTechnicalRetries({
       operation,
       onAttempt: async (attemptNumber) => {
@@ -1072,7 +1153,14 @@ export async function generateManagedStyle1Video(
         adapter.startVideo({
           prompt: finalPrompt,
           model: frozen.model,
-          sourceImageMediaGenerationId,
+          ...(sourceImageMediaGenerationId
+            ? { sourceImageMediaGenerationId }
+            : {
+                ...(characterReferenceIds.length ? { characterReferenceIds } : {}),
+                ...(referenceImageMediaGenerationIds.length
+                  ? { referenceImageMediaGenerationIds }
+                  : {}),
+              }),
           aspectRatio: frozen.aspectRatio,
           durationSeconds: frozen.durationSeconds,
         }),
@@ -1082,8 +1170,9 @@ export async function generateManagedStyle1Video(
         operation.providerAttemptNumber === 0 ? 1 : operation.providerAttemptNumber,
       providerJobId: started.providerJobId,
       model: frozen.model,
-      sourceImageId,
-      sourceImageMediaGenerationId,
+      ...(sourceImageId && sourceImageMediaGenerationId
+        ? { sourceImageId, sourceImageMediaGenerationId }
+        : { characterReferenceIds, referenceImageMediaGenerationIds }),
       ...(audioRetryStartToken ? { audioRetryStartToken } : {}),
     });
     return operation;
@@ -1233,20 +1322,21 @@ export async function generateManagedStyle1Video(
     const objectStorage = dependencies.objectStorage ?? createObjectStorageFromEnv();
     storageForCompensation = objectStorage;
     const sourceImageMediaGenerationId =
-      acceptedLineage?.sourceImageMediaGenerationId ?? source.mediaGenerationId;
+      acceptedLineage?.sourceImageMediaGenerationId ?? source?.mediaGenerationId ?? null;
+    const persistedSourceImageId = acceptedLineage?.sourceImageId ?? source?.id ?? null;
     const persisted = await (dependencies.persistMedia ?? persistGeneratedMedia)(
       {
         mediaType: "video",
         workspaceId,
         contentRunId: run.id,
         productId: run.productId,
-        sceneLabel: SLOT_DEFINITIONS[command.slot].persistedSceneLabel,
+        sceneLabel: persistedVideoSceneLabel(command.slot),
         mediaGenerationId: polled.mediaGenerationId,
         providerUrl: polled.url,
         prompt: finalPrompt,
         creativeDirectionJson,
         attemptNumber: 1,
-        sourceImageId: source.id,
+        sourceImageId: persistedSourceImageId,
         imageMediaGenerationId: sourceImageMediaGenerationId,
       },
       {
@@ -1263,7 +1353,7 @@ export async function generateManagedStyle1Video(
     if (
       !asset?.id ||
       asset.contentRunId !== run.id ||
-      asset.sourceImageId !== source.id ||
+      asset.sourceImageId !== persistedSourceImageId ||
       asset.imageMediaGenerationId !== sourceImageMediaGenerationId
     ) {
       throw new ManagedVideoGenerationError(
@@ -1289,6 +1379,12 @@ export async function generateManagedStyle1Video(
       mediaGenerationId: polled.mediaGenerationId,
       providerJobId: operation.providerJobId,
       storageKey: asset.storageKey,
+      sourceImageId: acceptedLineage?.sourceImageId ?? source?.id ?? null,
+      sourceImageMediaGenerationId:
+        acceptedLineage?.sourceImageMediaGenerationId ?? source?.mediaGenerationId ?? null,
+      characterReferenceIds: acceptedLineage?.characterReferenceIds ?? [],
+      referenceImageMediaGenerationIds:
+        acceptedLineage?.referenceImageMediaGenerationIds ?? [],
     });
     terminal = true;
     return {
@@ -1340,4 +1436,13 @@ export async function generateManagedStyle1Video(
   } finally {
     if (terminal) await locks.release(scope);
   }
+}
+
+/** Backward-compatible Style 1 wrapper over the shared managed engine. */
+export function generateManagedStyle1Video(
+  actor: ServiceActorContext,
+  command: GenerateManagedStyle1VideoCommand,
+  dependencies: GenerateManagedStyle1VideoDependencies = {},
+): Promise<GenerateManagedStyle1VideoResult> {
+  return generateManagedVideo(actor, command, dependencies);
 }

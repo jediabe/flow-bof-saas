@@ -8,8 +8,9 @@ import { fileURLToPath } from "node:url";
 import { PrismaClient } from "@prisma/client";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ObjectStorage, PutManagedObjectInput } from "@/lib/storage";
+import { compileStyleManifest } from "@/lib/content-styles/registry";
 import { createApexFlowAdapter, type ApexFlowAdapter } from "../apex-flow-adapter";
-import { generateManagedStyle1Video } from "../generate-video";
+import { generateManagedStyle1Video, generateManagedVideo } from "../generate-video";
 import { createOperationRepository } from "../operations";
 import type { VideoCreativeDirection } from "../types";
 
@@ -109,6 +110,7 @@ function frozenSnapshot() {
 
 function createAdapter() {
   return {
+    uploadAsset: vi.fn(),
     generateImage: vi.fn(),
     startVideo: vi.fn(async () => ({ providerJobId: "provider-job-1" })),
     pollVideo: vi.fn(async () => ({
@@ -315,6 +317,218 @@ describe("generateManagedStyle1Video", () => {
     expect(startInput.prompt).toContain(
       "Preserve product label layout, lettering placement, nozzle geometry, and packaging proportions exactly",
     );
+  });
+
+  it("starts the first no-frame Style 2 clip with frozen character references and no start image", async () => {
+    const manifest = compileStyleManifest("style2", "managed-style2-v1", "handheld");
+    const snapshot = {
+      objective: "create_style2_piece",
+      style: "style2",
+      specVersion: "managed-style2-v1",
+      variant: "handheld",
+      product: { id: productId, name: "product", references: [] },
+      modelSnapshot: {
+        imageModel: "nano-banana-pro",
+        videoModel: "veo-3.1-lite-low-priority",
+      },
+      styleManifest: manifest,
+      references: {
+        character: { id: "registered-character-1", kind: "registered_character" },
+        product: null,
+        garment: null,
+      },
+      slots: manifest.slots.map((slot) => ({
+        slot: slot.id,
+        mediaType: slot.mediaType,
+        prompt: `frozen ${slot.id} prompt`,
+        promptCompilerId: slot.promptCompilerId,
+        generation: {
+          aspectRatio: slot.mediaType === "image" ? "9:16" : "portrait",
+          durationSeconds: slot.providerRequestDurationSeconds,
+          startImageSlot: slot.sourceDependency,
+          characterReferenceIds: ["registered-character-1"],
+          referenceAttachmentIds: [],
+        },
+      })),
+    };
+    await prisma.contentRun.update({
+      where: { id: contentRunId },
+      data: { style: "style2", promptSnapshotJson: JSON.stringify(snapshot) },
+    });
+    const adapter = createAdapter();
+    const storage = createStorage();
+    const style2Actor = {
+      workspaceId,
+      actorType: "service" as const,
+      actorId: "hermes",
+    };
+    const style2Command = {
+      contentRunId,
+      slot: "N1" as const,
+      idempotencyKey: "style2-handheld-n1",
+    };
+    const style2Dependencies = {
+      prisma,
+      objectStorage: storage,
+      createAdapter: () => adapter,
+      fetchMedia: vi.fn(async () =>
+        new Response(MP4_BYTES, { headers: { "content-type": "video/mp4" } }),
+      ),
+    };
+
+    const result = await generateManagedVideo(
+      style2Actor,
+      style2Command,
+      style2Dependencies,
+    );
+
+    expect(adapter.startVideo).toHaveBeenCalledExactlyOnceWith({
+      prompt: "frozen N1 prompt",
+      model: "veo-3.1-lite-low-priority",
+      characterReferenceIds: ["registered-character-1"],
+      aspectRatio: "portrait",
+      durationSeconds: 8,
+    });
+    expect(result).toMatchObject({
+      slot: "N1",
+      operationStatus: "running",
+      requiredNextAction: { type: "WAIT_FOR_OPERATION" },
+    });
+    const operation = await prisma.contentOperation.findFirstOrThrow({
+      where: { contentRunId, sceneLabel: "N1" },
+    });
+    expect(JSON.parse(operation.resultJson!)).toEqual({
+      sourceImageId: null,
+      sourceImageMediaGenerationId: null,
+      characterReferenceIds: ["registered-character-1"],
+      referenceImageMediaGenerationIds: [],
+    });
+
+    vi.mocked(adapter.pollVideo).mockResolvedValue({
+      status: "completed",
+      providerJobId: "provider-job-1",
+      mediaGenerationId: "style2-video-n1",
+      url: "https://provider.example/style2-n1.mp4",
+    });
+    const completed = await generateManagedVideo(
+      style2Actor,
+      style2Command,
+      style2Dependencies,
+    );
+    const replayed = await generateManagedVideo(
+      style2Actor,
+      style2Command,
+      style2Dependencies,
+    );
+
+    expect(completed).toMatchObject({
+      operationStatus: "succeeded",
+      slot: "N1",
+      asset: {
+        sceneLabel: "N1",
+        sourceImageId: null,
+        imageMediaGenerationId: null,
+        qaStatus: "NOT_QA_CHECKED",
+      },
+      requiredNextAction: { type: "RUN_QA", slot: "N1" },
+    });
+    if (completed.operationStatus !== "succeeded") {
+      throw new Error("expected completed Style 2 video operation");
+    }
+    expect(replayed).toMatchObject({
+      operationId: completed.operationId,
+      asset: { id: completed.asset.id },
+    });
+    expect(adapter.startVideo).toHaveBeenCalledTimes(1);
+    expect(adapter.pollVideo).toHaveBeenCalledTimes(1);
+    expect(storage.put).toHaveBeenCalledTimes(1);
+    await expect(
+      prisma.flowGeneratedVideo.count({ where: { contentRunId, sceneLabel: "N1" } }),
+    ).resolves.toBe(1);
+    const terminalOperation = await prisma.contentOperation.findFirstOrThrow({
+      where: { contentRunId, sceneLabel: "N1" },
+    });
+    expect(JSON.parse(terminalOperation.resultJson!)).toMatchObject({
+      assetId: completed.asset.id,
+      sourceImageId: null,
+      sourceImageMediaGenerationId: null,
+      characterReferenceIds: ["registered-character-1"],
+      referenceImageMediaGenerationIds: [],
+    });
+  });
+
+  it("uses only the approved start image for a dependent Style 2 video slot", async () => {
+    const manifest = compileStyleManifest("style2", "managed-style2-v1", "handheld");
+    await prisma.contentRun.update({
+      where: { id: contentRunId },
+      data: {
+        style: "style2",
+        promptSnapshotJson: JSON.stringify({
+          objective: "create_style2_piece",
+          style: "style2",
+          specVersion: "managed-style2-v1",
+          variant: "handheld",
+          product: { id: productId, name: "product", references: [] },
+          modelSnapshot: {
+            imageModel: "nano-banana-pro",
+            videoModel: "veo-3.1-lite-low-priority",
+          },
+          styleManifest: manifest,
+          slots: manifest.slots.map((slot) => ({
+            slot: slot.id,
+            mediaType: slot.mediaType,
+            prompt: `frozen ${slot.id} prompt`,
+            generation: {
+              aspectRatio: slot.mediaType === "image" ? "9:16" : "portrait",
+              durationSeconds: slot.providerRequestDurationSeconds,
+              startImageSlot: slot.sourceDependency,
+              characterReferenceIds: ["registered-character-1"],
+              referenceAttachmentIds: ["frozen-product-reference"],
+            },
+          })),
+        }),
+      },
+    });
+    await prisma.flowGeneratedVideo.create({
+      data: {
+        productId,
+        contentRunId,
+        sceneLabel: "N1",
+        mediaGenerationId: "style2-n1-approved",
+        qaStatus: "APPROVED",
+      },
+    });
+    const n2 = await prisma.flowGeneratedImage.create({
+      data: {
+        productId,
+        contentRunId,
+        sceneLabel: "N2",
+        mediaGenerationId: "style2-n2-approved",
+        qaStatus: "APPROVED",
+      },
+    });
+    const adapter = createAdapter();
+
+    await generateManagedVideo(
+      { workspaceId, actorType: "service", actorId: "hermes" },
+      { contentRunId, slot: "N3", idempotencyKey: "style2-handheld-n3" },
+      { prisma, objectStorage: createStorage(), createAdapter: () => adapter },
+    );
+
+    expect(adapter.startVideo).toHaveBeenCalledExactlyOnceWith({
+      prompt: "frozen N3 prompt",
+      model: "veo-3.1-lite-low-priority",
+      sourceImageMediaGenerationId: "style2-n2-approved",
+      aspectRatio: "portrait",
+      durationSeconds: 8,
+    });
+    const operation = await prisma.contentOperation.findFirstOrThrow({
+      where: { contentRunId, sceneLabel: "N3" },
+    });
+    expect(JSON.parse(operation.resultJson!)).toEqual({
+      sourceImageId: n2.id,
+      sourceImageMediaGenerationId: "style2-n2-approved",
+    });
   });
 
   it("binds creative direction to the reservation and rejects a changed same-key replay before provider work", async () => {

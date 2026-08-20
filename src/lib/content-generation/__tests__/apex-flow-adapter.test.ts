@@ -86,6 +86,48 @@ describe("APEX Flow generation adapter", () => {
     });
   });
 
+  it("validates a registered character against the workspace-bound Flow account", async () => {
+    const callTool = mockCaller({
+      character: "registered-character-1",
+      entityId: "character-entity-1",
+      displayName: "Creator",
+    });
+    const adapter = createApexFlowAdapter(boundContext, { callTool });
+
+    await expect(
+      adapter.getCharacter({ characterReferenceId: "registered-character-1" }),
+    ).resolves.toEqual({
+      characterReferenceId: "registered-character-1",
+      entityId: "character-entity-1",
+    });
+    expect(callTool).toHaveBeenCalledWith({
+      sub: "workspace-1",
+      flowEmail: "bound-account@example.com",
+      name: "google_flow_get_character",
+      args: {
+        character_ref: "registered-character-1",
+        response_format: "json",
+      },
+    });
+  });
+
+  it("rejects a character lookup that does not return the requested identity", async () => {
+    const adapter = createApexFlowAdapter(boundContext, {
+      callTool: mockCaller({
+        character: "other-character",
+        entityId: "other-entity",
+      }),
+    });
+
+    await expect(
+      adapter.getCharacter({ characterReferenceId: "registered-character-1" }),
+    ).rejects.toMatchObject({
+      classification: "terminal-nontechnical",
+      code: "malformed_output",
+      acceptedProviderIdentity: true,
+    });
+  });
+
   it("normalizes one synchronous image result without exposing the bound Flow account in generation input", async () => {
     const callTool = mockCaller({
       operation: "generate_image",
@@ -106,6 +148,7 @@ describe("APEX Flow generation adapter", () => {
       model: "nano-banana-pro",
       aspectRatio: "9:16",
       referenceMediaIds: ["reference-1"],
+      characterReferenceIds: ["registered-character-1"],
     });
 
     expect(result).toEqual({
@@ -122,6 +165,7 @@ describe("APEX Flow generation adapter", () => {
         aspect_ratio: "9:16",
         count: 1,
         references: ["reference-1"],
+        characters: ["registered-character-1"],
         response_format: "json",
       },
     });
@@ -168,6 +212,63 @@ describe("APEX Flow generation adapter", () => {
         response_format: "json",
       },
     });
+  });
+
+  it("starts a no-frame video from frozen character and reference attachments", async () => {
+    const callTool = mockCaller({
+      operation: "generate_video",
+      mode: "async",
+      jobId: "provider-job-no-frame",
+      status: "created",
+      media: [],
+    });
+    const adapter = createApexFlowAdapter(boundContext, { callTool });
+
+    await expect(
+      adapter.startVideo({
+        prompt: "Frozen Style 2 opener",
+        model: "veo-3.1-lite-low-priority",
+        characterReferenceIds: ["registered-character-1"],
+        referenceImageMediaGenerationIds: ["uploaded-product-1"],
+        aspectRatio: "portrait",
+        durationSeconds: 8,
+      }),
+    ).resolves.toEqual({ providerJobId: "provider-job-no-frame" });
+    expect(callTool).toHaveBeenCalledWith({
+      sub: "workspace-1",
+      flowEmail: "bound-account@example.com",
+      name: "google_flow_generate_video",
+      args: {
+        prompt: "Frozen Style 2 opener",
+        model: "veo-3.1-lite-low-priority",
+        characters: ["registered-character-1"],
+        reference_images: ["uploaded-product-1"],
+        aspect_ratio: "portrait",
+        duration: 8,
+        count: 1,
+        async: true,
+        response_format: "json",
+      },
+    });
+  });
+
+  it("rejects mixing a start image with character or reference attachments", async () => {
+    const callTool = mockCaller({});
+    const adapter = createApexFlowAdapter(boundContext, { callTool });
+
+    await expect(
+      adapter.startVideo({
+        prompt: "Invalid mixed request",
+        model: "veo-3.1-lite",
+        sourceImageMediaGenerationId: "source-image-1",
+        characterReferenceIds: ["registered-character-1"],
+      }),
+    ).rejects.toMatchObject({
+      classification: "terminal-nontechnical",
+      code: "invalid_input",
+      acceptedProviderIdentity: false,
+    });
+    expect(callTool).not.toHaveBeenCalled();
   });
 
   it("rejects a failed asynchronous video start even when it includes a job ID", async () => {

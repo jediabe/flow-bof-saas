@@ -104,8 +104,10 @@ export interface RecordAcceptedVideoStartInput {
   attemptNumber: number;
   providerJobId: string;
   model: ManagedVideoModel;
-  sourceImageId: string;
-  sourceImageMediaGenerationId: string;
+  sourceImageId?: string;
+  sourceImageMediaGenerationId?: string;
+  characterReferenceIds?: string[];
+  referenceImageMediaGenerationIds?: string[];
   audioRetryStartToken?: string;
 }
 
