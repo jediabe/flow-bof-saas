@@ -113,6 +113,26 @@ describe("final QA policy fixtures", () => {
     );
   });
 
+  it("does not hard-block approval for a major never-category criterion failure", () => {
+    const result = visualResult({
+      overallScore: 90,
+      hasHardFailure: false,
+      checks: FINAL_RUBRIC.map((criterion) => ({
+        name: criterion.name,
+        passed: criterion.name !== "OUTPUT_SUITABILITY",
+        score: criterion.name === "OUTPUT_SUITABILITY" ? 60 : 95,
+        ...(criterion.name === "OUTPUT_SUITABILITY"
+          ? { severity: "major" as const, reason: "Holistic suitability concern." }
+          : {}),
+      })),
+    });
+
+    expect(decideFinalQa({ deterministic: deterministicPass, visual: result })).toMatchObject({
+      decision: "APPROVE",
+      score: 90,
+    });
+  });
+
   it("maps malformed or incomplete sampled-frame output to FAILED", () => {
     const malformed = visualResult({ checks: visualResult().checks.slice(1) });
     expect(decideFinalQa({ deterministic: deterministicPass, visual: malformed })).toMatchObject({

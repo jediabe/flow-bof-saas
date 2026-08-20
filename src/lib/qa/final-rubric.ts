@@ -198,7 +198,7 @@ export function decideFinalQa(input: FinalQaDecisionInput): FinalQaEvaluation {
     if (criterion.hardFailureCategory === "if_major") {
       return check.severity === undefined || check.severity === "major";
     }
-    return check.severity === "major";
+    return false;
   });
   const threshold = input.approveScoreThreshold ?? 80;
   const approved = visual.overallScore >= threshold && !visual.hasHardFailure && !blockingCheck;
