@@ -31,7 +31,14 @@ function frozenSnapshot() {
     product: {
       id: productId,
       primaryReferenceImageId: "frozen-primary",
-      references: [{ id: "frozen-primary", role: "primary" }],
+      references: [
+        {
+          id: "frozen-primary",
+          role: "primary",
+          url: "https://saas.example/reference.png",
+          bytes: PNG_BYTES.byteLength,
+        },
+      ],
     },
     modelSnapshot: {
       imageModel: "nano-banana-pro",
@@ -93,6 +100,12 @@ function frozenSnapshot() {
 
 function createAdapter() {
   return {
+    uploadAsset: vi.fn(async () => ({
+      mediaGenerationId: "flow-uploaded-frozen-primary",
+      kind: "image" as const,
+      mimeType: "image/png",
+      sizeBytes: PNG_BYTES.byteLength,
+    })),
     generateImage: vi.fn(async () => ({
       mediaGenerationId: "flow-image-1",
       url: "https://provider.example/image.png",
@@ -248,7 +261,13 @@ describe("generateManagedStyle1Image", () => {
       prompt: "frozen store prompt",
       model: "nano-banana-pro",
       aspectRatio: "9:16",
-      referenceMediaIds: ["frozen-primary"],
+      referenceMediaIds: ["flow-uploaded-frozen-primary"],
+    });
+    expect(adapter.uploadAsset).toHaveBeenCalledExactlyOnceWith({
+      base64Data: Buffer.from(PNG_BYTES).toString("base64"),
+      mimeType: "image/png",
+      expectedKind: "image",
+      expectedSizeBytes: PNG_BYTES.byteLength,
     });
     expect(result).toMatchObject({
       contentRunId,
@@ -300,7 +319,7 @@ describe("generateManagedStyle1Image", () => {
       prompt: "frozen home prompt",
       model: "nano-banana-pro",
       aspectRatio: "9:16",
-      referenceMediaIds: ["frozen-primary"],
+      referenceMediaIds: ["flow-uploaded-frozen-primary"],
     });
     await expect(
       prisma.flowGeneratedImage.findFirstOrThrow({
@@ -429,6 +448,9 @@ describe("generateManagedStyle1Image", () => {
           prisma,
           objectStorage: createStorage(),
           createAdapter: () => adapter,
+          fetchMedia: vi.fn(async () =>
+            new Response(PNG_BYTES, { headers: { "content-type": "image/png" } }),
+          ),
         },
       ),
     ).rejects.toThrow("provider rejected");
@@ -496,6 +518,9 @@ describe("generateManagedStyle1Image", () => {
           objectStorage: storage,
           createAdapter: () => createAdapter(),
           persistMedia: persistMedia as never,
+          fetchMedia: vi.fn(async () =>
+            new Response(PNG_BYTES, { headers: { "content-type": "image/png" } }),
+          ),
         },
       ),
     ).rejects.toMatchObject({

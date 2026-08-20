@@ -8,8 +8,9 @@ import { fileURLToPath } from "node:url";
 import { PrismaClient } from "@prisma/client";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ObjectStorage, PutManagedObjectInput } from "@/lib/storage";
-import type { ApexFlowAdapter } from "../apex-flow-adapter";
+import { createApexFlowAdapter, type ApexFlowAdapter } from "../apex-flow-adapter";
 import { generateManagedStyle1Video } from "../generate-video";
+import { createOperationRepository } from "../operations";
 
 const MP4_BYTES = new Uint8Array([
   0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d,
@@ -106,6 +107,45 @@ function createStorage() {
     delete: vi.fn(),
     createSignedReadUrl: vi.fn(),
   } as unknown as ObjectStorage;
+}
+
+function withAcceptedStartPersistenceRace(racePrisma: PrismaClient): PrismaClient {
+  return new Proxy(racePrisma, {
+    get(target, prop, receiver) {
+      if (prop !== "contentOperation") return Reflect.get(target, prop, receiver);
+      const delegate = target.contentOperation;
+      return new Proxy(delegate, {
+        get(contentOperation, delegateProp, delegateReceiver) {
+          if (delegateProp !== "updateMany") {
+            return Reflect.get(contentOperation, delegateProp, delegateReceiver);
+          }
+          return async (args: Parameters<typeof delegate.updateMany>[0]) => {
+            const data = args.data as
+              | { providerJobId?: unknown; resultJson?: unknown }
+              | undefined;
+            const operationId =
+              typeof args.where?.id === "string" ? args.where.id : null;
+            if (data?.providerJobId !== "provider-job-1" || !operationId) {
+              return delegate.updateMany(args);
+            }
+            if (data.resultJson === undefined) {
+              const result = await delegate.updateMany(args);
+              await target.contentOperation.update({
+                where: { id: operationId },
+                data: { status: "failed" },
+              });
+              return result;
+            }
+            await target.contentOperation.update({
+              where: { id: operationId },
+              data: { status: "failed" },
+            });
+            return delegate.updateMany(args);
+          };
+        },
+      });
+    },
+  }) as PrismaClient;
 }
 
 beforeAll(() => {
@@ -504,6 +544,53 @@ describe("generateManagedStyle1Video", () => {
     await expect(prisma.workspaceProviderLock.count()).resolves.toBe(0);
   });
 
+  it("persists accepted source lineage at start and reuses it on resume", async () => {
+    const adapter = createAdapter();
+    vi.mocked(adapter.pollVideo).mockResolvedValue({
+      status: "completed",
+      providerJobId: "provider-job-1",
+      mediaGenerationId: "flow-video-from-original-source",
+      url: "https://provider.example/video-from-original.mp4",
+    });
+    const command = {
+      contentRunId,
+      slot: "scene_1_store_video" as const,
+      idempotencyKey: "immutable-start-lineage",
+    };
+    const dependencies = {
+      prisma,
+      objectStorage: createStorage(),
+      createAdapter: () => adapter,
+      fetchMedia: vi.fn(async () =>
+        new Response(MP4_BYTES, { headers: { "content-type": "video/mp4" } }),
+      ),
+    };
+    const actor = { workspaceId, actorType: "service" as const, actorId: "hermes" };
+
+    await generateManagedStyle1Video(actor, command, dependencies);
+    await prisma.flowGeneratedImage.update({
+      where: { id: sourceImageId },
+      data: { mediaGenerationId: "mutated-latest-source-media" },
+    });
+
+    const completed = await generateManagedStyle1Video(actor, command, dependencies);
+
+    expect(completed).toMatchObject({
+      operationStatus: "succeeded",
+      asset: {
+        sourceImageId,
+        imageMediaGenerationId: "flow-source-image-1",
+      },
+    });
+    expect(adapter.startVideo).toHaveBeenCalledExactlyOnceWith({
+      prompt: "frozen store video prompt",
+      model: "veo-3.1-lite",
+      sourceImageMediaGenerationId: "flow-source-image-1",
+      aspectRatio: "portrait",
+      durationSeconds: 8,
+    });
+  });
+
   it.each([
     ["nonapproved", async () => {
       await prisma.flowGeneratedImage.update({
@@ -591,17 +678,39 @@ describe("generateManagedStyle1Video", () => {
   });
 
   it("uses all safe technical start retries without duplicating an accepted job", async () => {
-    const adapter = createAdapter();
-    const retryable = () =>
-      Object.assign(new Error("network timeout"), {
-        classification: "technical-retryable",
-        acceptedProviderIdentity: false,
-        code: "transport_failure",
+    const callTool = vi
+      .fn()
+      .mockResolvedValueOnce({
+        isError: true,
+        content: [{ type: "text", text: "network timeout" }],
+        structuredContent: {
+          retrySafety: { kind: "provider_pre_acceptance", safeToRetry: true },
+        },
+      })
+      .mockResolvedValueOnce({
+        isError: true,
+        content: [{ type: "text", text: "network timeout" }],
+        structuredContent: {
+          retrySafety: { kind: "provider_pre_acceptance", safeToRetry: true },
+        },
+      })
+      .mockResolvedValueOnce({
+        isError: false,
+        content: [],
+        structuredContent: {
+          operation: "generate_video",
+          mode: "async",
+          status: "created",
+          jobId: "provider-job-after-retries",
+        },
       });
-    vi.mocked(adapter.startVideo)
-      .mockRejectedValueOnce(retryable())
-      .mockRejectedValueOnce(retryable())
-      .mockResolvedValueOnce({ providerJobId: "provider-job-after-retries" });
+    const adapter = createApexFlowAdapter(
+      {
+        actor: { workspaceId, actorType: "service", actorId: "hermes" },
+        flowEmail: "bound@example.test",
+      },
+      { callTool },
+    );
 
     const result = await generateManagedStyle1Video(
       { workspaceId, actorType: "service", actorId: "hermes" },
@@ -617,7 +726,7 @@ describe("generateManagedStyle1Video", () => {
       operationStatus: "running",
       providerJobId: "provider-job-after-retries",
     });
-    expect(adapter.startVideo).toHaveBeenCalledTimes(3);
+    expect(callTool).toHaveBeenCalledTimes(3);
     await expect(
       prisma.contentOperation.findFirstOrThrow({ where: { contentRunId } }),
     ).resolves.toMatchObject({
@@ -627,18 +736,38 @@ describe("generateManagedStyle1Video", () => {
     });
   });
 
-  it("never starts again when persisting an accepted provider identity fails", async () => {
+  it("does not retry ambiguous adapter-bound start transport errors", async () => {
+    const callTool = vi.fn().mockResolvedValue({
+      isError: true,
+      content: [{ type: "text", text: "network timeout before provider acceptance" }],
+    });
+    const adapter = createApexFlowAdapter(
+      {
+        actor: { workspaceId, actorType: "service", actorId: "hermes" },
+        flowEmail: "bound@example.test",
+      },
+      { callTool },
+    );
+
+    await expect(
+      generateManagedStyle1Video(
+        { workspaceId, actorType: "service", actorId: "hermes" },
+        {
+          contentRunId,
+          slot: "scene_1_store_video",
+          idempotencyKey: "ambiguous-adapter-error",
+        },
+        { prisma, objectStorage: createStorage(), createAdapter: () => adapter },
+      ),
+    ).rejects.toMatchObject({
+      classification: "terminal-nontechnical",
+      code: "transport_failure",
+    });
+    expect(callTool).toHaveBeenCalledTimes(1);
+  });
+
+  it("never starts again when accepted-start persistence races after the mutable pre-read", async () => {
     const adapter = createAdapter();
-    const base = (await import("../operations")).createOperationRepository(prisma);
-    const repository = {
-      ...base,
-      recordProviderJobId: vi.fn(async () => {
-        throw Object.assign(new Error("database unavailable after accepted start"), {
-          code: "PROVIDER_ID_PERSISTENCE_FAILED",
-          acceptedProviderIdentity: true,
-        });
-      }),
-    };
     const command = {
       contentRunId,
       slot: "scene_1_store_video" as const,
@@ -648,17 +777,26 @@ describe("generateManagedStyle1Video", () => {
       prisma,
       objectStorage: createStorage(),
       createAdapter: () => adapter,
-      operationRepository: repository,
+      operationRepository: createOperationRepository(
+        withAcceptedStartPersistenceRace(prisma),
+      ),
     };
     const actor = { workspaceId, actorType: "service" as const, actorId: "hermes" };
 
-    await expect(generateManagedStyle1Video(actor, command, dependencies)).rejects.toThrow(
-      "database unavailable after accepted start",
-    );
+    await expect(generateManagedStyle1Video(actor, command, dependencies)).rejects.toMatchObject({
+      code: "OPERATION_TERMINAL",
+    });
     await expect(generateManagedStyle1Video(actor, command, dependencies)).rejects.toMatchObject({
       code: "OPERATION_TERMINAL",
     });
     expect(adapter.startVideo).toHaveBeenCalledTimes(1);
+    await expect(
+      prisma.contentOperation.findFirstOrThrow({ where: { contentRunId } }),
+    ).resolves.toMatchObject({
+      status: "failed",
+      providerJobId: null,
+      resultJson: null,
+    });
     await expect(prisma.workspaceProviderLock.count()).resolves.toBe(0);
   });
 });
