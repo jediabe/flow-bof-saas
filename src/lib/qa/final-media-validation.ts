@@ -45,6 +45,9 @@ export interface FinalMediaValidationLimits {
 }
 
 export type FinalMediaValidationFailureCode =
+  | "OBJECT_BYTES_MISMATCH"
+  | "OBJECT_HASH_MISMATCH"
+  | "MANIFEST_INVALID"
   | "CONTAINER_NOT_MP4"
   | "VIDEO_STREAM_INVALID"
   | "AUDIO_STREAM_INVALID"

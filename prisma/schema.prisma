@@ -786,6 +786,7 @@ model FinalVideoAsset {
   finalAudioCodec       String?
   mediaValidationPassed Boolean?
   mediaValidatedAt      DateTime?
+  mediaValidationJson   String?
   finalQaStatus         String   @default("NOT_QA_CHECKED")
   finalQaScore          Int?
   finalQaVerdict        String?
