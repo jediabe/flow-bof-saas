@@ -112,4 +112,61 @@ describe("managed Style 1 Prisma schema contract", () => {
       expectField(lock, "operationId", "String");
     }
   });
+
+  it("persists one legacy-safe final video per content run with complete lifecycle metadata", () => {
+    const nullableFields = [
+      "voiceoverScript",
+      "voiceoverProvider",
+      "voiceoverVoiceId",
+      "voiceoverModel",
+      "audioStorageBucket",
+      "audioStorageKey",
+      "audioContentType",
+      "audioBytes",
+      "audioSha256",
+      "audioDurationSeconds",
+      "assemblyManifestJson",
+      "finalStorageBucket",
+      "finalStorageKey",
+      "finalContentType",
+      "finalBytes",
+      "finalSha256",
+      "finalDurationSeconds",
+      "finalWidth",
+      "finalHeight",
+      "finalVideoCodec",
+      "finalAudioCodec",
+      "mediaValidationPassed",
+      "mediaValidatedAt",
+      "finalQaScore",
+      "finalQaVerdict",
+      "finalQaEvaluatedAt",
+      "failureCode",
+      "failureJson",
+      "failedAt",
+    ] as const;
+
+    for (const schema of [sqliteSchema, postgresSchema]) {
+      const run = modelBody(schema, "ContentRun");
+      expectField(run, "finalVideo", "FinalVideoAsset?");
+
+      const finalVideo = modelBody(schema, "FinalVideoAsset");
+      expectField(finalVideo, "contentRunId", "String");
+      expect(finalVideo).toMatch(/^\s*attempt\s+Int\s+@default\(1\)/m);
+      expect(finalVideo).toMatch(/^\s*status\s+String\s+@default\("PENDING"\)/m);
+      expect(finalVideo).toMatch(
+        /^\s*finalQaStatus\s+String\s+@default\("NOT_QA_CHECKED"\)/m,
+      );
+      expect(finalVideo).toContain("@@unique([contentRunId])");
+      for (const field of nullableFields) {
+        expect(finalVideo, `${field} must be nullable for staged persistence`).toMatch(
+          new RegExp(`^\\s*${field}\\s+\\w+\\?`, "m"),
+        );
+      }
+
+      const qaAttempt = modelBody(schema, "QaAttempt");
+      expectField(qaAttempt, "finalVideoId", "String?");
+      expect(qaAttempt).toContain("@@index([finalVideoId])");
+    }
+  });
 });

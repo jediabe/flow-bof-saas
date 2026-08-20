@@ -47,6 +47,37 @@ interface ProjectableOperation {
   errorJson?: string | null;
 }
 
+interface ProjectableFinalVideo {
+  id: string;
+  contentRunId: string;
+  status: string;
+  audioStorageBucket: string | null;
+  audioStorageKey: string | null;
+  audioContentType: string | null;
+  audioBytes: number | null;
+  audioSha256: string | null;
+  audioDurationSeconds: number | null;
+  assemblyManifestJson: string | null;
+  finalStorageBucket: string | null;
+  finalStorageKey: string | null;
+  finalContentType: string | null;
+  finalBytes: number | null;
+  finalSha256: string | null;
+  finalDurationSeconds: number | null;
+  finalWidth: number | null;
+  finalHeight: number | null;
+  finalVideoCodec: string | null;
+  finalAudioCodec: string | null;
+  mediaValidationPassed: boolean | null;
+  mediaValidatedAt: Date | null;
+  finalQaStatus: string;
+  finalQaScore: number | null;
+  finalQaVerdict: string | null;
+  finalQaEvaluatedAt: Date | null;
+  failureCode: string | null;
+  failureJson: string | null;
+}
+
 export interface ProjectContentRunInput {
   run: {
     id: string;
@@ -58,6 +89,7 @@ export interface ProjectContentRunInput {
   videos: ProjectableAsset[];
   /** Operations should be supplied oldest-to-newest. */
   operations: ProjectableOperation[];
+  finalVideo?: ProjectableFinalVideo | null;
 }
 
 interface FrozenRunSnapshot {
@@ -235,10 +267,45 @@ function normalizeTerminalReason(errorJson: string | null | undefined): string {
   return JSON.stringify({ code: "OPERATION_FAILED" });
 }
 
+function finalReadyFactorsSatisfied(
+  allApproved: boolean,
+  finalVideo: ProjectableFinalVideo | null | undefined,
+): boolean {
+  return Boolean(
+    allApproved &&
+      finalVideo &&
+      finalVideo.contentRunId &&
+      finalVideo.audioStorageBucket &&
+      finalVideo.audioStorageKey &&
+      finalVideo.audioContentType &&
+      finalVideo.audioBytes &&
+      finalVideo.audioSha256 &&
+      finalVideo.audioDurationSeconds &&
+      finalVideo.assemblyManifestJson &&
+      finalVideo.finalStorageBucket &&
+      finalVideo.finalStorageKey &&
+      finalVideo.finalContentType === "video/mp4" &&
+      finalVideo.finalBytes &&
+      finalVideo.finalSha256 &&
+      finalVideo.finalDurationSeconds &&
+      finalVideo.finalWidth &&
+      finalVideo.finalHeight &&
+      finalVideo.finalVideoCodec &&
+      finalVideo.finalAudioCodec &&
+      finalVideo.mediaValidationPassed === true &&
+      finalVideo.mediaValidatedAt &&
+      finalVideo.finalQaStatus === "APPROVED" &&
+      finalVideo.finalQaScore !== null &&
+      finalVideo.finalQaVerdict &&
+      finalVideo.finalQaEvaluatedAt,
+  );
+}
+
 function deriveProjectionStateAndAction(input: {
   persistedStatus: ContentRunState;
   slots: ContentRunProjection["slots"];
   operations: ProjectableOperation[];
+  finalVideo?: ProjectableFinalVideo | null;
 }): {
   status: ContentRunState;
   action: RequiredNextAction;
@@ -265,16 +332,21 @@ function deriveProjectionStateAndAction(input: {
     };
   }
   if (input.persistedStatus === "ready") {
-    if (allApproved) {
+    if (finalReadyFactorsSatisfied(allApproved, input.finalVideo)) {
       return { status: "ready", action: { type: "COMPLETE" } };
     }
-    const reason = JSON.stringify({ code: "READY_WITHOUT_FOUR_APPROVED_SLOTS" });
+    const reason = JSON.stringify({ code: "READY_WITHOUT_FINAL_OUTPUT_INVARIANTS" });
     return { status: "failed", action: { type: "FAILED", reason }, terminalReason: reason };
   }
 
   const invalidOperation = input.operations.find(
     (operation) =>
-      !["image_generation", "video_generation"].includes(operation.kind) ||
+      ![
+        "image_generation",
+        "video_generation",
+        "voiceover_generation",
+        "final_assembly",
+      ].includes(operation.kind) ||
       !["requested", "running", "succeeded", "failed"].includes(operation.status),
   );
   if (invalidOperation) {
@@ -302,6 +374,15 @@ function deriveProjectionStateAndAction(input: {
     .reverse()
     .find((operation) => ACTIVE_OPERATION_STATUSES.has(operation.status));
   if (activeOperation) {
+    if (
+      activeOperation.kind === "voiceover_generation" ||
+      activeOperation.kind === "final_assembly"
+    ) {
+      return {
+        status: "generating",
+        action: { type: "WAIT_FOR_OPERATION", operationId: activeOperation.id },
+      };
+    }
     const slot = slotFromSceneLabel(activeOperation.sceneLabel);
     if (!slot) {
       const reason = JSON.stringify({
@@ -362,7 +443,44 @@ function deriveProjectionStateAndAction(input: {
   }
 
   if (allApproved) {
-    return { status: "ready", action: { type: "COMPLETE" } };
+    const finalVideo = input.finalVideo;
+    if (!finalVideo) {
+      return { status: "generating", action: { type: "GENERATE_VOICEOVER" } };
+    }
+    if (finalVideo.status === "FAILED") {
+      const reason = JSON.stringify({ code: finalVideo.failureCode ?? "FINAL_OUTPUT_FAILED" });
+      return { status: "failed", action: { type: "FAILED", reason }, terminalReason: reason };
+    }
+    if (finalVideo.status === "HUMAN_REVIEW" || finalVideo.finalQaStatus === "HUMAN_REVIEW") {
+      return {
+        status: "human_review",
+        action: { type: "HUMAN_REVIEW", reason: "Final video requires human review." },
+      };
+    }
+    if (finalReadyFactorsSatisfied(true, finalVideo) && finalVideo.status === "APPROVED") {
+      return { status: "ready", action: { type: "COMPLETE" } };
+    }
+    if (finalVideo.status === "PENDING") {
+      return { status: "generating", action: { type: "GENERATE_VOICEOVER" } };
+    }
+    if (["VOICEOVER_READY", "ASSEMBLING", "ASSEMBLED"].includes(finalVideo.status)) {
+      return {
+        status: "generating",
+        action: { type: "ASSEMBLE_FINAL", finalVideoId: finalVideo.id },
+      };
+    }
+    if (
+      ["MEDIA_VALIDATED", "QA_RUNNING"].includes(finalVideo.status) &&
+      finalVideo.mediaValidationPassed === true &&
+      finalVideo.finalStorageKey
+    ) {
+      return {
+        status: "qa_running",
+        action: { type: "RUN_FINAL_QA", finalVideoId: finalVideo.id },
+      };
+    }
+    const reason = JSON.stringify({ code: "INVALID_FINAL_OUTPUT_LIFECYCLE" });
+    return { status: "failed", action: { type: "FAILED", reason }, terminalReason: reason };
   }
 
   for (let index = 0; index < input.slots.length; index += 1) {
@@ -414,6 +532,8 @@ export function projectContentRun(input: ProjectContentRunInput): ContentRunProj
     persistedStatus: input.run.status as ContentRunState,
     slots,
     operations,
+    finalVideo:
+      input.finalVideo?.contentRunId === input.run.id ? input.finalVideo : null,
   });
 
   return {

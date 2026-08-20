@@ -32,6 +32,9 @@ export type RequiredNextAction =
   | { type: "GENERATE_IMAGE"; slot: ImageSlot }
   | { type: "RUN_QA"; slot: ContentSlot; assetId: string }
   | { type: "GENERATE_VIDEO"; slot: VideoSlot; sourceAssetId: string }
+  | { type: "GENERATE_VOICEOVER" }
+  | { type: "ASSEMBLE_FINAL"; finalVideoId: string }
+  | { type: "RUN_FINAL_QA"; finalVideoId: string }
   | { type: "WAIT_FOR_OPERATION"; operationId: string }
   | { type: "HUMAN_REVIEW"; reason: string }
   | { type: "COMPLETE" }

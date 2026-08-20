@@ -264,7 +264,7 @@ function reconciliationDecision(
         (slotIndex === 2 &&
           action.type === "GENERATE_VIDEO" &&
           action.sourceAssetId === command.assetId) ||
-        (slotIndex === 3 && action.type === "COMPLETE")
+        (slotIndex === 3 && action.type === "GENERATE_VOICEOVER")
       : attempt.qaStatus === "FAILED"
         ? action.type === "FAILED"
         : action.type === "HUMAN_REVIEW";

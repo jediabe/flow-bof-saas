@@ -21,6 +21,7 @@ function baseInput(
     images: [],
     videos: [],
     operations: [],
+    finalVideo: null,
     ...overrides,
   };
 }
@@ -64,6 +65,40 @@ function video(
     qaStatus,
     qaScore: qaStatus === "APPROVED" ? 94 : null,
     qaVerdictJson: null,
+  };
+}
+
+function finalVideo(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "final-1",
+    contentRunId: "run-1",
+    status: "PENDING",
+    audioStorageBucket: null,
+    audioStorageKey: null,
+    audioContentType: null,
+    audioBytes: null,
+    audioSha256: null,
+    audioDurationSeconds: null,
+    assemblyManifestJson: null,
+    finalStorageBucket: null,
+    finalStorageKey: null,
+    finalContentType: null,
+    finalBytes: null,
+    finalSha256: null,
+    finalDurationSeconds: null,
+    finalWidth: null,
+    finalHeight: null,
+    finalVideoCodec: null,
+    finalAudioCodec: null,
+    mediaValidationPassed: null,
+    mediaValidatedAt: null,
+    finalQaStatus: "NOT_QA_CHECKED",
+    finalQaScore: null,
+    finalQaVerdict: null,
+    finalQaEvaluatedAt: null,
+    failureCode: null,
+    failureJson: null,
+    ...overrides,
   };
 }
 
@@ -198,7 +233,7 @@ describe("projectContentRun", () => {
     });
   });
 
-  it("derives ready only when all four selected assets are approved", () => {
+  it("derives final-output actions and READY only after all five factors", () => {
     const complete = baseInput({
       run: { ...baseInput().run, status: "qa_running" },
       images: [
@@ -211,6 +246,55 @@ describe("projectContentRun", () => {
       ],
     });
     expect(projectContentRun(complete)).toMatchObject({
+      status: "generating",
+      requiredNextAction: { type: "GENERATE_VOICEOVER" },
+    });
+
+    const audioReady = finalVideo({
+      status: "VOICEOVER_READY",
+      audioStorageBucket: "private-media",
+      audioStorageKey: "runs/run-1/voice.mp3",
+      audioContentType: "audio/mpeg",
+      audioBytes: 1234,
+      audioSha256: "a".repeat(64),
+      audioDurationSeconds: 10,
+    });
+    expect(projectContentRun({ ...complete, finalVideo: audioReady })).toMatchObject({
+      status: "generating",
+      requiredNextAction: { type: "ASSEMBLE_FINAL", finalVideoId: "final-1" },
+    });
+
+    const validated = finalVideo({
+      ...audioReady,
+      status: "MEDIA_VALIDATED",
+      assemblyManifestJson: "{}",
+      finalStorageBucket: "private-media",
+      finalStorageKey: "runs/run-1/final.mp4",
+      finalContentType: "video/mp4",
+      finalBytes: 4567,
+      finalSha256: "b".repeat(64),
+      finalDurationSeconds: 10,
+      finalWidth: 1080,
+      finalHeight: 1920,
+      finalVideoCodec: "h264",
+      finalAudioCodec: "aac",
+      mediaValidationPassed: true,
+      mediaValidatedAt: new Date(),
+    });
+    expect(projectContentRun({ ...complete, finalVideo: validated })).toMatchObject({
+      status: "qa_running",
+      requiredNextAction: { type: "RUN_FINAL_QA", finalVideoId: "final-1" },
+    });
+
+    const approved = finalVideo({
+      ...validated,
+      status: "APPROVED",
+      finalQaStatus: "APPROVED",
+      finalQaScore: 95,
+      finalQaVerdict: "Approved",
+      finalQaEvaluatedAt: new Date(),
+    });
+    expect(projectContentRun({ ...complete, finalVideo: approved })).toMatchObject({
       status: "ready",
       requiredNextAction: { type: "COMPLETE" },
     });
@@ -218,24 +302,58 @@ describe("projectContentRun", () => {
       projectContentRun({
         ...complete,
         run: { ...complete.run, status: "ready" },
-        operations: [
-          {
-            id: "stale-failure",
-            contentRunId: "run-1",
-            kind: "image_generation",
-            sceneLabel: "scene_1_store_image",
-            status: "failed",
-            errorJson: JSON.stringify({ code: "OLD_FAILURE" }),
-          },
-        ],
+        finalVideo: approved,
       }),
     ).toMatchObject({ status: "ready", requiredNextAction: { type: "COMPLETE" } });
 
-    const invalidPersistedReady = projectContentRun(
-      baseInput({ run: { ...baseInput().run, status: "ready" } }),
-    );
-    expect(invalidPersistedReady.status).not.toBe("ready");
-    expect(invalidPersistedReady.requiredNextAction.type).toBe("FAILED");
+    for (const factorMissing of [
+      { audioStorageKey: null },
+      { finalStorageKey: null },
+      { mediaValidationPassed: false },
+      { finalQaStatus: "FAILED" },
+    ]) {
+      const projection = projectContentRun({
+        ...complete,
+        run: { ...complete.run, status: "ready" },
+        finalVideo: finalVideo({ ...approved, ...factorMissing }),
+      });
+      expect(projection.status).not.toBe("ready");
+      expect(projection.requiredNextAction.type).toBe("FAILED");
+    }
+
+    const missingApprovedSource = projectContentRun({
+      ...complete,
+      run: { ...complete.run, status: "ready" },
+      videos: [video("store-video", "scene_1_store", "APPROVED")],
+      finalVideo: approved,
+    });
+    expect(missingApprovedSource.status).not.toBe("ready");
+    expect(missingApprovedSource.requiredNextAction.type).toBe("FAILED");
+  });
+
+  it("maps final human review and infrastructure failure to terminal run actions", () => {
+    const complete = baseInput({
+      images: [
+        image("store-image", "scene_1_store_image", "APPROVED"),
+        image("home-image", "scene_2_home_image", "APPROVED"),
+      ],
+      videos: [
+        video("store-video", "scene_1_store", "APPROVED"),
+        video("home-video", "scene_2_home", "APPROVED"),
+      ],
+    });
+    expect(
+      projectContentRun({
+        ...complete,
+        finalVideo: finalVideo({ status: "HUMAN_REVIEW", finalQaStatus: "HUMAN_REVIEW" }),
+      }),
+    ).toMatchObject({ status: "human_review", requiredNextAction: { type: "HUMAN_REVIEW" } });
+    expect(
+      projectContentRun({
+        ...complete,
+        finalVideo: finalVideo({ status: "FAILED", failureCode: "FFMPEG_FAILED" }),
+      }),
+    ).toMatchObject({ status: "failed", requiredNextAction: { type: "FAILED" } });
   });
 
   it.each(["REGEN_NEEDED", "REGEN_IN_FLIGHT", "HUMAN_REVIEW"])(
