@@ -1,4 +1,6 @@
 import type { PrismaClient } from "@prisma/client";
+import { readFile } from "node:fs/promises";
+import { extname, isAbsolute, resolve } from "node:path";
 
 import { db } from "@/lib/db";
 import { SLOT_DEFINITIONS } from "@/lib/content-runs/constants";
@@ -104,7 +106,15 @@ interface FrozenImageSlot {
   prompt: string;
   model: string;
   aspectRatio: string;
-  referenceMediaIds: string[];
+  productReferenceImageIds: string[];
+  references: FrozenProductReference[];
+}
+
+interface FrozenProductReference {
+  id: string;
+  url: string | null;
+  pathLocal: string | null;
+  bytes: number | null;
 }
 
 interface LoadedRun {
@@ -212,6 +222,10 @@ function readFrozenImageSlot(
   const references = Array.isArray(generation?.productReferenceImageIds)
     ? generation.productReferenceImageIds.map(nonEmptyString)
     : [];
+  const product = asRecord(snapshot.product);
+  const productReferences = Array.isArray(product?.references)
+    ? product.references.map(asRecord)
+    : [];
 
   if (
     slotRecord?.mediaType !== "image" ||
@@ -232,8 +246,103 @@ function readFrozenImageSlot(
     prompt,
     model,
     aspectRatio,
-    referenceMediaIds: references as string[],
+    productReferenceImageIds: references as string[],
+    references: (references as string[]).map((id) => {
+      const reference = productReferences.find((candidate) => candidate?.id === id);
+      return {
+        id,
+        url: nonEmptyString(reference?.url),
+        pathLocal: nonEmptyString(reference?.pathLocal),
+        bytes: typeof reference?.bytes === "number" ? reference.bytes : null,
+      };
+    }),
   };
+}
+
+function sniffImageMimeType(bytes: Uint8Array, hintPath?: string | null): "image/png" | "image/jpeg" | "image/webp" {
+  if (bytes[0] === 0x89 && bytes[1] === 0x50) return "image/png";
+  if (bytes[0] === 0xff && bytes[1] === 0xd8) return "image/jpeg";
+  if (
+    bytes.length >= 12 &&
+    Buffer.from(bytes.subarray(0, 4)).toString("ascii") === "RIFF" &&
+    Buffer.from(bytes.subarray(8, 12)).toString("ascii") === "WEBP"
+  ) {
+    return "image/webp";
+  }
+  const ext = hintPath ? extname(hintPath).toLowerCase() : "";
+  if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
+  if (ext === ".webp") return "image/webp";
+  return "image/png";
+}
+
+function resolveLocalReferencePath(pathValue: string): string {
+  if (isAbsolute(pathValue)) return pathValue;
+  return resolve(process.cwd(), pathValue.replace(/^\/+/, ""));
+}
+
+async function readFrozenReferenceBytes(
+  reference: FrozenProductReference,
+  fetchMedia?: PersistGeneratedMediaDependencies["fetchMedia"],
+): Promise<{ bytes: Uint8Array; mimeType: "image/png" | "image/jpeg" | "image/webp" }> {
+  if (reference.pathLocal) {
+    const bytes = await readFile(resolveLocalReferencePath(reference.pathLocal));
+    return { bytes, mimeType: sniffImageMimeType(bytes, reference.pathLocal) };
+  }
+  if (reference.url) {
+    if (/^https?:\/\//i.test(reference.url)) {
+      const response = await (fetchMedia ?? fetch)(reference.url);
+      if (!response.ok) {
+        throw new ManagedImageGenerationError(
+          "INVALID_FROZEN_SNAPSHOT",
+          "Frozen product reference image URL could not be fetched",
+          { referenceId: reference.id },
+        );
+      }
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      const headerMime = response.headers.get("content-type")?.split(";")[0]?.trim();
+      const mimeType =
+        headerMime === "image/png" ||
+        headerMime === "image/jpeg" ||
+        headerMime === "image/webp"
+          ? headerMime
+          : sniffImageMimeType(bytes, reference.url);
+      return { bytes, mimeType };
+    }
+    const localPath = resolve(process.cwd(), "public", reference.url.replace(/^\/+/, ""));
+    const bytes = await readFile(localPath);
+    return { bytes, mimeType: sniffImageMimeType(bytes, reference.url) };
+  }
+  throw new ManagedImageGenerationError(
+    "INVALID_FROZEN_SNAPSHOT",
+    "Frozen product reference image is missing SaaS source bytes location",
+    { referenceId: reference.id },
+  );
+}
+
+async function uploadFrozenProductReferences(
+  adapter: ApexFlowAdapter,
+  references: FrozenProductReference[],
+  fetchMedia?: PersistGeneratedMediaDependencies["fetchMedia"],
+): Promise<string[]> {
+  const uploaded: string[] = [];
+  for (const reference of references) {
+    const { bytes, mimeType } = await readFrozenReferenceBytes(reference, fetchMedia);
+    if (reference.bytes !== null && reference.bytes !== bytes.byteLength) {
+      throw new ManagedImageGenerationError(
+        "INVALID_FROZEN_SNAPSHOT",
+        "Frozen product reference image byte length changed before Flow upload",
+        { referenceId: reference.id },
+      );
+    }
+    const result = await adapter.uploadAsset({
+      base64Data: Buffer.from(bytes).toString("base64"),
+      mimeType,
+      expectedKind: "image",
+      expectedSizeBytes: bytes.byteLength,
+    });
+    uploaded.push(result.mediaGenerationId);
+  }
+  return uploaded;
 }
 
 async function loadScopedRun(
@@ -579,6 +688,11 @@ export async function generateManagedStyle1Image(
           actor,
           flowEmail,
         });
+        const uploadedReferenceMediaIds = await uploadFrozenProductReferences(
+          adapter,
+          frozen.references,
+          dependencies.fetchMedia,
+        );
         const generated = await executeWithTechnicalRetries({
           operation: running,
           onAttempt: async (attemptNumber) => {
@@ -589,7 +703,7 @@ export async function generateManagedStyle1Image(
               prompt: frozen.prompt,
               model: frozen.model,
               aspectRatio: frozen.aspectRatio,
-              referenceMediaIds: [...frozen.referenceMediaIds],
+              referenceMediaIds: uploadedReferenceMediaIds,
             }),
         });
 

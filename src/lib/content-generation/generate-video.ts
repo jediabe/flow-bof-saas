@@ -125,6 +125,11 @@ interface SourceImage {
   qaStatus: string;
 }
 
+interface StartedVideoLineage {
+  sourceImageId: string;
+  sourceImageMediaGenerationId: string;
+}
+
 interface LoadedRun {
   id: string;
   productId: string;
@@ -431,6 +436,25 @@ function parseSucceededAssetId(operation: ContentOperationRecord): string {
   );
 }
 
+function parseStartedLineage(
+  operation: ContentOperationRecord,
+): StartedVideoLineage | null {
+  try {
+    const result = operation.resultJson ? JSON.parse(operation.resultJson) : null;
+    const record = asRecord(result);
+    const sourceImageId = nonEmptyString(record?.sourceImageId);
+    const sourceImageMediaGenerationId = nonEmptyString(
+      record?.sourceImageMediaGenerationId,
+    );
+    if (sourceImageId && sourceImageMediaGenerationId) {
+      return { sourceImageId, sourceImageMediaGenerationId };
+    }
+  } catch {
+    // A malformed running lineage is handled by the caller as missing lineage.
+  }
+  return null;
+}
+
 async function returnSucceededResult(
   prisma: PrismaClient,
   actor: ServiceActorContext,
@@ -679,25 +703,17 @@ export async function generateManagedStyle1Video(
   }
 
   let sourceAssetId: string;
+  let acceptedLineage: StartedVideoLineage | null = null;
   if (resumedExisting?.providerJobId) {
-    const definition = SLOT_DEFINITIONS[command.slot];
-    const sourceLabel = SLOT_DEFINITIONS[definition.sourceSlot].persistedSceneLabel;
-    const source = run.images
-      .filter(
-        (image) =>
-          image.contentRunId === run.id &&
-          image.sceneLabel === sourceLabel &&
-          image.qaStatus === "APPROVED",
-      )
-      .sort((left, right) => right.attemptNumber - left.attemptNumber)[0];
-    if (!source) {
+    acceptedLineage = parseStartedLineage(resumedExisting);
+    if (!acceptedLineage) {
       throw new ManagedVideoGenerationError(
-        "SOURCE_IMAGE_NOT_APPROVED",
-        "Accepted video operation has no approved same-run source image",
-        { contentRunId: run.id, slot: command.slot },
+        "COMPLETED_OPERATION_ASSET_MISSING",
+        "Accepted video operation is missing immutable source lineage",
+        { operationId: resumedExisting.id },
       );
     }
-    sourceAssetId = source.id;
+    sourceAssetId = acceptedLineage.sourceImageId;
   } else {
     sourceAssetId = assertSlotReady(run, command.slot);
   }
@@ -785,6 +801,21 @@ export async function generateManagedStyle1Video(
           }),
       });
       operation = await operations.recordProviderJobId(scope, started.providerJobId);
+      await prisma.contentOperation.updateMany({
+        where: {
+          id: operation.id,
+          workspaceId,
+          status: "running",
+          providerJobId: started.providerJobId,
+        },
+        data: {
+          resultJson: JSON.stringify({
+            sourceImageId: source.id,
+            sourceImageMediaGenerationId: source.mediaGenerationId,
+          }),
+        },
+      });
+      operation = (await operations.findById(scope)) ?? operation;
       return waitResult(operation, command);
     } catch (error) {
       const current = await operations.findById(scope);
@@ -825,6 +856,8 @@ export async function generateManagedStyle1Video(
 
     const objectStorage = dependencies.objectStorage ?? createObjectStorageFromEnv();
     storageForCompensation = objectStorage;
+    const sourceImageMediaGenerationId =
+      acceptedLineage?.sourceImageMediaGenerationId ?? source.mediaGenerationId;
     const persisted = await (dependencies.persistMedia ?? persistGeneratedMedia)(
       {
         mediaType: "video",
@@ -837,7 +870,7 @@ export async function generateManagedStyle1Video(
         prompt: frozen.prompt,
         attemptNumber: 1,
         sourceImageId: source.id,
-        imageMediaGenerationId: source.mediaGenerationId,
+        imageMediaGenerationId: sourceImageMediaGenerationId,
       },
       {
         objectStorage,
@@ -854,7 +887,7 @@ export async function generateManagedStyle1Video(
       !asset?.id ||
       asset.contentRunId !== run.id ||
       asset.sourceImageId !== source.id ||
-      asset.imageMediaGenerationId !== source.mediaGenerationId
+      asset.imageMediaGenerationId !== sourceImageMediaGenerationId
     ) {
       throw new ManagedVideoGenerationError(
         "COMPLETED_OPERATION_ASSET_MISSING",

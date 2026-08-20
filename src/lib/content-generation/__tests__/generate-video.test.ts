@@ -447,6 +447,53 @@ describe("generateManagedStyle1Video", () => {
     await expect(prisma.workspaceProviderLock.count()).resolves.toBe(0);
   });
 
+  it("persists accepted source lineage at start and reuses it on resume", async () => {
+    const adapter = createAdapter();
+    vi.mocked(adapter.pollVideo).mockResolvedValue({
+      status: "completed",
+      providerJobId: "provider-job-1",
+      mediaGenerationId: "flow-video-from-original-source",
+      url: "https://provider.example/video-from-original.mp4",
+    });
+    const command = {
+      contentRunId,
+      slot: "scene_1_store_video" as const,
+      idempotencyKey: "immutable-start-lineage",
+    };
+    const dependencies = {
+      prisma,
+      objectStorage: createStorage(),
+      createAdapter: () => adapter,
+      fetchMedia: vi.fn(async () =>
+        new Response(MP4_BYTES, { headers: { "content-type": "video/mp4" } }),
+      ),
+    };
+    const actor = { workspaceId, actorType: "service" as const, actorId: "hermes" };
+
+    await generateManagedStyle1Video(actor, command, dependencies);
+    await prisma.flowGeneratedImage.update({
+      where: { id: sourceImageId },
+      data: { mediaGenerationId: "mutated-latest-source-media" },
+    });
+
+    const completed = await generateManagedStyle1Video(actor, command, dependencies);
+
+    expect(completed).toMatchObject({
+      operationStatus: "succeeded",
+      asset: {
+        sourceImageId,
+        imageMediaGenerationId: "flow-source-image-1",
+      },
+    });
+    expect(adapter.startVideo).toHaveBeenCalledExactlyOnceWith({
+      prompt: "frozen store video prompt",
+      model: "veo-3.1-lite",
+      sourceImageMediaGenerationId: "flow-source-image-1",
+      aspectRatio: "portrait",
+      durationSeconds: 8,
+    });
+  });
+
   it.each([
     ["nonapproved", async () => {
       await prisma.flowGeneratedImage.update({

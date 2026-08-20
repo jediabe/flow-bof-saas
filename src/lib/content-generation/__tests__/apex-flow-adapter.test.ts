@@ -25,6 +25,67 @@ function mockCaller(
 }
 
 describe("APEX Flow generation adapter", () => {
+  it("uploads SaaS-owned source bytes and strictly validates the Flow media identity", async () => {
+    const callTool = mockCaller({
+      operation: "upload_asset",
+      mediaGenerationId: "flow-uploaded-reference-1",
+      kind: "image",
+      mimeType: "image/png",
+      sizeBytes: 9,
+      email: "bound-account@example.com",
+    });
+    const adapter = createApexFlowAdapter(boundContext, { callTool });
+
+    await expect(
+      adapter.uploadAsset({
+        base64Data: "iVBORw0KGgo=",
+        mimeType: "image/png",
+        expectedKind: "image",
+        expectedSizeBytes: 9,
+      }),
+    ).resolves.toEqual({
+      mediaGenerationId: "flow-uploaded-reference-1",
+      kind: "image",
+      mimeType: "image/png",
+      sizeBytes: 9,
+    });
+    expect(callTool).toHaveBeenCalledWith({
+      sub: "workspace-1",
+      flowEmail: "bound-account@example.com",
+      name: "google_flow_upload_asset",
+      args: {
+        base64_data: "iVBORw0KGgo=",
+        mime_type: "image/png",
+        response_format: "json",
+      },
+    });
+  });
+
+  it("rejects a malformed upload result instead of using an unsafe reference", async () => {
+    const adapter = createApexFlowAdapter(boundContext, {
+      callTool: mockCaller({
+        operation: "upload_asset",
+        mediaGenerationId: "flow-uploaded-reference-1",
+        kind: "video",
+        mimeType: "video/mp4",
+        sizeBytes: 9,
+      }),
+    });
+
+    await expect(
+      adapter.uploadAsset({
+        base64Data: "iVBORw0KGgo=",
+        mimeType: "image/png",
+        expectedKind: "image",
+        expectedSizeBytes: 9,
+      }),
+    ).rejects.toMatchObject({
+      classification: "terminal-nontechnical",
+      code: "malformed_output",
+      acceptedProviderIdentity: true,
+    });
+  });
+
   it("normalizes one synchronous image result without exposing the bound Flow account in generation input", async () => {
     const callTool = mockCaller({
       operation: "generate_image",
@@ -261,7 +322,7 @@ describe("APEX Flow generation adapter", () => {
     });
   });
 
-  it("classifies a network timeout before any accepted job as technical-retryable", async () => {
+  it("classifies an unproven start-call network timeout as terminal to avoid duplicate spend", async () => {
     const timeout = Object.assign(new Error("request timed out"), {
       name: "TimeoutError",
     });
@@ -276,7 +337,7 @@ describe("APEX Flow generation adapter", () => {
 
     await expect(rejection).rejects.toBeInstanceOf(ApexFlowAdapterError);
     await expect(rejection).rejects.toMatchObject({
-      classification: "technical-retryable",
+      classification: "terminal-nontechnical",
       code: "transport_failure",
       acceptedProviderIdentity: false,
     });

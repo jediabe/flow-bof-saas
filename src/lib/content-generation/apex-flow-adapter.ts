@@ -50,6 +50,20 @@ export interface GeneratedMediaResult {
   url: string;
 }
 
+export interface UploadAssetInput {
+  base64Data: string;
+  mimeType: "image/png" | "image/jpeg" | "image/webp" | "video/mp4";
+  expectedKind: "image" | "video";
+  expectedSizeBytes: number;
+}
+
+export interface UploadedAssetResult {
+  mediaGenerationId: string;
+  kind: "image" | "video";
+  mimeType: string;
+  sizeBytes: number;
+}
+
 export interface StartVideoInput {
   prompt: string;
   model: string;
@@ -73,6 +87,7 @@ export type VideoPollResult =
   | { status: "failed"; providerJobId: string; reason: string };
 
 export interface ApexFlowAdapter {
+  uploadAsset(input: UploadAssetInput): Promise<UploadedAssetResult>;
   generateImage(input: GenerateImageInput): Promise<GeneratedMediaResult>;
   startVideo(input: StartVideoInput): Promise<StartedVideoResult>;
   pollVideo(input: { providerJobId: string }): Promise<VideoPollResult>;
@@ -128,7 +143,9 @@ function classifyThrownError(
       : "APEX Flow request failed";
   return new ApexFlowAdapterError(
     message,
-    technical ? "technical-retryable" : "terminal-nontechnical",
+    technical && acceptedProviderIdentity
+      ? "technical-retryable"
+      : "terminal-nontechnical",
     technical ? "transport_failure" : "provider_failure",
     acceptedProviderIdentity,
     { cause: error },
@@ -143,9 +160,14 @@ function classifyToolError(
   const technical = /timed?\s*out|network|fetch failed|connection (?:reset|closed)/i.test(
     message,
   );
+  const provenPreAcceptance = /pre[- ]acceptance|before provider acceptance|not sent to provider/i.test(
+    message,
+  );
   return new ApexFlowAdapterError(
     message,
-    technical ? "technical-retryable" : "terminal-nontechnical",
+    technical && provenPreAcceptance
+      ? "technical-retryable"
+      : "terminal-nontechnical",
     technical ? "transport_failure" : "provider_failure",
     acceptedProviderIdentity,
   );
@@ -192,6 +214,37 @@ export function createApexFlowAdapter(
   }
 
   return {
+    async uploadAsset(input): Promise<UploadedAssetResult> {
+      const result = await invoke(
+        "google_flow_upload_asset",
+        {
+          base64_data: input.base64Data,
+          mime_type: input.mimeType,
+          response_format: "json",
+        },
+        true,
+      );
+      const structured = asRecord(result.structuredContent);
+      const mediaGenerationId = nonEmptyString(structured?.mediaGenerationId);
+      const kind = nonEmptyString(structured?.kind);
+      const mimeType = nonEmptyString(structured?.mimeType);
+      const sizeBytes = structured?.sizeBytes;
+      const email = nonEmptyString(structured?.email);
+      if (
+        structured?.operation !== "upload_asset" ||
+        !mediaGenerationId ||
+        kind !== input.expectedKind ||
+        mimeType !== input.mimeType ||
+        typeof sizeBytes !== "number" ||
+        !Number.isSafeInteger(sizeBytes) ||
+        sizeBytes !== input.expectedSizeBytes ||
+        email !== context.flowEmail
+      ) {
+        throw malformed("APEX Flow returned malformed upload asset output", true);
+      }
+      return { mediaGenerationId, kind, mimeType, sizeBytes };
+    },
+
     async generateImage(input): Promise<GeneratedMediaResult> {
       const result = await invoke(
         "google_flow_generate_image",
