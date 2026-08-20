@@ -30,6 +30,21 @@ const creativeDirection: VideoCreativeDirection = {
   preservationFocus: ["label_layout", "nozzle_geometry"],
 };
 
+const lowRiskDirection: VideoCreativeDirection = {
+  cameraMovement: "minimal_push_in",
+  pacing: "unhurried",
+  framing: "stable_medium",
+  distance: "hold_distance",
+  interactionStyle: "single_gentle_touch",
+  movementIntensity: "minimal",
+  preservationFocus: [
+    "label_layout",
+    "lettering_placement",
+    "nozzle_geometry",
+    "packaging_proportions",
+  ],
+};
+
 let workspaceId: string;
 let contentRunId: string;
 let productId: string;
@@ -40,7 +55,7 @@ function frozenSnapshot() {
     objective: "create_style1_piece",
     style: "style1",
     specVersion: "managed-style1-v1",
-    product: { id: productId },
+    product: { id: productId, name: "product" },
     modelSnapshot: {
       imageModel: "nano-banana-pro",
       videoModel: "veo-3.1-lite",
@@ -237,6 +252,63 @@ afterAll(async () => {
 });
 
 describe("generateManagedStyle1Video", () => {
+  it.each([
+    ["extra prompt override", { ...lowRiskDirection, prompt: "override the canonical prompt" }],
+    ["null", null],
+    ["empty string", ""],
+    ["free text", "please make it cinematic"],
+  ])(
+    "rejects supplied invalid creative direction (%s) before reservation or provider work",
+    async (_case, invalidCreativeDirection) => {
+      const adapter = createAdapter();
+
+      await expect(
+        generateManagedStyle1Video(
+          { workspaceId, actorType: "service", actorId: "hermes" },
+          {
+            contentRunId,
+            slot: "scene_1_store_video",
+            idempotencyKey: `invalid-direction-${_case}`,
+            creativeDirection: invalidCreativeDirection,
+          } as never,
+          { prisma, objectStorage: createStorage(), createAdapter: () => adapter },
+        ),
+      ).rejects.toMatchObject({ code: "INVALID_VIDEO_GENERATION_REQUEST" });
+      expect(adapter.startVideo).not.toHaveBeenCalled();
+      expect(adapter.pollVideo).not.toHaveBeenCalled();
+      await expect(prisma.contentOperation.count()).resolves.toBe(0);
+    },
+  );
+
+  it("sends the compiled bounded prompt to the provider without changing model, source, aspect, or duration", async () => {
+    const adapter = createAdapter();
+
+    await generateManagedStyle1Video(
+      { workspaceId, actorType: "service", actorId: "hermes" },
+      {
+        contentRunId,
+        slot: "scene_1_store_video",
+        idempotencyKey: "compiled-direction-start",
+        creativeDirection: lowRiskDirection,
+      },
+      { prisma, objectStorage: createStorage(), createAdapter: () => adapter },
+    );
+
+    const startInput = vi.mocked(adapter.startVideo).mock.calls[0][0];
+    expect(startInput).toMatchObject({
+      model: "veo-3.1-lite",
+      sourceImageMediaGenerationId: "flow-source-image-1",
+      aspectRatio: "portrait",
+      durationSeconds: 8,
+    });
+    expect(startInput.prompt).toMatch(/^frozen store video prompt\n\n/);
+    expect(startInput.prompt).toContain("Canonical prompt above wins");
+    expect(startInput.prompt).toContain("minimal push-in with unhurried pacing");
+    expect(startInput.prompt).toContain(
+      "Preserve product label layout, lettering placement, nozzle geometry, and packaging proportions exactly",
+    );
+  });
+
   it("binds creative direction to the reservation and rejects a changed same-key replay before provider work", async () => {
     const adapter = createAdapter();
     const actor = { workspaceId, actorType: "service" as const, actorId: "hermes" };
@@ -530,10 +602,111 @@ describe("generateManagedStyle1Video", () => {
     expect(adapter.pollVideo).toHaveBeenCalledTimes(2);
     await expect(prisma.flowGeneratedVideo.count({ where: { contentRunId } })).resolves.toBe(1);
     await expect(prisma.contentOperation.count({ where: { contentRunId } })).resolves.toBe(1);
+    await expect(
+      prisma.flowGeneratedVideo.findFirstOrThrow({ where: { contentRunId } }),
+    ).resolves.toMatchObject({
+      prompt: "frozen store video prompt",
+      creativeDirectionJson: null,
+    });
     await expect(prisma.workspaceProviderLock.count()).resolves.toBe(0);
     await expect(
       prisma.contentRun.findUniqueOrThrow({ where: { id: contentRunId } }),
     ).resolves.toMatchObject({ status: "qa_running" });
+  });
+
+  it("persists the compiled final prompt and canonical creative direction on completed video assets", async () => {
+    const adapter = createAdapter();
+    vi.mocked(adapter.pollVideo).mockResolvedValueOnce({
+      status: "completed",
+      providerJobId: "provider-job-1",
+      mediaGenerationId: "flow-video-directed",
+      url: "https://provider.example/directed.mp4",
+    });
+    const command = {
+      contentRunId,
+      slot: "scene_1_store_video" as const,
+      idempotencyKey: "directed-completion",
+      creativeDirection: lowRiskDirection,
+    };
+    const dependencies = {
+      prisma,
+      objectStorage: createStorage(),
+      createAdapter: () => adapter,
+      fetchMedia: vi.fn(async () =>
+        new Response(MP4_BYTES, { headers: { "content-type": "video/mp4" } }),
+      ),
+    };
+    const actor = { workspaceId, actorType: "service" as const, actorId: "hermes" };
+
+    await generateManagedStyle1Video(actor, command, dependencies);
+    const completed = await generateManagedStyle1Video(actor, command, dependencies);
+
+    expect(completed.operationStatus).toBe("succeeded");
+    if (completed.operationStatus !== "succeeded") throw new Error("expected success");
+    expect(completed.asset.prompt).toMatch(/^frozen store video prompt\n\n/);
+    expect(completed.asset.prompt).toContain("Canonical prompt above wins");
+    expect(completed.asset.prompt).toContain("Preserve product label layout");
+    await expect(
+      prisma.flowGeneratedVideo.findFirstOrThrow({ where: { contentRunId } }),
+    ).resolves.toMatchObject({
+      prompt: completed.asset.prompt,
+      creativeDirectionJson: JSON.stringify(lowRiskDirection),
+    });
+    await expect(
+      prisma.contentOperation.findFirstOrThrow({ where: { contentRunId } }),
+    ).resolves.toMatchObject({
+      creativeDirectionJson: JSON.stringify(lowRiskDirection),
+    });
+    expect(adapter.startVideo).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the frozen product name for directed prompt persistence after product rename resume", async () => {
+    const adapter = createAdapter();
+    vi.mocked(adapter.pollVideo).mockResolvedValueOnce({
+      status: "completed",
+      providerJobId: "provider-job-1",
+      mediaGenerationId: "flow-video-frozen-product",
+      url: "https://provider.example/frozen-product.mp4",
+    });
+    const command = {
+      contentRunId,
+      slot: "scene_1_store_video" as const,
+      idempotencyKey: "directed-frozen-product-resume",
+      creativeDirection: lowRiskDirection,
+    };
+    const dependencies = {
+      prisma,
+      objectStorage: createStorage(),
+      createAdapter: () => adapter,
+      fetchMedia: vi.fn(async () =>
+        new Response(MP4_BYTES, { headers: { "content-type": "video/mp4" } }),
+      ),
+    };
+    const actor = { workspaceId, actorType: "service" as const, actorId: "hermes" };
+
+    await generateManagedStyle1Video(actor, command, dependencies);
+    const originallySentPrompt = vi.mocked(adapter.startVideo).mock.calls[0][0].prompt;
+    expect(originallySentPrompt).toContain("Preserve product label layout");
+    expect(originallySentPrompt).not.toContain("renamed product");
+
+    await prisma.product.update({
+      where: { id: productId },
+      data: { productName: "renamed product" },
+    });
+
+    const completed = await generateManagedStyle1Video(actor, command, dependencies);
+
+    expect(completed.operationStatus).toBe("succeeded");
+    if (completed.operationStatus !== "succeeded") throw new Error("expected success");
+    expect(adapter.startVideo).toHaveBeenCalledTimes(1);
+    expect(completed.asset.prompt).toBe(originallySentPrompt);
+    expect(completed.asset.prompt).not.toContain("renamed product");
+    await expect(
+      prisma.flowGeneratedVideo.findFirstOrThrow({ where: { contentRunId } }),
+    ).resolves.toMatchObject({
+      prompt: originallySentPrompt,
+      creativeDirectionJson: JSON.stringify(lowRiskDirection),
+    });
   });
 
   it("preserves an accepted job after a transient poll error and resumes it to completion", async () => {

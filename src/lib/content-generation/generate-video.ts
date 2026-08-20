@@ -30,6 +30,12 @@ import {
   type ContentOperationRecord,
   type VideoCreativeDirection,
 } from "./types";
+import {
+  compileVideoPrompt,
+  InvalidVideoCreativeDirectionError,
+  parseVideoCreativeDirection,
+  serializeVideoCreativeDirection,
+} from "./video-prompt-compiler";
 
 export const MANAGED_VIDEO_LOCK_TTL_MS = 30 * 60 * 1_000;
 
@@ -120,6 +126,7 @@ interface FrozenVideoSlot {
   aspectRatio: string;
   durationSeconds: number;
   sourceSlot: string;
+  productName: string;
 }
 
 interface SourceImage {
@@ -219,7 +226,8 @@ function readFrozenVideoSlot(
     snapshot.style !== "style1" ||
     snapshot.objective !== "create_style1_piece" ||
     snapshot.specVersion !== "managed-style1-v1" ||
-    product?.id !== expectedProductId
+    product?.id !== expectedProductId ||
+    !nonEmptyString(product?.name)
   ) {
     throw new ManagedVideoGenerationError(
       "INVALID_FROZEN_SNAPSHOT",
@@ -261,6 +269,7 @@ function readFrozenVideoSlot(
     aspectRatio,
     durationSeconds: durationSeconds as number,
     sourceSlot,
+    productName: nonEmptyString(product.name) as string,
   };
 }
 
@@ -607,11 +616,27 @@ export async function generateManagedStyle1Video(
   dependencies: GenerateManagedStyle1VideoDependencies = {},
 ): Promise<GenerateManagedStyle1VideoResult> {
   const workspaceId = requireNonEmpty(actor.workspaceId, "workspaceId");
+  let creativeDirection: VideoCreativeDirection | undefined;
+  try {
+    creativeDirection = rawCommand.creativeDirection !== undefined
+      ? parseVideoCreativeDirection(rawCommand.creativeDirection)
+      : undefined;
+  } catch (cause) {
+    if (cause instanceof InvalidVideoCreativeDirectionError) {
+      throw new ManagedVideoGenerationError(
+        "INVALID_VIDEO_GENERATION_REQUEST",
+        "creativeDirection must match the managed bounded video direction schema",
+        { field: "creativeDirection" },
+        { cause },
+      );
+    }
+    throw cause;
+  }
   const command: GenerateManagedStyle1VideoCommand = {
     contentRunId: requireNonEmpty(rawCommand.contentRunId, "contentRunId"),
     slot: rawCommand.slot,
     idempotencyKey: requireNonEmpty(rawCommand.idempotencyKey, "idempotencyKey"),
-    creativeDirection: rawCommand.creativeDirection,
+    creativeDirection,
   };
   if (
     !(Object.keys(SLOT_DEFINITIONS) as string[]).includes(command.slot) ||
@@ -734,6 +759,12 @@ export async function generateManagedStyle1Video(
     run.productId,
     run.style,
   );
+  const finalPrompt = compileVideoPrompt({
+    canonicalPrompt: frozen.prompt,
+    creativeDirection: command.creativeDirection,
+    productName: frozen.productName,
+  });
+  const creativeDirectionJson = serializeVideoCreativeDirection(command.creativeDirection);
   const source = await loadApprovedSource(
     prisma,
     workspaceId,
@@ -805,7 +836,7 @@ export async function generateManagedStyle1Video(
         },
         execute: () =>
           adapter.startVideo({
-            prompt: frozen.prompt,
+            prompt: finalPrompt,
             model: frozen.model,
             sourceImageMediaGenerationId: source.mediaGenerationId,
             aspectRatio: frozen.aspectRatio,
@@ -868,7 +899,8 @@ export async function generateManagedStyle1Video(
         sceneLabel: SLOT_DEFINITIONS[command.slot].persistedSceneLabel,
         mediaGenerationId: polled.mediaGenerationId,
         providerUrl: polled.url,
-        prompt: frozen.prompt,
+        prompt: finalPrompt,
+        creativeDirectionJson,
         attemptNumber: 1,
         sourceImageId: source.id,
         imageMediaGenerationId: sourceImageMediaGenerationId,

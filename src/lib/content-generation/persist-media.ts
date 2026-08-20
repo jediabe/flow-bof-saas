@@ -37,6 +37,7 @@ export interface PersistVideoInput extends CommonPersistMediaInput {
   mediaType: "video";
   sourceImageId: string;
   imageMediaGenerationId: string;
+  creativeDirectionJson?: string | null;
 }
 
 export type PersistGeneratedMediaInput = PersistImageInput | PersistVideoInput;
@@ -316,6 +317,7 @@ export async function persistGeneratedMedia(
               ...commonData,
               sourceImageId: input.sourceImageId,
               imageMediaGenerationId: input.imageMediaGenerationId,
+              creativeDirectionJson: input.creativeDirectionJson ?? null,
             },
           }),
     );
