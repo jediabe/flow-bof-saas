@@ -1,11 +1,19 @@
 import { createManagedContentRun } from "@/lib/content-runs/create-run";
-import type { ManifestAwareContentRunProjection, RequiredNextAction, ServiceActorContext } from "@/lib/content-runs/types";
+import type {
+  ImageSlot,
+  ManagedManifestSlot,
+  ManifestAwareContentRunProjection,
+  RequiredNextAction,
+  ServiceActorContext,
+  VideoSlot,
+} from "@/lib/content-runs/types";
 import { runManagedQa } from "@/lib/content-runs/run-managed-qa";
 import { generateManagedImage } from "@/lib/content-generation/generate-image";
 import { generateManagedVideo } from "@/lib/content-generation/generate-video";
 import { runFinalOutput } from "@/lib/final-output/run-final-output";
+import { SLOT_DEFINITIONS } from "@/lib/content-runs/constants";
 import { HERMES_CONTENT_TOOL_SCHEMAS, type ContentCreateRunInput } from "./schemas";
-import { getApprovedProduct, getManagedRunView } from "./queries";
+import { getApprovedProduct, getGenerationReplayOperation, getManagedRunView } from "./queries";
 
 export interface ManagedRunView {
   style: {
@@ -27,6 +35,7 @@ export class HermesContentActionError extends Error {
 type Dependencies = {
   getProduct: typeof getApprovedProduct;
   getRun: (actor: ServiceActorContext, contentRunId: string) => Promise<ManagedRunView>;
+  getGenerationReplayOperation: typeof getGenerationReplayOperation;
   createRun: typeof createManagedContentRun;
   generateImage: typeof generateManagedImage;
   generateVideo: typeof generateManagedVideo;
@@ -50,6 +59,79 @@ function requireAction<T extends RequiredNextAction["type"]>(
   return action as Extract<RequiredNextAction, { type: T }>;
 }
 
+function persistedSceneLabel(slot: string): string {
+  if (slot in SLOT_DEFINITIONS) {
+    return SLOT_DEFINITIONS[slot as keyof typeof SLOT_DEFINITIONS].persistedSceneLabel;
+  }
+  return slot;
+}
+
+async function requireGenerationAction(
+  actor: ServiceActorContext,
+  dependencies: Dependencies,
+  view: ManagedRunView,
+  input: { contentRunId: string; idempotencyKey: string },
+  expected: {
+    action: "GENERATE_IMAGE" | "GENERATE_VIDEO";
+    kind: "image_generation" | "video_generation";
+    mediaType: "image" | "video";
+    allowWaitReplay: boolean;
+  },
+) {
+  const action = view.run.requiredNextAction;
+  if (action.type === expected.action) return action;
+  if (action.type !== "WAIT_FOR_OPERATION") {
+    throw new HermesContentActionError(
+      "ACTION_NOT_READY",
+      `Persisted next action is ${action.type}, not ${expected.action}.`,
+    );
+  }
+  if (!expected.allowWaitReplay) {
+    throw new HermesContentActionError(
+      "ACTION_NOT_READY",
+      `${expected.mediaType} generation cannot safely replay while its synchronous operation is in flight.`,
+    );
+  }
+
+  const active = view.run.activeOperation;
+  if (
+    view.run.status !== "generating" ||
+    !active ||
+    active.id !== action.operationId ||
+    active.kind !== expected.kind ||
+    view.slotMediaTypes[active.slot] !== expected.mediaType
+  ) {
+    throw new HermesContentActionError(
+      "ACTION_NOT_READY",
+      `Persisted WAIT operation is not the active ${expected.mediaType} generation command.`,
+    );
+  }
+
+  const operation = await dependencies.getGenerationReplayOperation(
+    actor,
+    input.contentRunId,
+    action.operationId,
+  );
+  if (
+    !operation ||
+    operation.workspaceId !== actor.workspaceId ||
+    operation.contentRunId !== input.contentRunId ||
+    operation.kind !== expected.kind ||
+    !["requested", "running"].includes(operation.status) ||
+    operation.sceneLabel !== persistedSceneLabel(active.slot) ||
+    operation.idempotencyKey !== input.idempotencyKey
+  ) {
+    throw new HermesContentActionError(
+      "ACTION_NOT_READY",
+      `Persisted WAIT operation does not match the stable ${expected.mediaType} generation command.`,
+    );
+  }
+  return { type: expected.action, slot: active.slot } as Extract<
+    RequiredNextAction,
+    { type: "GENERATE_IMAGE" | "GENERATE_VIDEO" }
+  >;
+}
+
 export function createHermesContentHandlers(
   actor: ServiceActorContext,
   overrides: DependencyOverrides = {},
@@ -57,6 +139,7 @@ export function createHermesContentHandlers(
   const dependencies: Dependencies = {
     getProduct: overrides.getProduct ?? getApprovedProduct,
     getRun: overrides.getRun ?? getManagedRunView,
+    getGenerationReplayOperation: overrides.getGenerationReplayOperation ?? getGenerationReplayOperation,
     createRun: overrides.createRun ?? createManagedContentRun,
     generateImage: overrides.generateImage ?? generateManagedImage,
     generateVideo: overrides.generateVideo ?? generateManagedVideo,
@@ -87,18 +170,31 @@ export function createHermesContentHandlers(
     async content_generate_image(raw: unknown) {
       const input = HERMES_CONTENT_TOOL_SCHEMAS.content_generate_image.parse(raw);
       const view = await dependencies.getRun(actor, input.contentRunId);
-      const action = requireAction(view, "GENERATE_IMAGE");
-      return dependencies.generateImage(actor, { ...input, slot: action.slot });
+      const action = await requireGenerationAction(actor, dependencies, view, input, {
+        action: "GENERATE_IMAGE",
+        kind: "image_generation",
+        mediaType: "image",
+        allowWaitReplay: false,
+      });
+      return dependencies.generateImage(actor, {
+        ...input,
+        slot: action.slot as ImageSlot | ManagedManifestSlot,
+      });
     },
 
     async content_generate_video(raw: unknown) {
       const input = HERMES_CONTENT_TOOL_SCHEMAS.content_generate_video.parse(raw);
       const view = await dependencies.getRun(actor, input.contentRunId);
-      const action = requireAction(view, "GENERATE_VIDEO");
+      const action = await requireGenerationAction(actor, dependencies, view, input, {
+        action: "GENERATE_VIDEO",
+        kind: "video_generation",
+        mediaType: "video",
+        allowWaitReplay: true,
+      });
       return dependencies.generateVideo(actor, {
         contentRunId: input.contentRunId,
         idempotencyKey: input.idempotencyKey,
-        slot: action.slot,
+        slot: action.slot as VideoSlot | ManagedManifestSlot,
         ...(input.creativeDirection ? { creativeDirection: input.creativeDirection } : {}),
       });
     },

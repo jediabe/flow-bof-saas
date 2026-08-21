@@ -3,11 +3,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const database = vi.hoisted(() => ({
   product: { findFirst: vi.fn() },
   contentRun: { findFirst: vi.fn() },
+  contentOperation: { findFirst: vi.fn() },
 }));
 
 vi.mock("@/lib/db", () => ({ db: database }));
 
-import { getApprovedProduct, getManagedRunView } from "../queries";
+import { getApprovedProduct, getGenerationReplayOperation, getManagedRunView } from "../queries";
 
 const actor = { workspaceId: "workspace_a", actorType: "service" as const, actorId: "hermes-test" };
 
@@ -16,6 +17,7 @@ describe("Hermes managed content queries", () => {
     vi.clearAllMocks();
     database.product.findFirst.mockResolvedValue(null);
     database.contentRun.findFirst.mockResolvedValue(null);
+    database.contentOperation.findFirst.mockResolvedValue(null);
   });
 
   it("scopes product lookup to approved non-deleted rows in the actor workspace", async () => {
@@ -44,5 +46,28 @@ describe("Hermes managed content queries", () => {
         product: { batch: { workspaceId: "workspace_a" } },
       },
     }));
+  });
+
+  it("resolves replay only through the exact active operation in the actor workspace and run", async () => {
+    await expect(getGenerationReplayOperation(actor, "run_1", "op_1")).resolves.toBeNull();
+
+    expect(database.contentOperation.findFirst).toHaveBeenCalledWith({
+      where: {
+        id: "op_1",
+        workspaceId: "workspace_a",
+        contentRunId: "run_1",
+        status: { in: ["requested", "running"] },
+        contentRun: { product: { batch: { workspaceId: "workspace_a" } } },
+      },
+      select: {
+        id: true,
+        workspaceId: true,
+        contentRunId: true,
+        kind: true,
+        sceneLabel: true,
+        status: true,
+        idempotencyKey: true,
+      },
+    });
   });
 });

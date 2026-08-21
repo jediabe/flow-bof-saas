@@ -181,6 +181,159 @@ describe("Hermes managed content handlers", () => {
     });
   });
 
+  it("replays and polls the same in-flight video command without changing its real result", async () => {
+    const activeOperation = {
+      id: "op_video_1",
+      kind: "video_generation" as const,
+      status: "running" as const,
+      slot: "scene_1_store_video" as const,
+      providerJobId: "provider_job_1",
+    };
+    const getGenerationReplayOperation = vi.fn().mockResolvedValue({
+      id: activeOperation.id,
+      workspaceId: actor.workspaceId,
+      contentRunId: "run_1",
+      kind: activeOperation.kind,
+      sceneLabel: "scene_1_store",
+      status: activeOperation.status,
+      idempotencyKey: "video_stable_1",
+    });
+    const realResult = {
+      operationId: activeOperation.id,
+      operationStatus: "running",
+      contentRunId: "run_1",
+      slot: activeOperation.slot,
+      providerJobId: activeOperation.providerJobId,
+      requiredNextAction: { type: "WAIT_FOR_OPERATION", operationId: activeOperation.id },
+    };
+    const generateVideo = vi.fn().mockResolvedValue(realResult);
+    const handlers = createHermesContentHandlers(actor, {
+      getRun: vi.fn().mockResolvedValue(runView(
+        { type: "WAIT_FOR_OPERATION", operationId: activeOperation.id },
+        { run: { ...runView({ type: "WAIT_FOR_OPERATION", operationId: activeOperation.id }).run, activeOperation } },
+      )),
+      getGenerationReplayOperation,
+      generateVideo,
+    });
+
+    const result = await handlers.content_generate_video({
+      contentRunId: "run_1",
+      idempotencyKey: "video_stable_1",
+    });
+
+    expect(getGenerationReplayOperation).toHaveBeenCalledWith(actor, "run_1", activeOperation.id);
+    expect(generateVideo).toHaveBeenCalledOnce();
+    expect(generateVideo).toHaveBeenCalledWith(actor, {
+      contentRunId: "run_1",
+      idempotencyKey: "video_stable_1",
+      slot: "scene_1_store_video",
+    });
+    expect(result).toBe(realResult);
+  });
+
+  it("rejects synchronous image WAIT replay before service work because no safe poll identity is representable", async () => {
+    const activeOperation = {
+      id: "op_image_1",
+      kind: "image_generation" as const,
+      status: "running" as const,
+      slot: "scene_1_store_image" as const,
+    };
+    const getGenerationReplayOperation = vi.fn();
+    const generateImage = vi.fn();
+    const handlers = createHermesContentHandlers(actor, {
+      getRun: vi.fn().mockResolvedValue(runView(
+        { type: "WAIT_FOR_OPERATION", operationId: activeOperation.id },
+        { run: { ...runView({ type: "WAIT_FOR_OPERATION", operationId: activeOperation.id }).run, activeOperation } },
+      )),
+      getGenerationReplayOperation,
+      generateImage,
+    });
+
+    await expect(handlers.content_generate_image({
+      contentRunId: "run_1",
+      idempotencyKey: "image_stable_1",
+    })).rejects.toMatchObject({ code: "ACTION_NOT_READY" });
+
+    expect(getGenerationReplayOperation).not.toHaveBeenCalled();
+    expect(generateImage).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["different key", { idempotencyKey: "other_key" }, "video_stable_1", undefined],
+    ["different slot", {}, "video_stable_1", { slot: "scene_2_home_video" }],
+    ["different kind", { kind: "image_generation" }, "video_stable_1", undefined],
+    ["cross-workspace operation", null, "video_stable_1", undefined],
+  ] as const)("rejects WAIT replay for %s before generation", async (_case, operationOverrides, commandKey, activeOverrides) => {
+    const activeOperation = {
+      id: "op_video_1",
+      kind: "video_generation" as const,
+      status: "running" as const,
+      slot: "scene_1_store_video" as const,
+      ...activeOverrides,
+    };
+    const persistedOperation = operationOverrides === null ? null : {
+      id: activeOperation.id,
+      workspaceId: actor.workspaceId,
+      contentRunId: "run_1",
+      kind: "video_generation",
+      sceneLabel: "scene_1_store",
+      status: "running",
+      idempotencyKey: "video_stable_1",
+      ...operationOverrides,
+    };
+    const generateVideo = vi.fn();
+    const handlers = createHermesContentHandlers(actor, {
+      getRun: vi.fn().mockResolvedValue(runView(
+        { type: "WAIT_FOR_OPERATION", operationId: activeOperation.id },
+        { run: { ...runView({ type: "WAIT_FOR_OPERATION", operationId: activeOperation.id }).run, activeOperation } },
+      )),
+      getGenerationReplayOperation: vi.fn().mockResolvedValue(persistedOperation),
+      generateVideo,
+    });
+
+    await expect(handlers.content_generate_video({
+      contentRunId: "run_1",
+      idempotencyKey: commandKey,
+    })).rejects.toMatchObject({ code: "ACTION_NOT_READY" });
+    expect(generateVideo).not.toHaveBeenCalled();
+  });
+
+  it("rejects WAIT without a projected active operation before resolving or generating", async () => {
+    const getGenerationReplayOperation = vi.fn();
+    const generateVideo = vi.fn();
+    const handlers = createHermesContentHandlers(actor, {
+      getRun: vi.fn().mockResolvedValue(runView({ type: "WAIT_FOR_OPERATION", operationId: "op_missing" })),
+      getGenerationReplayOperation,
+      generateVideo,
+    });
+
+    await expect(handlers.content_generate_video({
+      contentRunId: "run_1",
+      idempotencyKey: "video_stable_1",
+    })).rejects.toMatchObject({ code: "ACTION_NOT_READY" });
+    expect(getGenerationReplayOperation).not.toHaveBeenCalled();
+    expect(generateVideo).not.toHaveBeenCalled();
+  });
+
+  it("rejects a terminal run before replay lookup or generation", async () => {
+    const getGenerationReplayOperation = vi.fn();
+    const generateVideo = vi.fn();
+    const handlers = createHermesContentHandlers(actor, {
+      getRun: vi.fn().mockResolvedValue(runView({ type: "FAILED", reason: "terminal" }, {
+        run: { ...runView({ type: "FAILED", reason: "terminal" }).run, status: "failed" },
+      })),
+      getGenerationReplayOperation,
+      generateVideo,
+    });
+
+    await expect(handlers.content_generate_video({
+      contentRunId: "run_1",
+      idempotencyKey: "video_stable_1",
+    })).rejects.toMatchObject({ code: "ACTION_NOT_READY" });
+    expect(getGenerationReplayOperation).not.toHaveBeenCalled();
+    expect(generateVideo).not.toHaveBeenCalled();
+  });
+
   it("rejects a tool whose requested phase does not match persisted next action before execution", async () => {
     const generateImage = vi.fn();
     const handlers = createHermesContentHandlers(actor, {

@@ -53,6 +53,31 @@ export async function getApprovedProduct(actor: ServiceActorContext, productId: 
   };
 }
 
+export async function getGenerationReplayOperation(
+  actor: ServiceActorContext,
+  contentRunId: string,
+  operationId: string,
+) {
+  return db.contentOperation.findFirst({
+    where: {
+      id: operationId,
+      workspaceId: actor.workspaceId,
+      contentRunId,
+      status: { in: ["requested", "running"] },
+      contentRun: { product: { batch: { workspaceId: actor.workspaceId } } },
+    },
+    select: {
+      id: true,
+      workspaceId: true,
+      contentRunId: true,
+      kind: true,
+      sceneLabel: true,
+      status: true,
+      idempotencyKey: true,
+    },
+  });
+}
+
 export async function getManagedRunView(actor: ServiceActorContext, contentRunId: string) {
   const run = await db.contentRun.findFirst({
     where: { id: contentRunId, product: { batch: { workspaceId: actor.workspaceId } } },
