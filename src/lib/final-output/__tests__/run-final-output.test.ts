@@ -269,6 +269,7 @@ describe("runFinalOutput", () => {
     expect(storage.puts.at(-1)).toMatchObject({ mediaType: "final_video", contentType: "video/mp4", assetId: final.id });
     expect(storage.deletes).toContain(`managed-content/${workspaceId}/${contentRunId}/final/${final.id}.mp4`);
     expect(await prisma.finalVideoAsset.findUniqueOrThrow({ where: { id: final.id } })).toMatchObject({ status: "FAILED", finalStorageKey: null, failureCode: "FINAL_ASSEMBLY_FAILED" });
+    expect(await prisma.contentRun.findUniqueOrThrow({ where: { id: contentRunId } })).toMatchObject({ status: "failed" });
   });
 
   it("does not delete a committed voiceover object when the post-commit operation audit fails", async () => {
@@ -637,6 +638,7 @@ describe("runFinalOutput", () => {
     expect(generate).toHaveBeenCalledOnce();
     expect(storage.puts.filter((put) => put.mediaType === "audio")).toHaveLength(0);
     expect(await prisma.finalVideoAsset.findUniqueOrThrow({ where: { contentRunId } })).toMatchObject({ status: "FAILED", failureCode: "VOICEOVER_GENERATION_FAILED" });
+    expect(await prisma.contentRun.findUniqueOrThrow({ where: { id: contentRunId } })).toMatchObject({ status: "failed" });
     expect(await prisma.contentOperation.count({ where: { contentRunId, kind: "voiceover_generation", status: "failed" } })).toBe(1);
   });
 
@@ -736,7 +738,10 @@ describe("runFinalOutput", () => {
     expect(storage.puts.filter((put) => put.mediaType === "final_video")).toHaveLength(1);
   });
 
-  async function createMediaValidatedFinal(finalBytes = text.encode("persisted-final-mp4")) {
+  async function createMediaValidatedFinal(
+    finalBytes = text.encode("persisted-final-mp4"),
+    runStatus: "generating" | "qa_running" = "qa_running",
+  ) {
     const styleManifest = compileStyleManifest("style1", "managed-style1-v1", "store_discovery");
     const manifest: AssemblyManifest = {
       version: "assembly-manifest-v1",
@@ -753,7 +758,7 @@ describe("runFinalOutput", () => {
       data: { contentRunId, status: "MEDIA_VALIDATED", voiceoverScript: "Frozen approved narration.", voiceoverProvider: "elevenlabs", voiceoverVoiceId: "voice-uk", voiceoverModel: "eleven-multilingual-v2", audioStorageBucket: storage.bucket, audioStorageKey: "audio-key", audioContentType: "audio/mpeg", audioBytes: 11, audioSha256: SHA_A, audioDurationSeconds: 16, assemblyManifestJson: JSON.stringify(manifest), finalStorageBucket: storage.bucket, finalStorageKey: "final-key", finalContentType: "video/mp4", finalBytes: finalBytes.byteLength, finalSha256, finalDurationSeconds: 16, finalWidth: 1080, finalHeight: 1920, finalVideoCodec: "h264", finalAudioCodec: "aac", mediaValidationPassed: true, mediaValidatedAt: new Date("2026-08-20T20:00:00.000Z") },
     });
     storage.objects.set("final-key", { body: finalBytes, contentType: "video/mp4", bytes: finalBytes.byteLength, metadata: {} });
-    await prisma.contentRun.update({ where: { id: contentRunId }, data: { status: "qa_running" } });
+    await prisma.contentRun.update({ where: { id: contentRunId }, data: { status: runStatus } });
     return final;
   }
 
@@ -768,6 +773,27 @@ describe("runFinalOutput", () => {
       now: () => new Date("2026-08-20T20:01:00.000Z"),
     } as any;
   }
+
+  it("atomically enters final QA from a generating run with validated final media", async () => {
+    const final = await createMediaValidatedFinal(text.encode("persisted-final-mp4"), "generating");
+    const deps = acceptedFinalQaDependencies({
+      overallScore: 94,
+      hasHardFailure: false,
+      checks: FINAL_RUBRIC.map((criterion) => ({ name: criterion.name, passed: true, score: 94 })),
+      issues: [],
+    });
+
+    const result = await runFinalOutput(
+      actor(),
+      { contentRunId, idempotencyRoot: "root-enter-final-qa" },
+      deps,
+    );
+
+    expect(result).toMatchObject({ phase: "RUN_FINAL_QA", status: "ready", finalVideoId: final.id });
+    expect(deps.visualProvider.evaluateFinal).toHaveBeenCalledOnce();
+    expect(await prisma.qaAttempt.count({ where: { finalVideoId: final.id } })).toBe(1);
+    expect(await prisma.contentRun.findUniqueOrThrow({ where: { id: contentRunId } })).toMatchObject({ status: "ready" });
+  });
 
   it.each([
     ["APPROVE", "ready", "APPROVED", { overallScore: 94, hasHardFailure: false, checks: FINAL_RUBRIC.map((criterion) => ({ name: criterion.name, passed: true, score: 94 })), issues: [] }],
@@ -1099,8 +1125,37 @@ describe("runFinalOutput", () => {
     expect(await prisma.qaAttempt.count({ where: { finalVideoId: final.id } })).toBe(0);
   });
 
-  it("competing final QA calls produce one accepted-service attempt and no false READY", async () => {
-    const final = await createMediaValidatedFinal();
+  it("replays a slow assembly winner to a stale contender without advancing final QA", async () => {
+    const final = await prisma.finalVideoAsset.create({
+      data: { contentRunId, status: "VOICEOVER_READY", voiceoverScript: "Frozen approved narration.", voiceoverProvider: "elevenlabs", voiceoverVoiceId: "voice-uk", voiceoverModel: "eleven-multilingual-v2", audioStorageBucket: storage.bucket, audioStorageKey: "audio-key", audioContentType: "audio/mpeg", audioBytes: 11, audioSha256: createHash("sha256").update(text.encode("voice-bytes")).digest("hex"), audioDurationSeconds: 16 },
+    });
+    storage.objects.set("audio-key", { body: text.encode("voice-bytes"), contentType: "audio/mpeg", bytes: 11, metadata: {} });
+    const assemble = vi.fn(async (manifest: AssemblyManifest) => {
+      await new Promise((resolve) => setTimeout(resolve, 1_250));
+      return { bytes: text.encode("final-mp4"), sha256: createHash("sha256").update(text.encode("final-mp4")).digest("hex"), probe: { durationSeconds: 16, video: { width: 1080, height: 1920, codec: "h264", pixelFormat: "yuv420p", fps: 30 }, audio: { codec: "aac", channels: 2 }, formatName: "mov,mp4" }, commandManifest: { ffmpeg: { binary: "ffmpeg", args: [] }, filterGraph: "deterministic", inputs: manifest.clips.map((clip) => ({ assetId: clip.assetId, slotId: clip.slotId, sha256: clip.assetSha256, trim: { start: clip.trimStartSeconds, end: clip.trimEndSeconds } })), audioModes: manifest.clips.map((clip) => clip.nativeAudioMode) } };
+    });
+    const runFinalQa = vi.fn(async () => { throw new Error("unexpected downstream final QA"); });
+
+    const results = await Promise.all([
+      runFinalOutput(actor(), { contentRunId, idempotencyRoot: "root-slow-concurrent-assembly" }, { prisma, storage, assembleFinalVideo: assemble, runFinalQa: runFinalQa as any }),
+      runFinalOutput(actor(), { contentRunId, idempotencyRoot: "root-slow-concurrent-assembly" }, { prisma, storage, assembleFinalVideo: assemble, runFinalQa: runFinalQa as any }),
+    ]);
+
+    expect(results).toEqual([
+      { phase: "ASSEMBLE_FINAL", status: "MEDIA_VALIDATED", finalVideoId: final.id },
+      { phase: "ASSEMBLE_FINAL", status: "MEDIA_VALIDATED", finalVideoId: final.id },
+    ]);
+    expect(assemble).toHaveBeenCalledOnce();
+    expect(runFinalQa).not.toHaveBeenCalled();
+    expect(storage.puts.filter((put) => put.mediaType === "final_video")).toHaveLength(1);
+    expect(await prisma.contentOperation.count({ where: { contentRunId, kind: "final_assembly", status: "succeeded" } })).toBe(1);
+    expect(await prisma.qaAttempt.count({ where: { finalVideoId: final.id } })).toBe(0);
+    expect(await prisma.contentRun.findUniqueOrThrow({ where: { id: contentRunId } })).toMatchObject({ status: "generating" });
+    expect(await prisma.flowGeneratedVideo.findMany({ where: { contentRunId }, orderBy: { sceneLabel: "asc" }, select: { qaStatus: true } })).toEqual([{ qaStatus: "APPROVED" }, { qaStatus: "APPROVED" }]);
+  });
+
+  it("competing final QA calls atomically enter from generating, produce one accepted-service attempt, and no false READY", async () => {
+    const final = await createMediaValidatedFinal(text.encode("persisted-final-mp4"), "generating");
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     const deps = acceptedFinalQaDependencies({ overallScore: 94, hasHardFailure: false, checks: FINAL_RUBRIC.map((criterion) => ({ name: criterion.name, passed: true, score: 94 })), issues: [] });
@@ -1121,6 +1176,29 @@ describe("runFinalOutput", () => {
     expect(results.every((result) => result.finalVideoId === final.id)).toBe(true);
     expect(deps.visualProvider.evaluateFinal).toHaveBeenCalledOnce();
     expect(await prisma.qaAttempt.count({ where: { finalVideoId: final.id } })).toBe(1);
+    expect(await prisma.contentRun.findUniqueOrThrow({ where: { id: contentRunId } })).toMatchObject({ status: "ready" });
+  });
+
+  it("replays a slow winner to a stale final QA contender after the evaluator returns immediately", async () => {
+    const final = await createMediaValidatedFinal(text.encode("persisted-final-mp4"), "generating");
+    const deps = acceptedFinalQaDependencies({ overallScore: 94, hasHardFailure: false, checks: FINAL_RUBRIC.map((criterion) => ({ name: criterion.name, passed: true, score: 94 })), issues: [] });
+    deps.extractFrames = vi.fn(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1_250));
+      return [{ timestampMs: 0, data: "ZmFrZS1qcGVn", mediaType: "image/jpeg" as const }];
+    });
+
+    const results = await Promise.all([
+      runFinalOutput(actor(), { contentRunId, idempotencyRoot: "root-fast-final-qa" }, deps),
+      runFinalOutput(actor(), { contentRunId, idempotencyRoot: "root-fast-final-qa" }, deps),
+    ]);
+
+    expect(results).toEqual([
+      { phase: "RUN_FINAL_QA", status: "ready", finalVideoId: final.id },
+      { phase: "RUN_FINAL_QA", status: "ready", finalVideoId: final.id },
+    ]);
+    expect(deps.visualProvider.evaluateFinal).toHaveBeenCalledOnce();
+    expect(await prisma.qaAttempt.count({ where: { finalVideoId: final.id } })).toBe(1);
+    expect(await prisma.finalVideoAsset.findUniqueOrThrow({ where: { id: final.id } })).toMatchObject({ status: "APPROVED", finalQaStatus: "APPROVED" });
     expect(await prisma.contentRun.findUniqueOrThrow({ where: { id: contentRunId } })).toMatchObject({ status: "ready" });
   });
 });

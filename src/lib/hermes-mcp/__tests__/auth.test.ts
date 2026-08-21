@@ -3,6 +3,7 @@ import { NextRequest } from "next/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { middleware } from "@/middleware";
 import {
+  authenticateHermesMcpRequest,
   HermesMcpAuthError,
   resolveHermesMcpAuth,
   type HermesMcpAuthEnvironment,
@@ -106,6 +107,64 @@ describe("resolveHermesMcpAuth", () => {
 
     expect(error).toMatchObject({ code: "DEV_AUTH_DISABLED_IN_PRODUCTION", status: 500 });
     expect(`${error.message}:${error.stack ?? ""}:${JSON.stringify(error)}`).not.toContain(rawToken);
+  });
+});
+
+describe("authenticateHermesMcpRequest", () => {
+  it("binds a production bearer credential to its workspace without accepting workspace input", async () => {
+    const findWorkspaceByApiToken = vi.fn().mockResolvedValue({ id: "workspace_b" });
+    const request = new Request("https://app.example/api/hermes-mcp", {
+      method: "POST",
+      headers: { authorization: "Bearer workspace-token" },
+    });
+
+    const actor = await authenticateHermesMcpRequest(request, {
+      findWorkspaceByApiToken,
+      verifySessionToken: vi.fn(),
+      findWorkspaceByOwnerId: vi.fn(),
+      environment: { NODE_ENV: "production" },
+    });
+
+    expect(findWorkspaceByApiToken).toHaveBeenCalledWith("workspace-token");
+    expect(actor).toEqual({
+      workspaceId: "workspace_b",
+      actorType: "service",
+      actorId: "hermes-mcp-bearer",
+    });
+  });
+
+  it("binds a valid browser session cookie to the owning workspace", async () => {
+    const request = new Request("https://app.example/api/hermes-mcp", {
+      method: "POST",
+      headers: { cookie: "other=x; flowbof_session=session-token; another=y" },
+    });
+    const verifySessionToken = vi.fn().mockResolvedValue({ sub: "user_1", iat: 1 });
+    const findWorkspaceByOwnerId = vi.fn().mockResolvedValue({ id: "workspace_session" });
+
+    const actor = await authenticateHermesMcpRequest(request, {
+      findWorkspaceByApiToken: vi.fn(),
+      verifySessionToken,
+      findWorkspaceByOwnerId,
+      environment: { NODE_ENV: "production" },
+    });
+
+    expect(verifySessionToken).toHaveBeenCalledWith("session-token");
+    expect(findWorkspaceByOwnerId).toHaveBeenCalledWith("user_1");
+    expect(actor).toEqual({
+      workspaceId: "workspace_session",
+      actorType: "service",
+      actorId: "user_1",
+    });
+  });
+
+  it("fails with an opaque 401 when neither bearer nor session identifies a workspace", async () => {
+    const request = new Request("https://app.example/api/hermes-mcp", { method: "POST" });
+    await expect(authenticateHermesMcpRequest(request, {
+      findWorkspaceByApiToken: vi.fn(),
+      verifySessionToken: vi.fn(),
+      findWorkspaceByOwnerId: vi.fn(),
+      environment: { NODE_ENV: "production" },
+    })).rejects.toMatchObject({ code: "UNAUTHORIZED", status: 401 });
   });
 });
 

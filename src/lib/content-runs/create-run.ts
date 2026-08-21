@@ -597,7 +597,7 @@ export async function createManagedContentRun(
           idempotencyKey,
           style: compiled.styleId,
           market: market.persisted,
-          status: "created",
+          status: compiled.manifest.slots[0].mediaType === "video" ? "generating" : "created",
           promptSnapshotJson: JSON.stringify(snapshot),
           discountPercent: product.discountPercent,
           discountType: product.discountType,

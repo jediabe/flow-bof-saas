@@ -430,6 +430,7 @@ describe("createManagedContentRun", () => {
 
     const snapshot = JSON.parse(run.promptSnapshotJson!);
     expect(run.style).toBe("style1");
+    expect(run.status).toBe("created");
     expect(snapshot.styleManifest).toMatchObject({
       styleId: "style1",
       version: "managed-style1-v1",
@@ -454,6 +455,57 @@ describe("createManagedContentRun", () => {
     expect(snapshot.slots).toHaveLength(4);
   });
 
+  it.each([
+    ["handheld", {}, "generating"],
+    [
+      "large_countertop",
+      { variant: "large_countertop", productForm: "large_countertop" },
+      "generating",
+    ],
+    [
+      "worn",
+      {
+        variant: "worn",
+        productType: "clothing_fashion_shoes",
+        productForm: "worn",
+        productReferenceId: null,
+        garmentReferenceId: "garment-1",
+      },
+      "created",
+    ],
+  ] as const)(
+    "enters the lifecycle state required by the first %s manifest slot",
+    async (variant, compilerOverrides, expectedStatus) => {
+      if (variant === "worn") {
+        database.state.product = {
+          ...eligibleProduct(),
+          images: [
+            ...eligibleProduct().images,
+            {
+              ...eligibleProduct().images[0],
+              id: "garment-1",
+              role: "alternate",
+              url: "/uploads/garment-1.jpg",
+            },
+          ],
+        };
+      }
+
+      const run = await createManagedContentRun(
+        {
+          workspaceId: "workspace-1",
+          productId: "product-1",
+          idempotencyKey: `style2-entry-${variant}`,
+          styleId: "style2",
+          compilerInput: style2CompilerInput(compilerOverrides),
+        },
+        registeredCharacterDependencies(),
+      );
+
+      expect(run.status).toBe(expectedStatus);
+    },
+  );
+
   it("compiles and freezes the exact Style 2 manifest, prompts, attachments, model, voiceover and assembly policy", async () => {
     const character = registeredCharacterDependencies();
     const run = await createManagedContentRun({
@@ -465,7 +517,7 @@ describe("createManagedContentRun", () => {
     }, character);
 
     const snapshot = JSON.parse(run.promptSnapshotJson!);
-    expect(run).toMatchObject({ style: "style2", status: "created", market: "uk" });
+    expect(run).toMatchObject({ style: "style2", status: "generating", market: "uk" });
     expect(snapshot).toMatchObject({
       objective: "create_style2_piece",
       style: "style2",

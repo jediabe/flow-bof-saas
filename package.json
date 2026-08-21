@@ -25,7 +25,8 @@
     "llm:import-openai-oauth": "node --env-file=.env scripts/import-openai-oauth.mjs",
     "user:reset-password": "node --env-file=.env scripts/reset-user-password.mjs",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "smoke:ready-to-post": "tsx scripts/ready-to-post-local-smoke.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.100.1",
