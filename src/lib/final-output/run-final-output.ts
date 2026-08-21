@@ -177,6 +177,70 @@ async function assertAllRequiredSourcesStillApproved(prisma: PrismaClient, scope
   return sources;
 }
 
+async function enterFinalQa(
+  prisma: PrismaClient,
+  scope: FinalOutputScope,
+  finalVideoId: string,
+): Promise<void> {
+  const sources = await assertAllRequiredSourcesStillApproved(prisma, scope);
+  const sourcePredicates = sources.map((source) => {
+    const table = source.mediaType === "image" ? "FlowGeneratedImage" : "FlowGeneratedVideo";
+    return Prisma.sql`EXISTS (
+      SELECT 1 FROM ${Prisma.raw(`"${table}"`)} AS source
+      WHERE source."id" = ${source.id}
+        AND source."contentRunId" = run."id"
+        AND source."sceneLabel" = ${source.sceneLabel}
+        AND source."storageSha256" = ${source.sha256}
+        AND source."qaStatus" = 'APPROVED'
+    )`;
+  });
+  const sourceFence = sourcePredicates.length > 0
+    ? Prisma.sql`AND ${Prisma.join(sourcePredicates, " AND ")}`
+    : Prisma.empty;
+  const updated = await prisma.$executeRaw`
+    UPDATE "ContentRun" AS run
+    SET "status" = 'qa_running', "updatedAt" = CURRENT_TIMESTAMP
+    WHERE run."id" = ${scope.contentRunId}
+      AND run."status" = 'generating'
+      AND EXISTS (
+        SELECT 1 FROM "Product" AS product
+        INNER JOIN "Batch" AS batch ON batch."id" = product."batchId"
+        WHERE product."id" = run."productId"
+          AND batch."workspaceId" = ${scope.workspaceId}
+      )
+      AND EXISTS (
+        SELECT 1 FROM "FinalVideoAsset" AS final
+        WHERE final."id" = ${finalVideoId}
+          AND final."contentRunId" = run."id"
+          AND final."status" = 'MEDIA_VALIDATED'
+          AND final."finalQaStatus" = 'NOT_QA_CHECKED'
+          AND final."mediaValidationPassed" = true
+      )
+      ${sourceFence}
+  `;
+  if (updated === 1) return;
+
+  const replayable = await prisma.finalVideoAsset.count({
+    where: {
+      id: finalVideoId,
+      contentRunId: scope.contentRunId,
+      mediaValidationPassed: true,
+      OR: [
+        { status: "MEDIA_VALIDATED", finalQaStatus: "NOT_QA_CHECKED", contentRun: { status: "qa_running", product: { batch: { workspaceId: scope.workspaceId } } } },
+        { status: "QA_RUNNING", finalQaStatus: "QA_RUNNING", contentRun: { status: "qa_running", product: { batch: { workspaceId: scope.workspaceId } } } },
+        { status: "APPROVED", finalQaStatus: "APPROVED", contentRun: { status: "ready", product: { batch: { workspaceId: scope.workspaceId } } } },
+        { status: "HUMAN_REVIEW", finalQaStatus: "HUMAN_REVIEW", contentRun: { status: "human_review", product: { batch: { workspaceId: scope.workspaceId } } } },
+        { status: "FAILED", finalQaStatus: "FAILED", contentRun: { status: "failed", product: { batch: { workspaceId: scope.workspaceId } } } },
+      ],
+    },
+  });
+  if (replayable === 1) return;
+  throw new RunFinalOutputError(
+    "FINAL_OUTPUT_RUN_STATUS_CHANGED",
+    "Content run or validated final media is no longer eligible to enter final QA",
+  );
+}
+
 async function assertAssemblySourcesStillApproved(prisma: PrismaClient, scope: FinalOutputScope, manifest: AssemblyManifest): Promise<void> {
   const rows = await prisma.flowGeneratedVideo.findMany({
     where: { id: { in: manifest.clips.map((clip) => clip.assetId) }, contentRunId: scope.contentRunId, qaStatus: "APPROVED" },
@@ -407,6 +471,11 @@ async function assembleFinal(actor: ServiceActorContext, command: RunFinalOutput
 }
 
 async function runQa(actor: ServiceActorContext, command: RunFinalOutputCommand, deps: Required<Pick<RunFinalOutputDependencies, "prisma" | "storage">> & RunFinalOutputDependencies, finalVideoId: string): Promise<RunFinalOutputResult> {
+  await enterFinalQa(
+    deps.prisma,
+    { workspaceId: actor.workspaceId, contentRunId: command.contentRunId },
+    finalVideoId,
+  );
   try {
     await (deps.runFinalQa ?? defaultRunFinalQa)(actor, { contentRunId: command.contentRunId, finalVideoId }, deps as any);
   } catch (error: any) {

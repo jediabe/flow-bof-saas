@@ -736,7 +736,10 @@ describe("runFinalOutput", () => {
     expect(storage.puts.filter((put) => put.mediaType === "final_video")).toHaveLength(1);
   });
 
-  async function createMediaValidatedFinal(finalBytes = text.encode("persisted-final-mp4")) {
+  async function createMediaValidatedFinal(
+    finalBytes = text.encode("persisted-final-mp4"),
+    runStatus: "generating" | "qa_running" = "qa_running",
+  ) {
     const styleManifest = compileStyleManifest("style1", "managed-style1-v1", "store_discovery");
     const manifest: AssemblyManifest = {
       version: "assembly-manifest-v1",
@@ -753,7 +756,7 @@ describe("runFinalOutput", () => {
       data: { contentRunId, status: "MEDIA_VALIDATED", voiceoverScript: "Frozen approved narration.", voiceoverProvider: "elevenlabs", voiceoverVoiceId: "voice-uk", voiceoverModel: "eleven-multilingual-v2", audioStorageBucket: storage.bucket, audioStorageKey: "audio-key", audioContentType: "audio/mpeg", audioBytes: 11, audioSha256: SHA_A, audioDurationSeconds: 16, assemblyManifestJson: JSON.stringify(manifest), finalStorageBucket: storage.bucket, finalStorageKey: "final-key", finalContentType: "video/mp4", finalBytes: finalBytes.byteLength, finalSha256, finalDurationSeconds: 16, finalWidth: 1080, finalHeight: 1920, finalVideoCodec: "h264", finalAudioCodec: "aac", mediaValidationPassed: true, mediaValidatedAt: new Date("2026-08-20T20:00:00.000Z") },
     });
     storage.objects.set("final-key", { body: finalBytes, contentType: "video/mp4", bytes: finalBytes.byteLength, metadata: {} });
-    await prisma.contentRun.update({ where: { id: contentRunId }, data: { status: "qa_running" } });
+    await prisma.contentRun.update({ where: { id: contentRunId }, data: { status: runStatus } });
     return final;
   }
 
@@ -768,6 +771,27 @@ describe("runFinalOutput", () => {
       now: () => new Date("2026-08-20T20:01:00.000Z"),
     } as any;
   }
+
+  it("atomically enters final QA from a generating run with validated final media", async () => {
+    const final = await createMediaValidatedFinal(text.encode("persisted-final-mp4"), "generating");
+    const deps = acceptedFinalQaDependencies({
+      overallScore: 94,
+      hasHardFailure: false,
+      checks: FINAL_RUBRIC.map((criterion) => ({ name: criterion.name, passed: true, score: 94 })),
+      issues: [],
+    });
+
+    const result = await runFinalOutput(
+      actor(),
+      { contentRunId, idempotencyRoot: "root-enter-final-qa" },
+      deps,
+    );
+
+    expect(result).toMatchObject({ phase: "RUN_FINAL_QA", status: "ready", finalVideoId: final.id });
+    expect(deps.visualProvider.evaluateFinal).toHaveBeenCalledOnce();
+    expect(await prisma.qaAttempt.count({ where: { finalVideoId: final.id } })).toBe(1);
+    expect(await prisma.contentRun.findUniqueOrThrow({ where: { id: contentRunId } })).toMatchObject({ status: "ready" });
+  });
 
   it.each([
     ["APPROVE", "ready", "APPROVED", { overallScore: 94, hasHardFailure: false, checks: FINAL_RUBRIC.map((criterion) => ({ name: criterion.name, passed: true, score: 94 })), issues: [] }],
@@ -1099,8 +1123,8 @@ describe("runFinalOutput", () => {
     expect(await prisma.qaAttempt.count({ where: { finalVideoId: final.id } })).toBe(0);
   });
 
-  it("competing final QA calls produce one accepted-service attempt and no false READY", async () => {
-    const final = await createMediaValidatedFinal();
+  it("competing final QA calls atomically enter from generating, produce one accepted-service attempt, and no false READY", async () => {
+    const final = await createMediaValidatedFinal(text.encode("persisted-final-mp4"), "generating");
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     const deps = acceptedFinalQaDependencies({ overallScore: 94, hasHardFailure: false, checks: FINAL_RUBRIC.map((criterion) => ({ name: criterion.name, passed: true, score: 94 })), issues: [] });
