@@ -102,6 +102,8 @@ beforeEach(() => {
     flowEmail: "operator@example.test",
     flowImageModel: "nano-banana-pro",
     flowVideoModel: "veo-3.1-lite-low-priority",
+    elevenLabsVoiceIdUk: "voice-uk",
+    elevenLabsVoiceIdUs: "voice-us",
   };
   vi.clearAllMocks();
 });
@@ -434,6 +436,21 @@ describe("createManagedContentRun", () => {
       variant: "store_discovery",
     });
     expect(snapshot.voiceoverPlan.script).toContain("Portable Blender");
+    expect(snapshot.voiceoverPlan.tts).toEqual({
+      provider: "elevenlabs",
+      markets: {
+        uk: {
+          voiceId: "voice-uk",
+          model: "eleven-multilingual-v2",
+          settings: { stability: 0.4, similarity_boost: 0.8, style: 0, use_speaker_boost: true },
+        },
+        us: {
+          voiceId: "voice-us",
+          model: "eleven-multilingual-v2",
+          settings: { stability: 0.4, similarity_boost: 0.8, style: 0, use_speaker_boost: true },
+        },
+      },
+    });
     expect(snapshot.slots).toHaveLength(4);
   });
 
@@ -468,6 +485,21 @@ describe("createManagedContentRun", () => {
         validationProfileId: "style2.voiceover-70-75-words.v1",
         wordCount: 70,
         script: style2Voiceover,
+        tts: {
+          provider: "elevenlabs",
+          markets: {
+            uk: {
+              voiceId: "voice-uk",
+              model: "eleven-multilingual-v2",
+              settings: { stability: 0.4, similarity_boost: 0.8, style: 0, use_speaker_boost: true },
+            },
+            us: {
+              voiceId: "voice-us",
+              model: "eleven-multilingual-v2",
+              settings: { stability: 0.4, similarity_boost: 0.8, style: 0, use_speaker_boost: true },
+            },
+          },
+        },
       },
     });
     expect(snapshot.styleManifest.slots.map((slot: { id: string }) => slot.id)).toEqual([

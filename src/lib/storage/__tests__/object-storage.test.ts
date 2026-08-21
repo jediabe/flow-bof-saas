@@ -51,53 +51,60 @@ afterEach(() => {
 });
 
 describe("S3ObjectStorage", () => {
-  it("uploads private bytes under the frozen managed-content key and returns integrity metadata", async () => {
-    const client = new FakeS3Client();
-    const sign = vi.fn();
-    const storage = new S3ObjectStorage(config, {
-      client: client as unknown as S3Client,
-      sign,
-    });
-    const body = new TextEncoder().encode("png fixture bytes");
+  it.each([
+    ["image", "images", "png", "image/png"],
+    ["video", "videos", "mp4", "video/mp4"],
+    ["audio", "audio", "mp3", "audio/mpeg"],
+    ["final_video", "final", "mp4", "video/mp4"],
+  ] as const)(
+    "uploads private %s bytes under the frozen managed-content key and returns integrity metadata",
+    async (mediaType, directory, extension, contentType) => {
+      const client = new FakeS3Client();
+      const sign = vi.fn();
+      const storage = new S3ObjectStorage(config, {
+        client: client as unknown as S3Client,
+        sign,
+      });
+      const body = new TextEncoder().encode(`${mediaType} fixture bytes`);
 
-    const stored = await storage.put({
-      workspaceId: "workspace_1",
-      contentRunId: "run_1",
-      assetId: "asset_1",
-      mediaType: "image",
-      extension: "png",
-      contentType: "image/png",
-      body,
-    });
+      const stored = await storage.put({
+        workspaceId: "workspace_1",
+        contentRunId: "run_1",
+        assetId: "asset_1",
+        mediaType,
+        extension,
+        contentType,
+        body,
+      });
 
-    const expectedKey =
-      "managed-content/workspace_1/run_1/images/asset_1.png";
-    const expectedSha = createHash("sha256").update(body).digest("hex");
-    expect(stored).toEqual({
-      bucket: "managed-media",
-      key: expectedKey,
-      contentType: "image/png",
-      bytes: body.byteLength,
-      sha256: expectedSha,
-    });
-    expect(client.commands).toHaveLength(1);
-    expect(client.commands[0]).toBeInstanceOf(PutObjectCommand);
-    expect((client.commands[0] as PutObjectCommand).input).toMatchObject({
-      Bucket: "managed-media",
-      Key: expectedKey,
-      Body: body,
-      ContentType: "image/png",
-      ContentLength: body.byteLength,
-      Metadata: {
+      const expectedKey = `managed-content/workspace_1/run_1/${directory}/asset_1.${extension}`;
+      const expectedSha = createHash("sha256").update(body).digest("hex");
+      expect(stored).toEqual({
+        bucket: "managed-media",
+        key: expectedKey,
+        contentType,
+        bytes: body.byteLength,
         sha256: expectedSha,
-        "workspace-id": "workspace_1",
-        "content-run-id": "run_1",
-        "asset-id": "asset_1",
-        source: "managed-generation",
-      },
-    });
-    expect((client.commands[0] as PutObjectCommand).input.ACL).toBeUndefined();
-  });
+      });
+      expect(client.commands).toHaveLength(1);
+      expect(client.commands[0]).toBeInstanceOf(PutObjectCommand);
+      expect((client.commands[0] as PutObjectCommand).input).toMatchObject({
+        Bucket: "managed-media",
+        Key: expectedKey,
+        Body: body,
+        ContentType: contentType,
+        ContentLength: body.byteLength,
+        Metadata: {
+          sha256: expectedSha,
+          "workspace-id": "workspace_1",
+          "content-run-id": "run_1",
+          "asset-id": "asset_1",
+          source: "managed-generation",
+        },
+      });
+      expect((client.commands[0] as PutObjectCommand).input.ACL).toBeUndefined();
+    },
+  );
 
   it("reads object bytes and normalized metadata", async () => {
     const client = new FakeS3Client();

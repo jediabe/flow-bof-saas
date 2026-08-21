@@ -7,6 +7,7 @@ import type { StyleManifest } from "@/lib/content-styles/types";
 import { SLOT_DEFINITIONS } from "@/lib/content-runs/constants";
 import { AssemblyManifestSchema } from "@/lib/content-runs/schemas";
 import type {
+  ExpectedSourceApproval,
   FinalOutputScope,
   FinalQaDecision,
   FrozenVoiceover,
@@ -47,6 +48,7 @@ export interface FinalOutputRepository {
     scope: FinalOutputScope,
     finalVideoId: string,
     metadata: PersistedFinalMp4Metadata,
+    expectedAssemblyManifest?: unknown,
   ): Promise<FinalVideoAsset>;
   startFinalQa(scope: FinalOutputScope, finalVideoId: string): Promise<FinalVideoAsset>;
   completeFinalQa(
@@ -87,6 +89,34 @@ function canonicalJson(value: unknown): string {
     return input;
   };
   return JSON.stringify(normalize(value));
+}
+
+function validateExpectedSources(input: readonly ExpectedSourceApproval[] | undefined): ExpectedSourceApproval[] {
+  return (input ?? []).map((source) => ({
+    mediaType: source.mediaType === "image" ? "image" : source.mediaType === "video" ? "video" : (() => { throw new FinalOutputRepositoryError("FINAL_OUTPUT_INVALID_METADATA", "Expected source media type is invalid"); })(),
+    id: safeToken(source.id, "source id", 200),
+    sceneLabel: safeToken(source.sceneLabel, "source scene label", 200),
+    sha256: sha256(source.sha256),
+  }));
+}
+
+function sourceApprovalPredicate(scope: FinalOutputScope, sources: readonly ExpectedSourceApproval[]): Prisma.Sql {
+  const byMediaType = (mediaType: "image" | "video") => sources.filter((source) => source.mediaType === mediaType);
+  const predicateFor = (table: "FlowGeneratedImage" | "FlowGeneratedVideo", mediaType: "image" | "video") => {
+    const selected = byMediaType(mediaType);
+    if (selected.length === 0) return Prisma.sql`1 = 1`;
+    return Prisma.sql`(
+      SELECT COUNT(*) FROM ${Prisma.raw(`"${table}"`)} AS source
+      WHERE source."contentRunId" = ${scope.contentRunId}
+        AND source."qaStatus" = 'APPROVED'
+        AND (${Prisma.join(selected.map((source) => Prisma.sql`(
+          source."id" = ${source.id}
+          AND source."sceneLabel" = ${source.sceneLabel}
+          AND source."storageSha256" = ${source.sha256}
+        )`), " OR ")})
+    ) = ${selected.length}`;
+  };
+  return Prisma.sql`${predicateFor("FlowGeneratedImage", "image")} AND ${predicateFor("FlowGeneratedVideo", "video")}`;
 }
 
 async function loadFrozenStyleManifest(
@@ -268,6 +298,7 @@ function validateAudio(input: PersistedAudioMetadata): PersistedAudioMetadata {
     bytes: positiveInteger(input.bytes, "bytes"),
     sha256: sha256(input.sha256),
     durationSeconds: positive(input.durationSeconds, "durationSeconds"),
+    expectedSources: validateExpectedSources(input.expectedSources),
   };
 }
 
@@ -365,8 +396,13 @@ export function createFinalOutputRepository(prisma: PrismaClient): FinalOutputRe
     });
     if (row) return row;
 
+    const existsInWorkspace = await prisma.contentRun.count({
+      where: { id: scope.contentRunId, product: { batch: { workspaceId: scope.workspaceId } } },
+    });
+    if (existsInWorkspace === 1) return null;
+
     const exists = await prisma.contentRun.count({ where: { id: scope.contentRunId } });
-    if (exists) {
+    if (exists === 1) {
       throw new FinalOutputRepositoryError(
         "FINAL_OUTPUT_WORKSPACE_MISMATCH",
         "Content run does not belong to this workspace",
@@ -417,6 +453,7 @@ export function createFinalOutputRepository(prisma: PrismaClient): FinalOutputRe
           INNER JOIN "Batch" AS batch ON batch."id" = product."batchId"
           WHERE run."id" = ${scope.contentRunId}
             AND batch."workspaceId" = ${scope.workspaceId}
+            AND run."status" = 'generating'
         `;
       } catch (error) {
         if (!uniqueConstraintError(error)) throw error;
@@ -428,9 +465,14 @@ export function createFinalOutputRepository(prisma: PrismaClient): FinalOutputRe
 
       const existing = await find(scope);
       if (!existing) {
+        const inWorkspace = await prisma.contentRun.count({
+          where: { id: scope.contentRunId, product: { batch: { workspaceId: scope.workspaceId } } },
+        });
         throw new FinalOutputRepositoryError(
-          "FINAL_OUTPUT_NOT_FOUND",
-          "Content run was not found in this workspace",
+          inWorkspace === 1 ? "FINAL_OUTPUT_STAGE_CONFLICT" : "FINAL_OUTPUT_NOT_FOUND",
+          inWorkspace === 1
+            ? "Content run status is not eligible for final-output reservation"
+            : "Content run was not found in this workspace",
         );
       }
       if (!sameVoiceover(existing, voiceover)) {
@@ -452,25 +494,33 @@ export function createFinalOutputRepository(prisma: PrismaClient): FinalOutputRe
           "Persisted voiceover metadata cannot be overwritten",
         );
       }
-      const result = await prisma.finalVideoAsset.updateMany({
-        where: {
-          id: finalVideoId,
-          contentRunId: scope.contentRunId,
-          contentRun: { product: { batch: { workspaceId: scope.workspaceId } } },
-          status: "PENDING",
-          audioStorageKey: null,
-        },
-        data: {
-          audioStorageBucket: audio.bucket,
-          audioStorageKey: audio.key,
-          audioContentType: audio.contentType,
-          audioBytes: audio.bytes,
-          audioSha256: audio.sha256,
-          audioDurationSeconds: audio.durationSeconds,
-          status: "VOICEOVER_READY",
-        },
-      });
-      const row = await afterCas(scope, finalVideoId, result.count);
+      const sourcePredicate = sourceApprovalPredicate(scope, audio.expectedSources ?? []);
+      const result = await prisma.$executeRaw`
+        UPDATE "FinalVideoAsset"
+        SET
+          "audioStorageBucket" = ${audio.bucket},
+          "audioStorageKey" = ${audio.key},
+          "audioContentType" = ${audio.contentType},
+          "audioBytes" = ${audio.bytes},
+          "audioSha256" = ${audio.sha256},
+          "audioDurationSeconds" = ${audio.durationSeconds},
+          "status" = 'VOICEOVER_READY',
+          "updatedAt" = CURRENT_TIMESTAMP
+        WHERE "id" = ${finalVideoId}
+          AND "contentRunId" = ${scope.contentRunId}
+          AND "status" = 'PENDING'
+          AND "audioStorageKey" IS NULL
+          AND EXISTS (
+            SELECT 1 FROM "ContentRun" AS run
+            INNER JOIN "Product" AS product ON product."id" = run."productId"
+            INNER JOIN "Batch" AS batch ON batch."id" = product."batchId"
+            WHERE run."id" = ${scope.contentRunId}
+              AND run."status" = 'generating'
+              AND batch."workspaceId" = ${scope.workspaceId}
+          )
+          AND ${sourcePredicate}
+      `;
+      const row = await afterCas(scope, finalVideoId, result);
       if (!sameAudio(row, audio)) {
         throw new FinalOutputRepositoryError("FINAL_OUTPUT_STAGE_CONFLICT", "Voiceover persistence conflict");
       }
@@ -536,7 +586,7 @@ export function createFinalOutputRepository(prisma: PrismaClient): FinalOutputRe
         where: {
           id: finalVideoId,
           contentRunId: scope.contentRunId,
-          contentRun: { product: { batch: { workspaceId: scope.workspaceId } } },
+          contentRun: { status: "generating", product: { batch: { workspaceId: scope.workspaceId } } },
           status: "VOICEOVER_READY",
           assemblyManifestJson: null,
         },
@@ -549,16 +599,26 @@ export function createFinalOutputRepository(prisma: PrismaClient): FinalOutputRe
       return row;
     },
 
-    async persistFinalMp4(scope, finalVideoId, input) {
+    async persistFinalMp4(scope, finalVideoId, input, expectedAssemblyManifest) {
       const mp4 = validateMp4(input);
       const frozenStyle = await loadFrozenStyleManifest(prisma, scope);
       assertFinalMp4Policy(mp4, frozenStyle);
+      const parsedExpectedAssemblyManifest = expectedAssemblyManifest === undefined
+        ? null
+        : AssemblyManifestSchema.parse(expectedAssemblyManifest);
+      const expectedAssemblyManifestJson = parsedExpectedAssemblyManifest === null
+        ? null
+        : canonicalJson(parsedExpectedAssemblyManifest);
+      if (parsedExpectedAssemblyManifest) {
+        assertAssemblyPolicy(parsedExpectedAssemblyManifest, frozenStyle);
+      }
       const current = await required(scope, finalVideoId);
       if (sameMp4(current, mp4)) return current;
       if (
         current.status !== "ASSEMBLING" ||
         !current.audioSha256 ||
         !current.assemblyManifestJson ||
+        (expectedAssemblyManifestJson && current.assemblyManifestJson !== expectedAssemblyManifestJson) ||
         current.finalStorageKey !== null
       ) {
         throw new FinalOutputRepositoryError(
@@ -566,31 +626,45 @@ export function createFinalOutputRepository(prisma: PrismaClient): FinalOutputRe
           "Voiceover and assembly manifest are required before final MP4 persistence",
         );
       }
-      const result = await prisma.finalVideoAsset.updateMany({
-        where: {
-          id: finalVideoId,
-          contentRunId: scope.contentRunId,
-          contentRun: { product: { batch: { workspaceId: scope.workspaceId } } },
-          status: "ASSEMBLING",
-          finalStorageKey: null,
-        },
-        data: {
-          finalStorageBucket: mp4.bucket,
-          finalStorageKey: mp4.key,
-          finalContentType: mp4.contentType,
-          finalBytes: mp4.bytes,
-          finalSha256: mp4.sha256,
-          finalDurationSeconds: mp4.durationSeconds,
-          finalWidth: mp4.width,
-          finalHeight: mp4.height,
-          finalVideoCodec: mp4.videoCodec,
-          finalAudioCodec: mp4.audioCodec,
-          mediaValidationPassed: true,
-          mediaValidatedAt: mp4.mediaValidatedAt,
-          status: "MEDIA_VALIDATED",
-        },
-      });
-      const row = await afterCas(scope, finalVideoId, result.count);
+      const finalSourcePredicate = sourceApprovalPredicate(scope, (parsedExpectedAssemblyManifest?.clips ?? []).map((clip) => ({
+        mediaType: "video" as const,
+        id: clip.assetId,
+        sceneLabel: clip.slotId in SLOT_DEFINITIONS ? SLOT_DEFINITIONS[clip.slotId as keyof typeof SLOT_DEFINITIONS].persistedSceneLabel : clip.slotId,
+        sha256: clip.assetSha256,
+      })));
+      const result = await prisma.$executeRaw`
+        UPDATE "FinalVideoAsset"
+        SET
+          "finalStorageBucket" = ${mp4.bucket},
+          "finalStorageKey" = ${mp4.key},
+          "finalContentType" = ${mp4.contentType},
+          "finalBytes" = ${mp4.bytes},
+          "finalSha256" = ${mp4.sha256},
+          "finalDurationSeconds" = ${mp4.durationSeconds},
+          "finalWidth" = ${mp4.width},
+          "finalHeight" = ${mp4.height},
+          "finalVideoCodec" = ${mp4.videoCodec},
+          "finalAudioCodec" = ${mp4.audioCodec},
+          "mediaValidationPassed" = ${true},
+          "mediaValidatedAt" = ${mp4.mediaValidatedAt},
+          "status" = 'MEDIA_VALIDATED',
+          "updatedAt" = CURRENT_TIMESTAMP
+        WHERE "id" = ${finalVideoId}
+          AND "contentRunId" = ${scope.contentRunId}
+          AND "status" = 'ASSEMBLING'
+          AND ${expectedAssemblyManifestJson ? Prisma.sql`"assemblyManifestJson" = ${expectedAssemblyManifestJson}` : Prisma.sql`1 = 1`}
+          AND "finalStorageKey" IS NULL
+          AND EXISTS (
+            SELECT 1 FROM "ContentRun" AS run
+            INNER JOIN "Product" AS product ON product."id" = run."productId"
+            INNER JOIN "Batch" AS batch ON batch."id" = product."batchId"
+            WHERE run."id" = ${scope.contentRunId}
+              AND run."status" = 'generating'
+              AND batch."workspaceId" = ${scope.workspaceId}
+          )
+          AND ${finalSourcePredicate}
+      `;
+      const row = await afterCas(scope, finalVideoId, result);
       if (!sameMp4(row, mp4)) {
         throw new FinalOutputRepositoryError("FINAL_OUTPUT_STAGE_CONFLICT", "Final MP4 persistence conflict");
       }

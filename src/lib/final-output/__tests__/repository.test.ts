@@ -126,6 +126,7 @@ beforeEach(async () => {
       productId: product.id,
       style: "style1",
       market: "uk",
+      status: "generating",
       idempotencyKey: randomUUID(),
       promptSnapshotJson: JSON.stringify({
         objective: "create_style1_piece",
@@ -209,6 +210,21 @@ function withWorkspaceMoveBeforeFinalWrite(racePrisma: PrismaClient): PrismaClie
   let moved = false;
   return new Proxy(racePrisma, {
     get(target, prop, receiver) {
+      if (prop === "$executeRaw") {
+        const executeRaw = Reflect.get(target, prop, receiver) as (...args: unknown[]) => Promise<number>;
+        return async (...args: unknown[]) => {
+          if (String(args[0]).includes("FinalVideoAsset")) {
+            if (!moved) {
+              moved = true;
+              await target.contentRun.update({
+                where: { id: contentRunId },
+                data: { productId: otherProductId },
+              });
+            }
+          }
+          return Reflect.apply(executeRaw, target, args);
+        };
+      }
       if (prop !== "finalVideoAsset") return Reflect.get(target, prop, receiver);
       const delegate = target.finalVideoAsset;
       return new Proxy(delegate, {

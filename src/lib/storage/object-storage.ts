@@ -1,4 +1,4 @@
-export type ManagedMediaType = "image" | "video";
+export type ManagedMediaType = "image" | "video" | "audio" | "final_video";
 
 export interface PutManagedObjectInput {
   workspaceId: string;
