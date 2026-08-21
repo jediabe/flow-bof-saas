@@ -6,7 +6,7 @@ import { CreativeDirectionSchema } from "../../content-runs/schemas";
 import {
   HERMES_CONTENT_TOOL_NAMES,
   HERMES_CONTENT_TOOL_SCHEMAS,
-} from "../../../../../f_friday_mcp_download/src/lib/hermes-mcp/schemas";
+} from "../schemas";
 import { describe, expect, it } from "vitest";
 
 const root = resolve(__dirname, "../../../..");
