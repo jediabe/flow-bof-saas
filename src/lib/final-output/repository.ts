@@ -757,33 +757,112 @@ export function createFinalOutputRepository(prisma: PrismaClient): FinalOutputRe
         );
       }
       const failureJson = canonicalJson(failure.details ?? null);
+      const findExactTerminalFailure = () =>
+        prisma.finalVideoAsset.findFirst({
+          where: {
+            id: finalVideoId,
+            contentRunId: scope.contentRunId,
+            status: "FAILED",
+            failureCode: code,
+            failureJson,
+            failedAt: failure.failedAt,
+            contentRun: {
+              status: "failed",
+              product: { batch: { workspaceId: scope.workspaceId } },
+            },
+          },
+        });
       if (
         current.status === "FAILED" &&
         current.failureCode === code &&
         current.failureJson === failureJson &&
         current.failedAt?.valueOf() === failure.failedAt.valueOf()
       ) {
-        return current;
+        const runResult = await prisma.contentRun.updateMany({
+          where: {
+            id: scope.contentRunId,
+            status: "generating",
+            product: { batch: { workspaceId: scope.workspaceId } },
+            finalVideo: {
+              is: {
+                id: finalVideoId,
+                status: "FAILED",
+                failureCode: code,
+                failureJson,
+                failedAt: failure.failedAt,
+              },
+            },
+          },
+          data: { status: "failed" },
+        });
+        if (runResult.count === 1) return current;
+        const replay = await findExactTerminalFailure();
+        if (replay) return replay;
+        throw new FinalOutputRepositoryError(
+          "FINAL_OUTPUT_STAGE_CONFLICT",
+          "Terminal failure replay conflicts with content run state",
+        );
       }
       if (["APPROVED", "HUMAN_REVIEW", "FAILED"].includes(current.status)) {
         throw new FinalOutputRepositoryError("FINAL_OUTPUT_STAGE_CONFLICT", "Terminal final output cannot fail again");
       }
-      const result = await prisma.finalVideoAsset.updateMany({
-        where: {
-          id: finalVideoId,
-          contentRunId: scope.contentRunId,
-          contentRun: { product: { batch: { workspaceId: scope.workspaceId } } },
-          status: current.status,
-        },
-        data: {
-          status: "FAILED",
-          finalQaStatus: current.finalQaStatus === "APPROVED" ? "FAILED" : current.finalQaStatus,
-          failureCode: code,
-          failureJson,
-          failedAt: failure.failedAt,
-        },
-      });
-      const row = await afterCas(scope, finalVideoId, result.count);
+      try {
+        await prisma.$transaction(async (tx) => {
+          const result = await tx.finalVideoAsset.updateMany({
+            where: {
+              id: finalVideoId,
+              contentRunId: scope.contentRunId,
+              contentRun: {
+                status: "generating",
+                product: { batch: { workspaceId: scope.workspaceId } },
+              },
+              status: current.status,
+            },
+            data: {
+              status: "FAILED",
+              finalQaStatus: current.finalQaStatus === "APPROVED" ? "FAILED" : current.finalQaStatus,
+              failureCode: code,
+              failureJson,
+              failedAt: failure.failedAt,
+            },
+          });
+          if (result.count !== 1) {
+            throw new FinalOutputRepositoryError(
+              "FINAL_OUTPUT_STAGE_CONFLICT",
+              "Terminal failure CAS conflict: final output or run status changed",
+            );
+          }
+
+          const runResult = await tx.contentRun.updateMany({
+            where: {
+              id: scope.contentRunId,
+              status: "generating",
+              product: { batch: { workspaceId: scope.workspaceId } },
+              finalVideo: {
+                is: {
+                  id: finalVideoId,
+                  status: "FAILED",
+                  failureCode: code,
+                  failureJson,
+                  failedAt: failure.failedAt,
+                },
+              },
+            },
+            data: { status: "failed" },
+          });
+          if (runResult.count !== 1) {
+            throw new FinalOutputRepositoryError(
+              "FINAL_OUTPUT_STAGE_CONFLICT",
+              "Terminal failure CAS conflict: content run status changed",
+            );
+          }
+        });
+      } catch (error) {
+        const replay = await findExactTerminalFailure();
+        if (replay) return replay;
+        throw error;
+      }
+      const row = await required(scope, finalVideoId);
       if (
         row.status !== "FAILED" ||
         row.failureCode !== code ||

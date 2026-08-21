@@ -183,6 +183,22 @@ function withFinalOutputRace(
 ): PrismaClient {
   return new Proxy(racePrisma, {
     get(target, prop, receiver) {
+      if (prop === "$transaction") {
+        return async (callback: unknown, ...args: unknown[]) => {
+          if (typeof callback !== "function") {
+            return (target.$transaction as (...transactionArgs: unknown[]) => unknown)(callback, ...args);
+          }
+          if (requestedStatus === "FAILED") {
+            const final = await target.finalVideoAsset.findUniqueOrThrow({ where: { contentRunId } });
+            await target.$transaction([
+              target.finalVideoAsset.update({ where: { id: final.id }, data: winnerData }),
+              target.contentRun.update({ where: { id: contentRunId }, data: { status: "failed" } }),
+            ]);
+            return (target.$transaction as (...transactionArgs: unknown[]) => unknown)(callback, ...args);
+          }
+          return (target.$transaction as (...transactionArgs: unknown[]) => unknown)(callback, ...args);
+        };
+      }
       if (prop !== "finalVideoAsset") return Reflect.get(target, prop, receiver);
       const delegate = target.finalVideoAsset;
       return new Proxy(delegate, {
@@ -616,11 +632,44 @@ describe("final output repository", () => {
       failedAt: new Date("2026-08-20T20:02:00.000Z"),
     };
     const failed = await repository.recordTerminalFailure(scope(), reserved.id, input);
+    await prisma.contentRun.update({ where: { id: contentRunId }, data: { status: "generating" } });
     const replay = await repository.recordTerminalFailure(scope(), reserved.id, input);
 
     expect(failed).toMatchObject({ status: "FAILED", failureCode: input.code });
     expect(replay.updatedAt).toEqual(failed.updatedAt);
     expect(failed.finalQaStatus).not.toBe("APPROVED");
+    expect(await prisma.contentRun.findUniqueOrThrow({ where: { id: contentRunId } })).toMatchObject({
+      status: "failed",
+    });
+  });
+
+  it("replays an identical terminal failure committed by a concurrent winner", async () => {
+    const repository = createFinalOutputRepository(prisma);
+    const reserved = await repository.reserve(scope(), voiceover);
+    const failedAt = new Date("2026-08-20T20:02:00.000Z");
+    const racedRepository = createFinalOutputRepository(
+      withFinalOutputRace(prisma, "FAILED", {
+        status: "FAILED",
+        failureCode: "OBJECT_STORAGE_FAILED",
+        failureJson: JSON.stringify({ retryable: false }),
+        failedAt,
+      }),
+    );
+
+    await expect(
+      racedRepository.recordTerminalFailure(scope(), reserved.id, {
+        code: "OBJECT_STORAGE_FAILED",
+        details: { retryable: false },
+        failedAt,
+      }),
+    ).resolves.toMatchObject({
+      id: reserved.id,
+      status: "FAILED",
+      failureCode: "OBJECT_STORAGE_FAILED",
+    });
+    expect(await prisma.contentRun.findUniqueOrThrow({ where: { id: contentRunId } })).toMatchObject({
+      status: "failed",
+    });
   });
 
   it("rejects a terminal failure CAS loser when different failure audit wins", async () => {

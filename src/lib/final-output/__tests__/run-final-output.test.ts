@@ -269,6 +269,7 @@ describe("runFinalOutput", () => {
     expect(storage.puts.at(-1)).toMatchObject({ mediaType: "final_video", contentType: "video/mp4", assetId: final.id });
     expect(storage.deletes).toContain(`managed-content/${workspaceId}/${contentRunId}/final/${final.id}.mp4`);
     expect(await prisma.finalVideoAsset.findUniqueOrThrow({ where: { id: final.id } })).toMatchObject({ status: "FAILED", finalStorageKey: null, failureCode: "FINAL_ASSEMBLY_FAILED" });
+    expect(await prisma.contentRun.findUniqueOrThrow({ where: { id: contentRunId } })).toMatchObject({ status: "failed" });
   });
 
   it("does not delete a committed voiceover object when the post-commit operation audit fails", async () => {
@@ -637,6 +638,7 @@ describe("runFinalOutput", () => {
     expect(generate).toHaveBeenCalledOnce();
     expect(storage.puts.filter((put) => put.mediaType === "audio")).toHaveLength(0);
     expect(await prisma.finalVideoAsset.findUniqueOrThrow({ where: { contentRunId } })).toMatchObject({ status: "FAILED", failureCode: "VOICEOVER_GENERATION_FAILED" });
+    expect(await prisma.contentRun.findUniqueOrThrow({ where: { id: contentRunId } })).toMatchObject({ status: "failed" });
     expect(await prisma.contentOperation.count({ where: { contentRunId, kind: "voiceover_generation", status: "failed" } })).toBe(1);
   });
 
