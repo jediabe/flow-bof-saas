@@ -1123,6 +1123,35 @@ describe("runFinalOutput", () => {
     expect(await prisma.qaAttempt.count({ where: { finalVideoId: final.id } })).toBe(0);
   });
 
+  it("replays a slow assembly winner to a stale contender without advancing final QA", async () => {
+    const final = await prisma.finalVideoAsset.create({
+      data: { contentRunId, status: "VOICEOVER_READY", voiceoverScript: "Frozen approved narration.", voiceoverProvider: "elevenlabs", voiceoverVoiceId: "voice-uk", voiceoverModel: "eleven-multilingual-v2", audioStorageBucket: storage.bucket, audioStorageKey: "audio-key", audioContentType: "audio/mpeg", audioBytes: 11, audioSha256: createHash("sha256").update(text.encode("voice-bytes")).digest("hex"), audioDurationSeconds: 16 },
+    });
+    storage.objects.set("audio-key", { body: text.encode("voice-bytes"), contentType: "audio/mpeg", bytes: 11, metadata: {} });
+    const assemble = vi.fn(async (manifest: AssemblyManifest) => {
+      await new Promise((resolve) => setTimeout(resolve, 1_250));
+      return { bytes: text.encode("final-mp4"), sha256: createHash("sha256").update(text.encode("final-mp4")).digest("hex"), probe: { durationSeconds: 16, video: { width: 1080, height: 1920, codec: "h264", pixelFormat: "yuv420p", fps: 30 }, audio: { codec: "aac", channels: 2 }, formatName: "mov,mp4" }, commandManifest: { ffmpeg: { binary: "ffmpeg", args: [] }, filterGraph: "deterministic", inputs: manifest.clips.map((clip) => ({ assetId: clip.assetId, slotId: clip.slotId, sha256: clip.assetSha256, trim: { start: clip.trimStartSeconds, end: clip.trimEndSeconds } })), audioModes: manifest.clips.map((clip) => clip.nativeAudioMode) } };
+    });
+    const runFinalQa = vi.fn(async () => { throw new Error("unexpected downstream final QA"); });
+
+    const results = await Promise.all([
+      runFinalOutput(actor(), { contentRunId, idempotencyRoot: "root-slow-concurrent-assembly" }, { prisma, storage, assembleFinalVideo: assemble, runFinalQa: runFinalQa as any }),
+      runFinalOutput(actor(), { contentRunId, idempotencyRoot: "root-slow-concurrent-assembly" }, { prisma, storage, assembleFinalVideo: assemble, runFinalQa: runFinalQa as any }),
+    ]);
+
+    expect(results).toEqual([
+      { phase: "ASSEMBLE_FINAL", status: "MEDIA_VALIDATED", finalVideoId: final.id },
+      { phase: "ASSEMBLE_FINAL", status: "MEDIA_VALIDATED", finalVideoId: final.id },
+    ]);
+    expect(assemble).toHaveBeenCalledOnce();
+    expect(runFinalQa).not.toHaveBeenCalled();
+    expect(storage.puts.filter((put) => put.mediaType === "final_video")).toHaveLength(1);
+    expect(await prisma.contentOperation.count({ where: { contentRunId, kind: "final_assembly", status: "succeeded" } })).toBe(1);
+    expect(await prisma.qaAttempt.count({ where: { finalVideoId: final.id } })).toBe(0);
+    expect(await prisma.contentRun.findUniqueOrThrow({ where: { id: contentRunId } })).toMatchObject({ status: "generating" });
+    expect(await prisma.flowGeneratedVideo.findMany({ where: { contentRunId }, orderBy: { sceneLabel: "asc" }, select: { qaStatus: true } })).toEqual([{ qaStatus: "APPROVED" }, { qaStatus: "APPROVED" }]);
+  });
+
   it("competing final QA calls atomically enter from generating, produce one accepted-service attempt, and no false READY", async () => {
     const final = await createMediaValidatedFinal(text.encode("persisted-final-mp4"), "generating");
     let release!: () => void;

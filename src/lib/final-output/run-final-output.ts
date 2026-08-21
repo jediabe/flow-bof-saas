@@ -558,7 +558,7 @@ async function waitForFinalOperationResult(
     const result = await finalOperationPhaseResult(actor, command, deps, operationId);
     if (result) return result;
   }
-  for (let attempt = 0; attempt < 40; attempt += 1) {
+  for (let attempt = 0; attempt < 1_200; attempt += 1) {
     const operation = await deps.prisma.contentOperation.findFirst({
       where: { id: operationId, workspaceId: actor.workspaceId, contentRunId: command.contentRunId },
       select: { status: true },
@@ -572,7 +572,7 @@ async function waitForFinalOperationResult(
       const result = await finalOperationPhaseResult(actor, command, deps, operationId);
       if (result) return result;
     }
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    if (attempt < 1_199) await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new RunFinalOutputError("FINAL_OUTPUT_ACTION_NOT_READY", "Final-output operation did not produce a persisted phase result");
 }
