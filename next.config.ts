@@ -9,6 +9,16 @@ const config: NextConfig = {
   // `node server.js` directly. Local `next dev` and `next start` are
   // unaffected; this flag only changes what `next build` writes to disk.
   output: "standalone",
+  // The managed style compiler reuses ESM-authored TypeScript sources from
+  // apex-mcp. Their NodeNext imports end in `.js`; resolve those specifiers to
+  // source `.ts` while bundling this Next server route.
+  webpack(webpackConfig) {
+    webpackConfig.resolve.extensionAlias = {
+      ...webpackConfig.resolve.extensionAlias,
+      ".js": [".ts", ".tsx", ".js"],
+    };
+    return webpackConfig;
+  },
   // Default browser-side calls to the local agent need to know its
   // base URL. We expose it via NEXT_PUBLIC_AGENT_BASE_URL (see
   // .env.example) so client components can read it. The server can

@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import RunTimeline, { type OperationView } from "@/components/content-runs/RunTimeline";
+import FinalOutputCard from "@/components/content-runs/FinalOutputCard";
 import type {
   AssetAttemptView,
   AssetSlotView,
@@ -9,6 +10,7 @@ import type {
 } from "@/components/content-runs/AssetSlotCard";
 import { db } from "@/lib/db";
 import { MANAGED_CONTENT_STORAGE_PREFIX } from "@/lib/content-runs/constants";
+import { loadFinalOutputCard } from "@/lib/content-runs/final-output-card";
 import { projectContentRun } from "@/lib/content-runs/project-run";
 import {
   createObjectStorageFromEnv,
@@ -228,6 +230,10 @@ export default async function ContentRunDetail({
   for (const asset of run.images) assets.set(asset.id, asset);
   for (const asset of run.videos) assets.set(asset.id, asset);
   const objectStorage = objectStorageOrNull();
+  const finalOutput = await loadFinalOutputCard(
+    { workspaceId: workspace.id, contentRunId: run.id },
+    { prisma: db, storage: objectStorage },
+  );
 
   const slots: AssetSlotView[] = await Promise.all(
     projection.slots.map(async (slot): Promise<AssetSlotView> => ({
@@ -286,6 +292,8 @@ export default async function ContentRunDetail({
           Authoritative, read-only state for {run.product.productName}.
         </p>
       </header>
+
+      <FinalOutputCard view={finalOutput} />
 
       <RunTimeline
         projection={projection}
