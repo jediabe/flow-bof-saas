@@ -480,13 +480,21 @@ async function runQa(actor: ServiceActorContext, command: RunFinalOutputCommand,
     await (deps.runFinalQa ?? defaultRunFinalQa)(actor, { contentRunId: command.contentRunId, finalVideoId }, deps as any);
   } catch (error: any) {
     if (error?.code !== "FINAL_QA_CONFLICT") throw error;
-    for (let attempt = 0; attempt < 40; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 25));
-      const run = await loadRun(deps.prisma, { workspaceId: actor.workspaceId, contentRunId: command.contentRunId });
-      const final = await deps.prisma.finalVideoAsset.findUniqueOrThrow({ where: { id: finalVideoId } });
-      if (final.status === "APPROVED" || final.status === "HUMAN_REVIEW" || final.status === "FAILED" || run.status === "ready" || run.status === "human_review" || run.status === "failed") {
-        return { phase: "RUN_FINAL_QA", status: run.status, finalVideoId: final.id };
-      }
+    for (let attempt = 0; attempt < 1_200; attempt += 1) {
+      const final = await deps.prisma.finalVideoAsset.findFirst({
+        where: {
+          id: finalVideoId,
+          contentRunId: command.contentRunId,
+          OR: [
+            { status: "APPROVED", finalQaStatus: "APPROVED", contentRun: { status: "ready", product: { batch: { workspaceId: actor.workspaceId } } } },
+            { status: "HUMAN_REVIEW", finalQaStatus: "HUMAN_REVIEW", contentRun: { status: "human_review", product: { batch: { workspaceId: actor.workspaceId } } } },
+            { status: "FAILED", finalQaStatus: "FAILED", contentRun: { status: "failed", product: { batch: { workspaceId: actor.workspaceId } } } },
+          ],
+        },
+        select: { id: true, contentRun: { select: { status: true } } },
+      });
+      if (final) return { phase: "RUN_FINAL_QA", status: final.contentRun.status, finalVideoId: final.id };
+      if (attempt < 1_199) await new Promise((resolve) => setTimeout(resolve, 25));
     }
     throw error;
   }

@@ -1147,4 +1147,27 @@ describe("runFinalOutput", () => {
     expect(await prisma.qaAttempt.count({ where: { finalVideoId: final.id } })).toBe(1);
     expect(await prisma.contentRun.findUniqueOrThrow({ where: { id: contentRunId } })).toMatchObject({ status: "ready" });
   });
+
+  it("replays a slow winner to a stale final QA contender after the evaluator returns immediately", async () => {
+    const final = await createMediaValidatedFinal(text.encode("persisted-final-mp4"), "generating");
+    const deps = acceptedFinalQaDependencies({ overallScore: 94, hasHardFailure: false, checks: FINAL_RUBRIC.map((criterion) => ({ name: criterion.name, passed: true, score: 94 })), issues: [] });
+    deps.extractFrames = vi.fn(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1_250));
+      return [{ timestampMs: 0, data: "ZmFrZS1qcGVn", mediaType: "image/jpeg" as const }];
+    });
+
+    const results = await Promise.all([
+      runFinalOutput(actor(), { contentRunId, idempotencyRoot: "root-fast-final-qa" }, deps),
+      runFinalOutput(actor(), { contentRunId, idempotencyRoot: "root-fast-final-qa" }, deps),
+    ]);
+
+    expect(results).toEqual([
+      { phase: "RUN_FINAL_QA", status: "ready", finalVideoId: final.id },
+      { phase: "RUN_FINAL_QA", status: "ready", finalVideoId: final.id },
+    ]);
+    expect(deps.visualProvider.evaluateFinal).toHaveBeenCalledOnce();
+    expect(await prisma.qaAttempt.count({ where: { finalVideoId: final.id } })).toBe(1);
+    expect(await prisma.finalVideoAsset.findUniqueOrThrow({ where: { id: final.id } })).toMatchObject({ status: "APPROVED", finalQaStatus: "APPROVED" });
+    expect(await prisma.contentRun.findUniqueOrThrow({ where: { id: contentRunId } })).toMatchObject({ status: "ready" });
+  });
 });
