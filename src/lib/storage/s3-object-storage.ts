@@ -64,7 +64,14 @@ function buildManagedObjectKey(input: PutManagedObjectInput): string {
     );
   }
 
-  const directory = input.mediaType === "image" ? "images" : "videos";
+  const directory =
+    input.mediaType === "image"
+      ? "images"
+      : input.mediaType === "video"
+        ? "videos"
+        : input.mediaType === "audio"
+          ? "audio"
+          : "final";
   return [
     MANAGED_CONTENT_STORAGE_PREFIX,
     input.workspaceId,

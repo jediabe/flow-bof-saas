@@ -36,6 +36,13 @@ export interface FrozenVoiceover {
   model: string;
 }
 
+export interface ExpectedSourceApproval {
+  mediaType: "image" | "video";
+  id: string;
+  sceneLabel: string;
+  sha256: string;
+}
+
 export interface PersistedAudioMetadata {
   bucket: string;
   key: string;
@@ -43,6 +50,7 @@ export interface PersistedAudioMetadata {
   bytes: number;
   sha256: string;
   durationSeconds: number;
+  expectedSources?: ExpectedSourceApproval[];
 }
 
 export interface PersistedFinalMp4Metadata {

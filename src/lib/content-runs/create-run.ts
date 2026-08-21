@@ -47,6 +47,33 @@ export interface CreateManagedContentRunDependencies {
 
 type RunResult = Awaited<ReturnType<typeof db.contentRun.create>>;
 
+const ELEVENLABS_TTS_MODEL = "eleven-multilingual-v2";
+const ELEVENLABS_TTS_SETTINGS = Object.freeze({
+  stability: 0.4,
+  similarity_boost: 0.8,
+  style: 0,
+  use_speaker_boost: true,
+});
+
+function freezeVoiceoverTts(settings: {
+  elevenLabsVoiceIdUk?: string | null;
+  elevenLabsVoiceIdUs?: string | null;
+}) {
+  const voiceIdUk = settings.elevenLabsVoiceIdUk?.trim();
+  const voiceIdUs = settings.elevenLabsVoiceIdUs?.trim();
+  return {
+    provider: "elevenlabs" as const,
+    markets: {
+      ...(voiceIdUk
+        ? { uk: { voiceId: voiceIdUk, model: ELEVENLABS_TTS_MODEL, settings: ELEVENLABS_TTS_SETTINGS } }
+        : {}),
+      ...(voiceIdUs
+        ? { us: { voiceId: voiceIdUs, model: ELEVENLABS_TTS_MODEL, settings: ELEVENLABS_TTS_SETTINGS } }
+        : {}),
+    },
+  };
+}
+
 function requiredValue(value: string, field: keyof CreateStyle1RunInput): string {
   const normalized = value.trim();
   if (!normalized) {
@@ -349,7 +376,13 @@ export async function createManagedContentRun(
 
       const settings = await tx.workspaceSettings.findUnique({
         where: { workspaceId },
-        select: { flowEmail: true, flowImageModel: true, flowVideoModel: true },
+        select: {
+          flowEmail: true,
+          flowImageModel: true,
+          flowVideoModel: true,
+          elevenLabsVoiceIdUk: true,
+          elevenLabsVoiceIdUs: true,
+        },
       });
       const flow = toServerFlowDefaults(settings);
       if (!flow.flowAccountConfigured) {
@@ -554,7 +587,7 @@ export async function createManagedContentRun(
           garment: garmentReference,
         },
         compilerPlan: compiled.plan,
-        voiceoverPlan: compiled.voiceover,
+        voiceoverPlan: { ...compiled.voiceover, tts: freezeVoiceoverTts(settings ?? {}) },
         assemblyPolicy: compiled.manifest.assembly,
         policy: MANAGED_STYLE1_POLICY,
       };
