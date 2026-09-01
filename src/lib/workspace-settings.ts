@@ -20,6 +20,44 @@ import {
   DEFAULT_MODELS,
 } from "@/lib/ai/types";
 import { maskApiKey } from "@/lib/ai/prompt-generator";
+import {
+  ALLOWED_MANAGED_VIDEO_MODELS,
+  DEFAULT_FLOW_IMAGE_MODEL,
+  DEFAULT_FLOW_VIDEO_MODEL,
+} from "@/lib/content-runs/constants";
+
+export const ALLOWED_FLOW_IMAGE_MODELS = [DEFAULT_FLOW_IMAGE_MODEL] as const;
+export const ALLOWED_FLOW_VIDEO_MODELS = ALLOWED_MANAGED_VIDEO_MODELS;
+
+export interface ServerFlowDefaults {
+  imageModel: string;
+  videoModel: string;
+  flowAccountConfigured: boolean;
+  imageModelAllowed: boolean;
+  videoModelAllowed: boolean;
+}
+
+type FlowSettingsRow = {
+  flowEmail?: string | null;
+  flowImageModel?: string | null;
+  flowVideoModel?: string | null;
+};
+
+/**
+ * Return only the managed Flow configuration needed by server-side domain
+ * services. The account email itself is deliberately reduced to a boolean.
+ */
+export function toServerFlowDefaults(row: FlowSettingsRow | null): ServerFlowDefaults {
+  const imageModel = row?.flowImageModel?.trim() || DEFAULT_FLOW_IMAGE_MODEL;
+  const videoModel = row?.flowVideoModel?.trim() || DEFAULT_FLOW_VIDEO_MODEL;
+  return {
+    imageModel,
+    videoModel,
+    flowAccountConfigured: Boolean(row?.flowEmail?.trim()),
+    imageModelAllowed: (ALLOWED_FLOW_IMAGE_MODELS as readonly string[]).includes(imageModel),
+    videoModelAllowed: (ALLOWED_FLOW_VIDEO_MODELS as readonly string[]).includes(videoModel),
+  };
+}
 
 export interface MaskedAiProviderSettings {
   provider: AiProviderKey;

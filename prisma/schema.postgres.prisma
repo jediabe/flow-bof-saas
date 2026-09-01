@@ -106,6 +106,8 @@ model Workspace {
   // operator is scouting/tracking. See ShopProduct at the
   // bottom of this file.
   shopProducts   ShopProduct[]
+  contentOperations ContentOperation[]
+  providerLock      WorkspaceProviderLock?
   // Workspace-scoped API token for programmatic access. See
   // SQLite schema for full rationale.
   apiToken       String? @unique
@@ -214,6 +216,11 @@ model WorkspaceSettings {
   capCutTemplateUrl String?
   // Google Flow account connected via APEX MCP. See SQLite schema.
   flowEmail String?
+
+  // Deterministic Google Flow defaults for managed content runs.
+  // Effective values are frozen into each ContentRun snapshot.
+  flowImageModel String @default("nano-banana-pro")
+  flowVideoModel String @default("veo-3.1-lite-low-priority")
 
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
@@ -465,7 +472,9 @@ model ContentRun {
   product            Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
   style              String
   market             String
-  status             String   @default("generating")
+  status             String   @default("created")
+  // Caller-supplied logical objective key, scoped to the product.
+  idempotencyKey     String
   // JSON blob stored as String for schema-parity with the
   // SQLite provider (Prisma's Json type doesn't support
   // SQLite). Parse with parseJson<T>() at read time.
@@ -473,20 +482,116 @@ model ContentRun {
   discountPercent    Int?
   discountType       String?
   label              String?
+  completedAt        DateTime?
   createdAt          DateTime @default(now())
   // Same @default rationale as FlowGeneratedVideo.updatedAt.
   updatedAt          DateTime @default(now()) @updatedAt
 
   images             FlowGeneratedImage[]
   videos             FlowGeneratedVideo[]
+  operations         ContentOperation[]
+  finalVideo         FinalVideoAsset?
+
+  @@unique([productId, idempotencyKey])
 
   @@index([productId, createdAt(sort: Desc)])
   @@index([productId, status])
   @@index([status])
 }
 
+// One staged, private final output per run. Nullable media columns permit
+// reserving the lifecycle row before provider or object-storage work begins.
+model FinalVideoAsset {
+  id                    String   @id @default(cuid())
+  contentRunId          String
+  contentRun            ContentRun @relation(fields: [contentRunId], references: [id], onDelete: Cascade)
+  attempt               Int      @default(1)
+  status                String   @default("PENDING")
+  voiceoverScript       String?
+  voiceoverProvider     String?
+  voiceoverVoiceId      String?
+  voiceoverModel        String?
+  audioStorageBucket    String?
+  audioStorageKey       String?
+  audioContentType      String?
+  audioBytes            Int?
+  audioSha256           String?
+  audioDurationSeconds  Float?
+  assemblyManifestJson  String?
+  finalStorageBucket    String?
+  finalStorageKey       String?
+  finalContentType      String?
+  finalBytes            Int?
+  finalSha256           String?
+  finalDurationSeconds  Float?
+  finalWidth            Int?
+  finalHeight           Int?
+  finalVideoCodec       String?
+  finalAudioCodec       String?
+  mediaValidationPassed Boolean?
+  mediaValidatedAt      DateTime?
+  mediaValidationJson   String?
+  finalQaStatus         String   @default("NOT_QA_CHECKED")
+  finalQaScore          Int?
+  finalQaVerdict        String?
+  finalQaEvaluatedAt    DateTime?
+  failureCode           String?
+  failureJson           String?
+  failedAt              DateTime?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @default(now()) @updatedAt
+
+  qaAttempts            QaAttempt[]
+
+  @@unique([contentRunId])
+  @@index([status])
+  @@index([finalQaStatus])
+}
+
 // /generate agent's saved videos per product. See SQLite schema
 // for full docs on why mediaGenerationId (not URL) is stored.
+// Provider-side execution record for one managed generation command.
+model ContentOperation {
+  id                    String   @id @default(cuid())
+  workspaceId           String
+  workspace             Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  contentRunId          String
+  contentRun            ContentRun @relation(fields: [contentRunId], references: [id], onDelete: Cascade)
+  kind                  String
+  sceneLabel            String
+  status                String   @default("requested")
+  idempotencyKey        String
+  provider              String   @default("google_flow_useapi")
+  providerJobId         String?
+  providerAttemptNumber Int      @default(0)
+  providerAttemptsJson  String   @default("[]")
+  technicalAttemptCount Int      @default(0)
+  creativeDirectionJson String?
+  resultJson            String?
+  errorJson             String?
+  startedAt             DateTime?
+  completedAt           DateTime?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @default(now()) @updatedAt
+
+  providerLock          WorkspaceProviderLock?
+
+  @@unique([workspaceId, idempotencyKey])
+  @@index([contentRunId, createdAt])
+  @@index([workspaceId, status])
+  @@index([providerJobId])
+}
+
+// One active provider generation operation per workspace.
+model WorkspaceProviderLock {
+  workspaceId String   @id
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  operationId String   @unique
+  operation   ContentOperation @relation(fields: [operationId], references: [id], onDelete: Cascade)
+  acquiredAt DateTime @default(now())
+  expiresAt  DateTime
+}
+
 model FlowGeneratedVideo {
   id                String   @id @default(cuid())
   productId         String
@@ -499,10 +604,19 @@ model FlowGeneratedVideo {
   sceneLabel        String
   mediaGenerationId String
   prompt            String?
+  creativeDirectionJson String?
   notes             String?
   // Source Nano image that produced this video (startImage fed
   // to google_flow_generate_video). Nullable for pre-M1 rows.
   imageMediaGenerationId String?
+  // Managed storage metadata and source relation. Nullable for legacy rows.
+  storageBucket      String?
+  storageKey         String?
+  storageContentType String?
+  storageBytes       Int?
+  storageSha256      String?
+  sourceImageId      String?
+  sourceImage        FlowGeneratedImage? @relation("VideoSourceImage", fields: [sourceImageId], references: [id], onDelete: SetNull)
   // Milestone 1 QA lifecycle — see SQLite schema for the full
   // enum documentation. States:
   //   NOT_QA_CHECKED | QA_RUNNING | APPROVED | REGEN_NEEDED
@@ -529,12 +643,19 @@ model FlowGeneratedVideo {
   @@index([parentVideoId])
   @@index([deletedAt])
   @@index([contentRunId])
+  @@index([sourceImageId])
 }
 
 // Milestone 1 — Style 1 Scene 1 / Scene 2 stills as first-class
 // QA-able assets. See SQLite schema for full commentary.
 model FlowGeneratedImage {
   id                String   @id @default(cuid())
+  // Managed storage metadata. Nullable so pre-managed rows remain valid.
+  storageBucket      String?
+  storageKey         String?
+  storageContentType String?
+  storageBytes       Int?
+  storageSha256      String?
   productId         String
   product           Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
   // Milestone 1 — content-run membership. Nullable for legacy;
@@ -553,6 +674,7 @@ model FlowGeneratedImage {
   parentImageId     String?
   parent            FlowGeneratedImage?  @relation("ImageLineage", fields: [parentImageId], references: [id], onDelete: SetNull)
   attempts          FlowGeneratedImage[] @relation("ImageLineage")
+  derivedVideos     FlowGeneratedVideo[] @relation("VideoSourceImage")
   qaAttempts        QaAttempt[]
   createdAt         DateTime @default(now())
   // Same @default rationale as FlowGeneratedVideo.updatedAt.
@@ -574,6 +696,8 @@ model QaAttempt {
   video            FlowGeneratedVideo? @relation(fields: [videoId], references: [id], onDelete: Cascade)
   imageId          String?
   image            FlowGeneratedImage? @relation(fields: [imageId], references: [id], onDelete: Cascade)
+  finalVideoId     String?
+  finalVideo       FinalVideoAsset? @relation(fields: [finalVideoId], references: [id], onDelete: Cascade)
   assetType        String
   attemptNumber    Int
   rubricVersion    String
@@ -592,6 +716,7 @@ model QaAttempt {
 
   @@index([videoId])
   @@index([imageId])
+  @@index([finalVideoId])
   @@index([createdAt(sort: Desc)])
 }
 

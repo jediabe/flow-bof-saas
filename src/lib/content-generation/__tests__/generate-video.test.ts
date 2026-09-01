@@ -1,0 +1,1766 @@
+import { createHash, randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { PrismaClient } from "@prisma/client";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ObjectStorage, PutManagedObjectInput } from "@/lib/storage";
+import { compileStyleManifest } from "@/lib/content-styles/registry";
+import { createApexFlowAdapter, type ApexFlowAdapter } from "../apex-flow-adapter";
+import { generateManagedStyle1Video, generateManagedVideo } from "../generate-video";
+import { createOperationRepository } from "../operations";
+import type { VideoCreativeDirection } from "../types";
+
+const MP4_BYTES = new Uint8Array([
+  0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d,
+]);
+const databasePath = resolve(tmpdir(), `generate-video-${randomUUID()}.db`);
+const databaseUrl = `file:${databasePath.replaceAll("\\", "/")}`;
+const prisma = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
+
+const creativeDirection: VideoCreativeDirection = {
+  cameraMovement: "gentle_push_in",
+  pacing: "unhurried",
+  framing: "stable_close",
+  distance: "slight_approach",
+  interactionStyle: "single_gentle_touch",
+  movementIntensity: "low",
+  preservationFocus: ["label_layout", "nozzle_geometry"],
+};
+
+const lowRiskDirection: VideoCreativeDirection = {
+  cameraMovement: "minimal_push_in",
+  pacing: "unhurried",
+  framing: "stable_medium",
+  distance: "hold_distance",
+  interactionStyle: "single_gentle_touch",
+  movementIntensity: "minimal",
+  preservationFocus: [
+    "label_layout",
+    "lettering_placement",
+    "nozzle_geometry",
+    "packaging_proportions",
+  ],
+};
+
+let workspaceId: string;
+let contentRunId: string;
+let productId: string;
+let sourceImageId: string;
+
+function frozenSnapshot() {
+  return {
+    objective: "create_style1_piece",
+    style: "style1",
+    specVersion: "managed-style1-v1",
+    product: { id: productId, name: "product" },
+    modelSnapshot: {
+      imageModel: "nano-banana-pro",
+      videoModel: "veo-3.1-lite",
+    },
+    slots: [
+      {
+        slot: "scene_1_store_image",
+        mediaType: "image",
+        prompt: "frozen store image prompt",
+        generation: {
+          aspectRatio: "9:16",
+          productReferenceImageIds: ["primary"],
+          startImageSlot: null,
+        },
+      },
+      {
+        slot: "scene_1_store_video",
+        mediaType: "video",
+        prompt: "frozen store video prompt",
+        generation: {
+          aspectRatio: "portrait",
+          durationSeconds: 8,
+          productReferenceImageIds: [],
+          startImageSlot: "scene_1_store_image",
+        },
+      },
+      {
+        slot: "scene_2_home_image",
+        mediaType: "image",
+        prompt: "frozen home image prompt",
+        generation: {
+          aspectRatio: "9:16",
+          productReferenceImageIds: ["primary"],
+          startImageSlot: null,
+        },
+      },
+      {
+        slot: "scene_2_home_video",
+        mediaType: "video",
+        prompt: "frozen home video prompt",
+        generation: {
+          aspectRatio: "portrait",
+          durationSeconds: 8,
+          productReferenceImageIds: [],
+          startImageSlot: "scene_2_home_image",
+        },
+      },
+    ],
+  };
+}
+
+function createAdapter() {
+  return {
+    uploadAsset: vi.fn(),
+    generateImage: vi.fn(),
+    startVideo: vi.fn(async () => ({ providerJobId: "provider-job-1" })),
+    pollVideo: vi.fn(async () => ({
+      status: "running" as const,
+      providerJobId: "provider-job-1",
+    })),
+    resolveAssetUrl: vi.fn(),
+  } as unknown as ApexFlowAdapter;
+}
+
+function createStorage() {
+  return {
+    bucket: "managed",
+    put: vi.fn(async (input: PutManagedObjectInput) => ({
+      bucket: "managed",
+      key: `managed-content/${input.workspaceId}/${input.contentRunId}/videos/${input.assetId}.mp4`,
+      contentType: input.contentType,
+      bytes: input.body.byteLength,
+      sha256: createHash("sha256").update(input.body).digest("hex"),
+    })),
+    get: vi.fn(),
+    delete: vi.fn(),
+    createSignedReadUrl: vi.fn(),
+  } as unknown as ObjectStorage;
+}
+
+function withAcceptedStartPersistenceRace(racePrisma: PrismaClient): PrismaClient {
+  return new Proxy(racePrisma, {
+    get(target, prop, receiver) {
+      if (prop !== "contentOperation") return Reflect.get(target, prop, receiver);
+      const delegate = target.contentOperation;
+      return new Proxy(delegate, {
+        get(contentOperation, delegateProp, delegateReceiver) {
+          if (delegateProp !== "updateMany") {
+            return Reflect.get(contentOperation, delegateProp, delegateReceiver);
+          }
+          return async (args: Parameters<typeof delegate.updateMany>[0]) => {
+            const data = args.data as
+              | { providerJobId?: unknown; resultJson?: unknown }
+              | undefined;
+            const operationId =
+              typeof args.where?.id === "string" ? args.where.id : null;
+            if (data?.providerJobId !== "provider-job-1" || !operationId) {
+              return delegate.updateMany(args);
+            }
+            if (data.resultJson === undefined) {
+              const result = await delegate.updateMany(args);
+              await target.contentOperation.update({
+                where: { id: operationId },
+                data: { status: "failed" },
+              });
+              return result;
+            }
+            await target.contentOperation.update({
+              where: { id: operationId },
+              data: { status: "failed" },
+            });
+            return delegate.updateMany(args);
+          };
+        },
+      });
+    },
+  }) as PrismaClient;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((promiseResolve) => {
+    resolve = promiseResolve;
+  });
+  return { promise, resolve };
+}
+
+beforeAll(() => {
+  const prismaCli = fileURLToPath(import.meta.resolve("prisma/build/index.js"));
+  execFileSync(
+    process.execPath,
+    [prismaCli, "db", "push", "--schema", "prisma/schema.prisma", "--skip-generate"],
+    {
+      cwd: process.cwd(),
+      env: { ...process.env, DATABASE_URL: databaseUrl },
+      stdio: "pipe",
+    },
+  );
+});
+
+beforeEach(async () => {
+  await prisma.workspaceProviderLock.deleteMany();
+  await prisma.contentOperation.deleteMany();
+  await prisma.flowGeneratedVideo.deleteMany();
+  await prisma.flowGeneratedImage.deleteMany();
+  await prisma.contentRun.deleteMany();
+  await prisma.productImage.deleteMany();
+  await prisma.product.deleteMany();
+  await prisma.batch.deleteMany();
+  await prisma.workspaceSettings.deleteMany();
+  await prisma.workspace.deleteMany();
+  await prisma.user.deleteMany();
+
+  const user = await prisma.user.create({
+    data: { email: `${randomUUID()}@example.test` },
+  });
+  const workspace = await prisma.workspace.create({
+    data: { name: "workspace", ownerId: user.id },
+  });
+  const batch = await prisma.batch.create({
+    data: { workspaceId: workspace.id, name: "batch", market: "uk" },
+  });
+  const product = await prisma.product.create({
+    data: {
+      batchId: batch.id,
+      productName: "product",
+      category: "tech",
+      reviewStatus: "approved",
+    },
+  });
+  await prisma.workspaceSettings.create({
+    data: { workspaceId: workspace.id, flowEmail: "bound@example.test" },
+  });
+  productId = product.id;
+  workspaceId = workspace.id;
+  const run = await prisma.contentRun.create({
+    data: {
+      productId,
+      style: "style1",
+      market: "uk",
+      status: "generating",
+      idempotencyKey: randomUUID(),
+      promptSnapshotJson: JSON.stringify(frozenSnapshot()),
+    },
+  });
+  contentRunId = run.id;
+  const source = await prisma.flowGeneratedImage.create({
+    data: {
+      productId,
+      contentRunId,
+      sceneLabel: "scene_1_store_image",
+      mediaGenerationId: "flow-source-image-1",
+      qaStatus: "APPROVED",
+      attemptNumber: 1,
+    },
+  });
+  sourceImageId = source.id;
+});
+
+afterAll(async () => {
+  await prisma.$disconnect();
+  rmSync(databasePath, { force: true });
+});
+
+describe("generateManagedStyle1Video", () => {
+  it.each([
+    ["extra prompt override", { ...lowRiskDirection, prompt: "override the canonical prompt" }],
+    ["null", null],
+    ["empty string", ""],
+    ["free text", "please make it cinematic"],
+  ])(
+    "rejects supplied invalid creative direction (%s) before reservation or provider work",
+    async (_case, invalidCreativeDirection) => {
+      const adapter = createAdapter();
+
+      await expect(
+        generateManagedStyle1Video(
+          { workspaceId, actorType: "service", actorId: "hermes" },
+          {
+            contentRunId,
+            slot: "scene_1_store_video",
+            idempotencyKey: `invalid-direction-${_case}`,
+            creativeDirection: invalidCreativeDirection,
+          } as never,
+          { prisma, objectStorage: createStorage(), createAdapter: () => adapter },
+        ),
+      ).rejects.toMatchObject({ code: "INVALID_VIDEO_GENERATION_REQUEST" });
+      expect(adapter.startVideo).not.toHaveBeenCalled();
+      expect(adapter.pollVideo).not.toHaveBeenCalled();
+      await expect(prisma.contentOperation.count()).resolves.toBe(0);
+    },
+  );
+
+  it("sends the compiled bounded prompt to the provider without changing model, source, aspect, or duration", async () => {
+    const adapter = createAdapter();
+
+    await generateManagedStyle1Video(
+      { workspaceId, actorType: "service", actorId: "hermes" },
+      {
+        contentRunId,
+        slot: "scene_1_store_video",
+        idempotencyKey: "compiled-direction-start",
+        creativeDirection: lowRiskDirection,
+      },
+      { prisma, objectStorage: createStorage(), createAdapter: () => adapter },
+    );
+
+    const startInput = vi.mocked(adapter.startVideo).mock.calls[0][0];
+    expect(startInput).toMatchObject({
+      model: "veo-3.1-lite",
+      sourceImageMediaGenerationId: "flow-source-image-1",
+      aspectRatio: "portrait",
+      durationSeconds: 8,
+    });
+    expect(startInput.prompt).toMatch(/^frozen store video prompt\n\n/);
+    expect(startInput.prompt).toContain("Canonical prompt above wins");
+    expect(startInput.prompt).toContain("minimal push-in with unhurried pacing");
+    expect(startInput.prompt).toContain(
+      "Preserve product label layout, lettering placement, nozzle geometry, and packaging proportions exactly",
+    );
+  });
+
+  it("starts the first no-frame Style 2 clip with frozen character references and no start image", async () => {
+    const manifest = compileStyleManifest("style2", "managed-style2-v1", "handheld");
+    const snapshot = {
+      objective: "create_style2_piece",
+      style: "style2",
+      specVersion: "managed-style2-v1",
+      variant: "handheld",
+      product: { id: productId, name: "product", references: [] },
+      modelSnapshot: {
+        imageModel: "nano-banana-pro",
+        videoModel: "veo-3.1-lite-low-priority",
+      },
+      styleManifest: manifest,
+      references: {
+        character: { id: "registered-character-1", kind: "registered_character" },
+        product: null,
+        garment: null,
+      },
+      slots: manifest.slots.map((slot) => ({
+        slot: slot.id,
+        mediaType: slot.mediaType,
+        prompt: `frozen ${slot.id} prompt`,
+        promptCompilerId: slot.promptCompilerId,
+        generation: {
+          aspectRatio: slot.mediaType === "image" ? "9:16" : "portrait",
+          durationSeconds: slot.providerRequestDurationSeconds,
+          startImageSlot: slot.sourceDependency,
+          characterReferenceIds: ["registered-character-1"],
+          referenceAttachmentIds: [],
+        },
+      })),
+    };
+    await prisma.contentRun.update({
+      where: { id: contentRunId },
+      data: { style: "style2", promptSnapshotJson: JSON.stringify(snapshot) },
+    });
+    const adapter = createAdapter();
+    const storage = createStorage();
+    const style2Actor = {
+      workspaceId,
+      actorType: "service" as const,
+      actorId: "hermes",
+    };
+    const style2Command = {
+      contentRunId,
+      slot: "N1" as const,
+      idempotencyKey: "style2-handheld-n1",
+    };
+    const style2Dependencies = {
+      prisma,
+      objectStorage: storage,
+      createAdapter: () => adapter,
+      fetchMedia: vi.fn(async () =>
+        new Response(MP4_BYTES, { headers: { "content-type": "video/mp4" } }),
+      ),
+    };
+
+    const result = await generateManagedVideo(
+      style2Actor,
+      style2Command,
+      style2Dependencies,
+    );
+
+    expect(adapter.startVideo).toHaveBeenCalledExactlyOnceWith({
+      prompt: "frozen N1 prompt",
+      model: "veo-3.1-lite-low-priority",
+      characterReferenceIds: ["registered-character-1"],
+      aspectRatio: "portrait",
+      durationSeconds: 8,
+    });
+    expect(result).toMatchObject({
+      slot: "N1",
+      operationStatus: "running",
+      requiredNextAction: { type: "WAIT_FOR_OPERATION" },
+    });
+    const operation = await prisma.contentOperation.findFirstOrThrow({
+      where: { contentRunId, sceneLabel: "N1" },
+    });
+    expect(JSON.parse(operation.resultJson!)).toEqual({
+      sourceImageId: null,
+      sourceImageMediaGenerationId: null,
+      characterReferenceIds: ["registered-character-1"],
+      referenceImageMediaGenerationIds: [],
+    });
+
+    vi.mocked(adapter.pollVideo).mockResolvedValue({
+      status: "completed",
+      providerJobId: "provider-job-1",
+      mediaGenerationId: "style2-video-n1",
+      url: "https://provider.example/style2-n1.mp4",
+    });
+    const completed = await generateManagedVideo(
+      style2Actor,
+      style2Command,
+      style2Dependencies,
+    );
+    const replayed = await generateManagedVideo(
+      style2Actor,
+      style2Command,
+      style2Dependencies,
+    );
+
+    expect(completed).toMatchObject({
+      operationStatus: "succeeded",
+      slot: "N1",
+      asset: {
+        sceneLabel: "N1",
+        sourceImageId: null,
+        imageMediaGenerationId: null,
+        qaStatus: "NOT_QA_CHECKED",
+      },
+      requiredNextAction: { type: "RUN_QA", slot: "N1" },
+    });
+    if (completed.operationStatus !== "succeeded") {
+      throw new Error("expected completed Style 2 video operation");
+    }
+    expect(replayed).toMatchObject({
+      operationId: completed.operationId,
+      asset: { id: completed.asset.id },
+    });
+    expect(adapter.startVideo).toHaveBeenCalledTimes(1);
+    expect(adapter.pollVideo).toHaveBeenCalledTimes(1);
+    expect(storage.put).toHaveBeenCalledTimes(1);
+    await expect(
+      prisma.flowGeneratedVideo.count({ where: { contentRunId, sceneLabel: "N1" } }),
+    ).resolves.toBe(1);
+    const terminalOperation = await prisma.contentOperation.findFirstOrThrow({
+      where: { contentRunId, sceneLabel: "N1" },
+    });
+    expect(JSON.parse(terminalOperation.resultJson!)).toMatchObject({
+      assetId: completed.asset.id,
+      sourceImageId: null,
+      sourceImageMediaGenerationId: null,
+      characterReferenceIds: ["registered-character-1"],
+      referenceImageMediaGenerationIds: [],
+    });
+  });
+
+  it("uses only the approved start image for a dependent Style 2 video slot", async () => {
+    const manifest = compileStyleManifest("style2", "managed-style2-v1", "handheld");
+    await prisma.contentRun.update({
+      where: { id: contentRunId },
+      data: {
+        style: "style2",
+        promptSnapshotJson: JSON.stringify({
+          objective: "create_style2_piece",
+          style: "style2",
+          specVersion: "managed-style2-v1",
+          variant: "handheld",
+          product: { id: productId, name: "product", references: [] },
+          modelSnapshot: {
+            imageModel: "nano-banana-pro",
+            videoModel: "veo-3.1-lite-low-priority",
+          },
+          styleManifest: manifest,
+          slots: manifest.slots.map((slot) => ({
+            slot: slot.id,
+            mediaType: slot.mediaType,
+            prompt: `frozen ${slot.id} prompt`,
+            generation: {
+              aspectRatio: slot.mediaType === "image" ? "9:16" : "portrait",
+              durationSeconds: slot.providerRequestDurationSeconds,
+              startImageSlot: slot.sourceDependency,
+              characterReferenceIds: ["registered-character-1"],
+              referenceAttachmentIds: ["frozen-product-reference"],
+            },
+          })),
+        }),
+      },
+    });
+    await prisma.flowGeneratedVideo.create({
+      data: {
+        productId,
+        contentRunId,
+        sceneLabel: "N1",
+        mediaGenerationId: "style2-n1-approved",
+        qaStatus: "APPROVED",
+      },
+    });
+    const n2 = await prisma.flowGeneratedImage.create({
+      data: {
+        productId,
+        contentRunId,
+        sceneLabel: "N2",
+        mediaGenerationId: "style2-n2-approved",
+        qaStatus: "APPROVED",
+      },
+    });
+    const adapter = createAdapter();
+
+    await generateManagedVideo(
+      { workspaceId, actorType: "service", actorId: "hermes" },
+      { contentRunId, slot: "N3", idempotencyKey: "style2-handheld-n3" },
+      { prisma, objectStorage: createStorage(), createAdapter: () => adapter },
+    );
+
+    expect(adapter.startVideo).toHaveBeenCalledExactlyOnceWith({
+      prompt: "frozen N3 prompt",
+      model: "veo-3.1-lite-low-priority",
+      sourceImageMediaGenerationId: "style2-n2-approved",
+      aspectRatio: "portrait",
+      durationSeconds: 8,
+    });
+    const operation = await prisma.contentOperation.findFirstOrThrow({
+      where: { contentRunId, sceneLabel: "N3" },
+    });
+    expect(JSON.parse(operation.resultJson!)).toEqual({
+      sourceImageId: n2.id,
+      sourceImageMediaGenerationId: "style2-n2-approved",
+    });
+  });
+
+  it("binds creative direction to the reservation and rejects a changed same-key replay before provider work", async () => {
+    const adapter = createAdapter();
+    const actor = { workspaceId, actorType: "service" as const, actorId: "hermes" };
+    const dependencies = {
+      prisma,
+      objectStorage: createStorage(),
+      createAdapter: () => adapter,
+    };
+    const command = {
+      contentRunId,
+      slot: "scene_1_store_video" as const,
+      idempotencyKey: "direction-bound-video",
+      creativeDirection,
+    };
+
+    await generateManagedStyle1Video(actor, command, dependencies);
+
+    await expect(
+      prisma.contentOperation.findFirstOrThrow({ where: { contentRunId } }),
+    ).resolves.toMatchObject({
+      creativeDirectionJson: JSON.stringify(creativeDirection),
+    });
+
+    await expect(
+      generateManagedStyle1Video(
+        actor,
+        {
+          ...command,
+          creativeDirection: {
+            ...creativeDirection,
+            cameraMovement: "locked_off",
+          },
+        },
+        dependencies,
+      ),
+    ).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    expect(adapter.startVideo).toHaveBeenCalledTimes(1);
+    expect(adapter.pollVideo).not.toHaveBeenCalled();
+  });
+
+  it("starts one async provider job from the approved same-run source and returns WAIT_FOR_OPERATION", async () => {
+    const adapter = createAdapter();
+
+    const result = await generateManagedStyle1Video(
+      { workspaceId, actorType: "service", actorId: "hermes" },
+      {
+        contentRunId,
+        slot: "scene_1_store_video",
+        idempotencyKey: "scene-1-video",
+      },
+      {
+        prisma,
+        objectStorage: createStorage(),
+        createAdapter: () => adapter,
+        fetchMedia: vi.fn(async () =>
+          new Response(MP4_BYTES, { headers: { "content-type": "video/mp4" } }),
+        ),
+      },
+    );
+
+    expect(adapter.startVideo).toHaveBeenCalledExactlyOnceWith({
+      prompt: "frozen store video prompt",
+      model: "veo-3.1-lite",
+      sourceImageMediaGenerationId: "flow-source-image-1",
+      aspectRatio: "portrait",
+      durationSeconds: 8,
+    });
+    expect(adapter.pollVideo).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      contentRunId,
+      slot: "scene_1_store_video",
+      operationStatus: "running",
+      providerJobId: "provider-job-1",
+      requiredNextAction: {
+        type: "WAIT_FOR_OPERATION",
+      },
+    });
+    const acceptedOperation = await prisma.contentOperation.findFirstOrThrow({
+      where: { contentRunId },
+    });
+    expect(acceptedOperation).toMatchObject({
+      status: "running",
+      providerJobId: "provider-job-1",
+      providerAttemptNumber: 1,
+      technicalAttemptCount: 1,
+    });
+    expect(JSON.parse(acceptedOperation.providerAttemptsJson)).toEqual([
+      expect.objectContaining({
+        attemptNumber: 1,
+        providerJobId: "provider-job-1",
+        model: "veo-3.1-lite",
+        transportAttemptCount: 1,
+        status: "running",
+        failureKind: null,
+        errorCode: null,
+      }),
+    ]);
+    await expect(prisma.workspaceProviderLock.count()).resolves.toBe(1);
+    await expect(
+      prisma.flowGeneratedImage.findUniqueOrThrow({ where: { id: sourceImageId } }),
+    ).resolves.toMatchObject({ qaStatus: "APPROVED" });
+  });
+
+  it("renews an expired accepted-job lock before polling the same provider job", async () => {
+    const adapter = createAdapter();
+    const command = {
+      contentRunId,
+      slot: "scene_1_store_video" as const,
+      idempotencyKey: "expired-accepted-lock",
+    };
+    const dependencies = {
+      prisma,
+      objectStorage: createStorage(),
+      createAdapter: () => adapter,
+      lockTtlMs: 60_000,
+    };
+    const actor = { workspaceId, actorType: "service" as const, actorId: "hermes" };
+
+    const started = await generateManagedStyle1Video(actor, command, dependencies);
+    await prisma.workspaceProviderLock.update({
+      where: { workspaceId },
+      data: {
+        acquiredAt: new Date("2026-08-19T12:00:00.000Z"),
+        expiresAt: new Date("2026-08-19T12:00:01.000Z"),
+      },
+    });
+    const resumedAfter = new Date();
+
+    const resumed = await generateManagedStyle1Video(actor, command, dependencies);
+
+    expect(started.operationStatus).toBe("running");
+    expect(resumed).toMatchObject({
+      operationId: started.operationId,
+      operationStatus: "running",
+      providerJobId: "provider-job-1",
+    });
+    expect(adapter.startVideo).toHaveBeenCalledTimes(1);
+    expect(adapter.pollVideo).toHaveBeenCalledExactlyOnceWith({
+      providerJobId: "provider-job-1",
+    });
+    const renewedLock = await prisma.workspaceProviderLock.findUniqueOrThrow({
+      where: { workspaceId },
+    });
+    expect(renewedLock).toMatchObject({ operationId: started.operationId });
+    expect(renewedLock.acquiredAt.getTime()).toBeGreaterThanOrEqual(
+      resumedAfter.getTime(),
+    );
+    expect(renewedLock.expiresAt.getTime()).toBeGreaterThan(resumedAfter.getTime());
+    await expect(
+      prisma.contentOperation.findUniqueOrThrow({
+        where: { id: started.operationId },
+      }),
+    ).resolves.toMatchObject({
+      status: "running",
+      providerJobId: "provider-job-1",
+      errorJson: null,
+      completedAt: null,
+    });
+  });
+
+  it("returns WAIT for a live self-owned pre-identity lock without calling the provider", async () => {
+    const operation = await prisma.contentOperation.create({
+      data: {
+        workspaceId,
+        contentRunId,
+        kind: "video_generation",
+        sceneLabel: "scene_1_store",
+        idempotencyKey: "live-pre-identity-lock",
+      },
+    });
+    await prisma.workspaceProviderLock.create({
+      data: {
+        workspaceId,
+        operationId: operation.id,
+        expiresAt: new Date(Date.now() + 60_000),
+      },
+    });
+    const adapter = createAdapter();
+
+    const result = await generateManagedStyle1Video(
+      { workspaceId, actorType: "service", actorId: "hermes" },
+      {
+        contentRunId,
+        slot: "scene_1_store_video",
+        idempotencyKey: "live-pre-identity-lock",
+      },
+      { prisma, objectStorage: createStorage(), createAdapter: () => adapter },
+    );
+
+    expect(result).toMatchObject({
+      operationId: operation.id,
+      operationStatus: "running",
+      requiredNextAction: { type: "WAIT_FOR_OPERATION", operationId: operation.id },
+    });
+    expect(adapter.startVideo).not.toHaveBeenCalled();
+    expect(adapter.pollVideo).not.toHaveBeenCalled();
+  });
+
+  it("reconciles an expired self-owned pre-identity lock without starting another job", async () => {
+    const operation = await prisma.contentOperation.create({
+      data: {
+        workspaceId,
+        contentRunId,
+        kind: "video_generation",
+        sceneLabel: "scene_1_store",
+        idempotencyKey: "expired-pre-identity-lock",
+      },
+    });
+    await prisma.workspaceProviderLock.create({
+      data: {
+        workspaceId,
+        operationId: operation.id,
+        acquiredAt: new Date(Date.now() - 2_000),
+        expiresAt: new Date(Date.now() - 1_000),
+      },
+    });
+    const adapter = createAdapter();
+
+    await expect(
+      generateManagedStyle1Video(
+        { workspaceId, actorType: "service", actorId: "hermes" },
+        {
+          contentRunId,
+          slot: "scene_1_store_video",
+          idempotencyKey: "expired-pre-identity-lock",
+        },
+        { prisma, objectStorage: createStorage(), createAdapter: () => adapter },
+      ),
+    ).rejects.toMatchObject({ code: "OPERATION_TERMINAL" });
+
+    expect(adapter.startVideo).not.toHaveBeenCalled();
+    expect(adapter.pollVideo).not.toHaveBeenCalled();
+    await expect(
+      prisma.contentOperation.findUniqueOrThrow({ where: { id: operation.id } }),
+    ).resolves.toMatchObject({
+      status: "failed",
+      providerJobId: null,
+      errorJson: expect.stringContaining("EXPIRED_PROVIDER_LOCK_RECOVERED"),
+    });
+    await expect(prisma.workspaceProviderLock.count()).resolves.toBe(0);
+    await expect(
+      prisma.contentRun.findUniqueOrThrow({ where: { id: contentRunId } }),
+    ).resolves.toMatchObject({ status: "failed" });
+  });
+
+  it("polls the accepted job on repeated same-key calls, persists completion, and replays the asset", async () => {
+    const adapter = createAdapter();
+    vi.mocked(adapter.pollVideo)
+      .mockResolvedValueOnce({ status: "running", providerJobId: "provider-job-1" })
+      .mockResolvedValueOnce({
+        status: "completed",
+        providerJobId: "provider-job-1",
+        mediaGenerationId: "flow-video-1",
+        url: "https://provider.example/video.mp4",
+      });
+    const storage = createStorage();
+    const command = {
+      contentRunId,
+      slot: "scene_1_store_video" as const,
+      idempotencyKey: "resume-video",
+    };
+    const dependencies = {
+      prisma,
+      objectStorage: storage,
+      createAdapter: () => adapter,
+      fetchMedia: vi.fn(async () =>
+        new Response(MP4_BYTES, { headers: { "content-type": "video/mp4" } }),
+      ),
+    };
+    const actor = { workspaceId, actorType: "service" as const, actorId: "hermes" };
+
+    const started = await generateManagedStyle1Video(actor, command, dependencies);
+    const stillRunning = await generateManagedStyle1Video(actor, command, dependencies);
+    const completed = await generateManagedStyle1Video(actor, command, dependencies);
+    const replayed = await generateManagedStyle1Video(actor, command, dependencies);
+
+    expect(started.operationStatus).toBe("running");
+    expect(stillRunning.operationStatus).toBe("running");
+    expect(adapter.startVideo).toHaveBeenCalledTimes(1);
+    expect(adapter.pollVideo).toHaveBeenCalledTimes(2);
+    expect(completed).toMatchObject({
+      operationStatus: "succeeded",
+      contentRunId,
+      providerJobId: "provider-job-1",
+      asset: {
+        contentRunId,
+        sceneLabel: "scene_1_store",
+        mediaGenerationId: "flow-video-1",
+        sourceImageId,
+        imageMediaGenerationId: "flow-source-image-1",
+        qaStatus: "NOT_QA_CHECKED",
+        storageBucket: "managed",
+        storageContentType: "video/mp4",
+        storageBytes: MP4_BYTES.byteLength,
+      },
+      requiredNextAction: {
+        type: "RUN_QA",
+        slot: "scene_1_store_video",
+      },
+    });
+    expect(replayed.operationId).toBe(completed.operationId);
+    expect(replayed.operationStatus).toBe("succeeded");
+    expect(adapter.startVideo).toHaveBeenCalledTimes(1);
+    expect(adapter.pollVideo).toHaveBeenCalledTimes(2);
+    await expect(prisma.flowGeneratedVideo.count({ where: { contentRunId } })).resolves.toBe(1);
+    await expect(prisma.contentOperation.count({ where: { contentRunId } })).resolves.toBe(1);
+    await expect(
+      prisma.flowGeneratedVideo.findFirstOrThrow({ where: { contentRunId } }),
+    ).resolves.toMatchObject({
+      prompt: "frozen store video prompt",
+      creativeDirectionJson: null,
+    });
+    await expect(prisma.workspaceProviderLock.count()).resolves.toBe(0);
+    await expect(
+      prisma.contentRun.findUniqueOrThrow({ where: { id: contentRunId } }),
+    ).resolves.toMatchObject({ status: "qa_running" });
+  });
+
+  it("persists the compiled final prompt and canonical creative direction on completed video assets", async () => {
+    const adapter = createAdapter();
+    vi.mocked(adapter.pollVideo).mockResolvedValueOnce({
+      status: "completed",
+      providerJobId: "provider-job-1",
+      mediaGenerationId: "flow-video-directed",
+      url: "https://provider.example/directed.mp4",
+    });
+    const command = {
+      contentRunId,
+      slot: "scene_1_store_video" as const,
+      idempotencyKey: "directed-completion",
+      creativeDirection: lowRiskDirection,
+    };
+    const dependencies = {
+      prisma,
+      objectStorage: createStorage(),
+      createAdapter: () => adapter,
+      fetchMedia: vi.fn(async () =>
+        new Response(MP4_BYTES, { headers: { "content-type": "video/mp4" } }),
+      ),
+    };
+    const actor = { workspaceId, actorType: "service" as const, actorId: "hermes" };
+
+    await generateManagedStyle1Video(actor, command, dependencies);
+    const completed = await generateManagedStyle1Video(actor, command, dependencies);
+
+    expect(completed.operationStatus).toBe("succeeded");
+    if (completed.operationStatus !== "succeeded") throw new Error("expected success");
+    expect(completed.asset.prompt).toMatch(/^frozen store video prompt\n\n/);
+    expect(completed.asset.prompt).toContain("Canonical prompt above wins");
+    expect(completed.asset.prompt).toContain("Preserve product label layout");
+    await expect(
+      prisma.flowGeneratedVideo.findFirstOrThrow({ where: { contentRunId } }),
+    ).resolves.toMatchObject({
+      prompt: completed.asset.prompt,
+      creativeDirectionJson: JSON.stringify(lowRiskDirection),
+    });
+    await expect(
+      prisma.contentOperation.findFirstOrThrow({ where: { contentRunId } }),
+    ).resolves.toMatchObject({
+      creativeDirectionJson: JSON.stringify(lowRiskDirection),
+    });
+    expect(adapter.startVideo).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the frozen product name for directed prompt persistence after product rename resume", async () => {
+    const adapter = createAdapter();
+    vi.mocked(adapter.pollVideo).mockResolvedValueOnce({
+      status: "completed",
+      providerJobId: "provider-job-1",
+      mediaGenerationId: "flow-video-frozen-product",
+      url: "https://provider.example/frozen-product.mp4",
+    });
+    const command = {
+      contentRunId,
+      slot: "scene_1_store_video" as const,
+      idempotencyKey: "directed-frozen-product-resume",
+      creativeDirection: lowRiskDirection,
+    };
+    const dependencies = {
+      prisma,
+      objectStorage: createStorage(),
+      createAdapter: () => adapter,
+      fetchMedia: vi.fn(async () =>
+        new Response(MP4_BYTES, { headers: { "content-type": "video/mp4" } }),
+      ),
+    };
+    const actor = { workspaceId, actorType: "service" as const, actorId: "hermes" };
+
+    await generateManagedStyle1Video(actor, command, dependencies);
+    const originallySentPrompt = vi.mocked(adapter.startVideo).mock.calls[0][0].prompt;
+    expect(originallySentPrompt).toContain("Preserve product label layout");
+    expect(originallySentPrompt).not.toContain("renamed product");
+
+    await prisma.product.update({
+      where: { id: productId },
+      data: { productName: "renamed product" },
+    });
+
+    const completed = await generateManagedStyle1Video(actor, command, dependencies);
+
+    expect(completed.operationStatus).toBe("succeeded");
+    if (completed.operationStatus !== "succeeded") throw new Error("expected success");
+    expect(adapter.startVideo).toHaveBeenCalledTimes(1);
+    expect(completed.asset.prompt).toBe(originallySentPrompt);
+    expect(completed.asset.prompt).not.toContain("renamed product");
+    await expect(
+      prisma.flowGeneratedVideo.findFirstOrThrow({ where: { contentRunId } }),
+    ).resolves.toMatchObject({
+      prompt: originallySentPrompt,
+      creativeDirectionJson: JSON.stringify(lowRiskDirection),
+    });
+  });
+
+  it("preserves an accepted job after a transient poll error and resumes it to completion", async () => {
+    const adapter = createAdapter();
+    const transientPollError = Object.assign(new Error("poll transport timeout"), {
+      classification: "technical-retryable",
+      acceptedProviderIdentity: true,
+      code: "transport_failure",
+    });
+    vi.mocked(adapter.pollVideo)
+      .mockRejectedValueOnce(transientPollError)
+      .mockResolvedValueOnce({
+        status: "completed",
+        providerJobId: "provider-job-1",
+        mediaGenerationId: "flow-video-after-timeout",
+        url: "https://provider.example/video-after-timeout.mp4",
+      });
+    const command = {
+      contentRunId,
+      slot: "scene_1_store_video" as const,
+      idempotencyKey: "resume-after-transient-poll-error",
+    };
+    const dependencies = {
+      prisma,
+      objectStorage: createStorage(),
+      createAdapter: () => adapter,
+      fetchMedia: vi.fn(async () =>
+        new Response(MP4_BYTES, { headers: { "content-type": "video/mp4" } }),
+      ),
+    };
+    const actor = { workspaceId, actorType: "service" as const, actorId: "hermes" };
+
+    await generateManagedStyle1Video(actor, command, dependencies);
+    await expect(generateManagedStyle1Video(actor, command, dependencies)).rejects.toBe(
+      transientPollError,
+    );
+    await expect(
+      prisma.contentOperation.findFirstOrThrow({ where: { contentRunId } }),
+    ).resolves.toMatchObject({
+      status: "running",
+      providerJobId: "provider-job-1",
+    });
+    await expect(prisma.workspaceProviderLock.count()).resolves.toBe(1);
+
+    const completed = await generateManagedStyle1Video(actor, command, dependencies);
+
+    expect(completed).toMatchObject({
+      operationStatus: "succeeded",
+      providerJobId: "provider-job-1",
+      asset: {
+        contentRunId,
+        mediaGenerationId: "flow-video-after-timeout",
+        sourceImageId,
+      },
+      requiredNextAction: { type: "RUN_QA", slot: "scene_1_store_video" },
+    });
+    expect(adapter.startVideo).toHaveBeenCalledTimes(1);
+    expect(adapter.pollVideo).toHaveBeenCalledTimes(2);
+    await expect(prisma.workspaceProviderLock.count()).resolves.toBe(0);
+  });
+
+  it("persists accepted source lineage at start and reuses it on resume", async () => {
+    const adapter = createAdapter();
+    vi.mocked(adapter.pollVideo).mockResolvedValue({
+      status: "completed",
+      providerJobId: "provider-job-1",
+      mediaGenerationId: "flow-video-from-original-source",
+      url: "https://provider.example/video-from-original.mp4",
+    });
+    const command = {
+      contentRunId,
+      slot: "scene_1_store_video" as const,
+      idempotencyKey: "immutable-start-lineage",
+    };
+    const dependencies = {
+      prisma,
+      objectStorage: createStorage(),
+      createAdapter: () => adapter,
+      fetchMedia: vi.fn(async () =>
+        new Response(MP4_BYTES, { headers: { "content-type": "video/mp4" } }),
+      ),
+    };
+    const actor = { workspaceId, actorType: "service" as const, actorId: "hermes" };
+
+    await generateManagedStyle1Video(actor, command, dependencies);
+    await prisma.flowGeneratedImage.update({
+      where: { id: sourceImageId },
+      data: { mediaGenerationId: "mutated-latest-source-media" },
+    });
+
+    const completed = await generateManagedStyle1Video(actor, command, dependencies);
+
+    expect(completed).toMatchObject({
+      operationStatus: "succeeded",
+      asset: {
+        sourceImageId,
+        imageMediaGenerationId: "flow-source-image-1",
+      },
+    });
+    expect(adapter.startVideo).toHaveBeenCalledExactlyOnceWith({
+      prompt: "frozen store video prompt",
+      model: "veo-3.1-lite",
+      sourceImageMediaGenerationId: "flow-source-image-1",
+      aspectRatio: "portrait",
+      durationSeconds: 8,
+    });
+  });
+
+  it.each([
+    ["nonapproved", async () => {
+      await prisma.flowGeneratedImage.update({
+        where: { id: sourceImageId },
+        data: { qaStatus: "NOT_QA_CHECKED" },
+      });
+    }],
+    ["wrong-scene", async () => {
+      await prisma.flowGeneratedImage.update({
+        where: { id: sourceImageId },
+        data: { sceneLabel: "scene_2_home_image" },
+      });
+    }],
+    ["missing", async () => {
+      await prisma.flowGeneratedImage.delete({ where: { id: sourceImageId } });
+    }],
+    ["cross-run", async () => {
+      const other = await prisma.contentRun.create({
+        data: {
+          productId,
+          style: "style1",
+          market: "uk",
+          status: "generating",
+          idempotencyKey: randomUUID(),
+          promptSnapshotJson: JSON.stringify(frozenSnapshot()),
+        },
+      });
+      await prisma.flowGeneratedImage.update({
+        where: { id: sourceImageId },
+        data: { contentRunId: other.id },
+      });
+    }],
+  ])("rejects a %s source image before any provider call", async (_case, mutate) => {
+    await mutate();
+    const adapter = createAdapter();
+
+    await expect(
+      generateManagedStyle1Video(
+        { workspaceId, actorType: "service", actorId: "hermes" },
+        {
+          contentRunId,
+          slot: "scene_1_store_video",
+          idempotencyKey: `invalid-${_case}`,
+        },
+        { prisma, objectStorage: createStorage(), createAdapter: () => adapter },
+      ),
+    ).rejects.toMatchObject({ code: "VIDEO_SLOT_NOT_READY" });
+    expect(adapter.startVideo).not.toHaveBeenCalled();
+    expect(adapter.pollVideo).not.toHaveBeenCalled();
+    await expect(prisma.contentOperation.count()).resolves.toBe(0);
+  });
+
+  it("records a failed provider job terminally and releases the lock", async () => {
+    const adapter = createAdapter();
+    vi.mocked(adapter.pollVideo).mockResolvedValue({
+      status: "failed",
+      providerJobId: "provider-job-1",
+      reason: "content rejected",
+      failureKind: "provider",
+    });
+    const command = {
+      contentRunId,
+      slot: "scene_1_store_video" as const,
+      idempotencyKey: "failed-video",
+    };
+    const dependencies = {
+      prisma,
+      objectStorage: createStorage(),
+      createAdapter: () => adapter,
+    };
+    const actor = { workspaceId, actorType: "service" as const, actorId: "hermes" };
+
+    await generateManagedStyle1Video(actor, command, dependencies);
+    await expect(
+      generateManagedStyle1Video(actor, command, dependencies),
+    ).rejects.toMatchObject({ code: "PROVIDER_VIDEO_FAILED" });
+
+    await expect(
+      prisma.contentOperation.findFirstOrThrow({ where: { contentRunId } }),
+    ).resolves.toMatchObject({ status: "failed", providerJobId: "provider-job-1" });
+    await expect(
+      prisma.contentRun.findUniqueOrThrow({ where: { id: contentRunId } }),
+    ).resolves.toMatchObject({ status: "failed" });
+    await expect(prisma.workspaceProviderLock.count()).resolves.toBe(0);
+    expect(adapter.startVideo).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses all safe technical start retries without duplicating an accepted job", async () => {
+    const callTool = vi
+      .fn()
+      .mockResolvedValueOnce({
+        isError: true,
+        content: [{ type: "text", text: "network timeout" }],
+        structuredContent: {
+          retrySafety: { kind: "provider_pre_acceptance", safeToRetry: true },
+        },
+      })
+      .mockResolvedValueOnce({
+        isError: true,
+        content: [{ type: "text", text: "network timeout" }],
+        structuredContent: {
+          retrySafety: { kind: "provider_pre_acceptance", safeToRetry: true },
+        },
+      })
+      .mockResolvedValueOnce({
+        isError: false,
+        content: [],
+        structuredContent: {
+          operation: "generate_video",
+          mode: "async",
+          status: "created",
+          jobId: "provider-job-after-retries",
+        },
+      });
+    const adapter = createApexFlowAdapter(
+      {
+        actor: { workspaceId, actorType: "service", actorId: "hermes" },
+        flowEmail: "bound@example.test",
+      },
+      { callTool },
+    );
+
+    const result = await generateManagedStyle1Video(
+      { workspaceId, actorType: "service", actorId: "hermes" },
+      {
+        contentRunId,
+        slot: "scene_1_store_video",
+        idempotencyKey: "technical-retries",
+      },
+      { prisma, objectStorage: createStorage(), createAdapter: () => adapter },
+    );
+
+    expect(result).toMatchObject({
+      operationStatus: "running",
+      providerJobId: "provider-job-after-retries",
+    });
+    expect(callTool).toHaveBeenCalledTimes(3);
+    await expect(
+      prisma.contentOperation.findFirstOrThrow({ where: { contentRunId } }),
+    ).resolves.toMatchObject({
+      technicalAttemptCount: 3,
+      providerJobId: "provider-job-after-retries",
+      status: "running",
+    });
+  });
+
+  it("does not retry ambiguous adapter-bound start transport errors", async () => {
+    const callTool = vi.fn().mockResolvedValue({
+      isError: true,
+      content: [{ type: "text", text: "network timeout before provider acceptance" }],
+    });
+    const adapter = createApexFlowAdapter(
+      {
+        actor: { workspaceId, actorType: "service", actorId: "hermes" },
+        flowEmail: "bound@example.test",
+      },
+      { callTool },
+    );
+
+    await expect(
+      generateManagedStyle1Video(
+        { workspaceId, actorType: "service", actorId: "hermes" },
+        {
+          contentRunId,
+          slot: "scene_1_store_video",
+          idempotencyKey: "ambiguous-adapter-error",
+        },
+        { prisma, objectStorage: createStorage(), createAdapter: () => adapter },
+      ),
+    ).rejects.toMatchObject({
+      classification: "terminal-nontechnical",
+      code: "transport_failure",
+    });
+    expect(callTool).toHaveBeenCalledTimes(1);
+  });
+
+  it("never starts again when accepted-start persistence races after the mutable pre-read", async () => {
+    const adapter = createAdapter();
+    const command = {
+      contentRunId,
+      slot: "scene_1_store_video" as const,
+      idempotencyKey: "accepted-not-persisted",
+    };
+    const dependencies = {
+      prisma,
+      objectStorage: createStorage(),
+      createAdapter: () => adapter,
+      operationRepository: createOperationRepository(
+        withAcceptedStartPersistenceRace(prisma),
+      ),
+    };
+    const actor = { workspaceId, actorType: "service" as const, actorId: "hermes" };
+
+    await expect(generateManagedStyle1Video(actor, command, dependencies)).rejects.toMatchObject({
+      code: "OPERATION_TERMINAL",
+    });
+    await expect(generateManagedStyle1Video(actor, command, dependencies)).rejects.toMatchObject({
+      code: "OPERATION_TERMINAL",
+    });
+    expect(adapter.startVideo).toHaveBeenCalledTimes(1);
+    await expect(
+      prisma.contentOperation.findFirstOrThrow({ where: { contentRunId } }),
+    ).resolves.toMatchObject({
+      status: "failed",
+      providerJobId: null,
+      resultJson: null,
+    });
+    await expect(prisma.workspaceProviderLock.count()).resolves.toBe(0);
+  });
+
+  it("does not clear or fail a newer provider job when a stale poll result loses the terminal audit race", async () => {
+    const adapter = createAdapter();
+    vi.mocked(adapter.pollVideo).mockResolvedValue({
+      status: "failed",
+      providerJobId: "provider-job-1",
+      reason: "Audio generation failed",
+      failureKind: "audio_generation",
+      errorCode: "audio_generation_failed",
+    });
+    const baseRepository = createOperationRepository(prisma);
+    const racingRepository = {
+      ...baseRepository,
+      async terminalizeProviderAttempt(
+        scope: Parameters<typeof baseRepository.terminalizeProviderAttempt>[0],
+        input: Parameters<typeof baseRepository.terminalizeProviderAttempt>[1],
+      ) {
+        await prisma.contentOperation.update({
+          where: { id: scope.operationId },
+          data: { providerJobId: "provider-job-newer" },
+        });
+        return baseRepository.terminalizeProviderAttempt(scope, input);
+      },
+    };
+    const command = {
+      contentRunId,
+      slot: "scene_1_store_video" as const,
+      idempotencyKey: "stale-audio-poll-race",
+    };
+    const dependencies = {
+      prisma,
+      objectStorage: createStorage(),
+      createAdapter: () => adapter,
+      operationRepository: racingRepository,
+    };
+    const actor = { workspaceId, actorType: "service" as const, actorId: "hermes" };
+
+    await generateManagedStyle1Video(actor, command, {
+      ...dependencies,
+      operationRepository: baseRepository,
+    });
+    await expect(generateManagedStyle1Video(actor, command, dependencies)).rejects.toMatchObject({
+      code: "PROVIDER_ATTEMPT_STALE",
+    });
+
+    expect(adapter.startVideo).toHaveBeenCalledTimes(1);
+    const operation = await prisma.contentOperation.findFirstOrThrow({ where: { contentRunId } });
+    expect(operation).toMatchObject({ status: "running", providerJobId: "provider-job-newer" });
+    await expect(prisma.flowGeneratedVideo.count({ where: { contentRunId } })).resolves.toBe(0);
+  });
+
+  it("fences concurrent audio-retry resumptions so only one replacement provider job is started", async () => {
+    const adapter = createAdapter();
+    vi.mocked(adapter.startVideo)
+      .mockResolvedValueOnce({ providerJobId: "provider-job-1" })
+      .mockResolvedValueOnce({ providerJobId: "provider-job-2" });
+    vi.mocked(adapter.pollVideo).mockResolvedValue({
+      status: "failed",
+      providerJobId: "provider-job-1",
+      reason: "Audio generation failed",
+      failureKind: "audio_generation",
+      errorCode: "audio_generation_failed",
+    });
+    const baseRepository = createOperationRepository(prisma);
+    const bothTerminalized = deferred<void>();
+    let terminalizeCalls = 0;
+    const racingRepository = {
+      ...baseRepository,
+      async terminalizeProviderAttempt(
+        scope: Parameters<typeof baseRepository.terminalizeProviderAttempt>[0],
+        input: Parameters<typeof baseRepository.terminalizeProviderAttempt>[1],
+      ) {
+        const terminalized = await baseRepository.terminalizeProviderAttempt(scope, input);
+        terminalizeCalls += 1;
+        if (terminalizeCalls === 2) bothTerminalized.resolve();
+        await bothTerminalized.promise;
+        return terminalized;
+      },
+    };
+    const command = {
+      contentRunId,
+      slot: "scene_1_store_video" as const,
+      idempotencyKey: "concurrent-audio-retry-fenced",
+    };
+    const dependencies = {
+      prisma,
+      objectStorage: createStorage(),
+      createAdapter: () => adapter,
+      operationRepository: racingRepository,
+    };
+    const actor = { workspaceId, actorType: "service" as const, actorId: "hermes" };
+
+    await generateManagedStyle1Video(actor, command, {
+      ...dependencies,
+      operationRepository: baseRepository,
+    });
+    const results = await Promise.allSettled([
+      generateManagedStyle1Video(actor, command, dependencies),
+      generateManagedStyle1Video(actor, command, dependencies),
+    ]);
+
+    expect(results).toHaveLength(2);
+    expect(results.every((result) => result.status === "fulfilled")).toBe(true);
+    expect(
+      results.map((result) =>
+        result.status === "fulfilled" ? result.value.providerJobId ?? null : null,
+      ),
+    ).toContain("provider-job-2");
+    expect(adapter.startVideo).toHaveBeenCalledTimes(2);
+    const operation = await prisma.contentOperation.findFirstOrThrow({ where: { contentRunId } });
+    expect(operation).toMatchObject({ status: "running", providerJobId: "provider-job-2" });
+    expect(JSON.parse(operation.providerAttemptsJson).map((attempt: any) => attempt.providerJobId)).toEqual([
+      "provider-job-1",
+      "provider-job-2",
+    ]);
+    await expect(prisma.flowGeneratedVideo.count({ where: { contentRunId } })).resolves.toBe(0);
+  });
+
+  it("resumes a prepared audio retry that crashed before accepting the replacement job", async () => {
+    const adapter = createAdapter();
+    vi.mocked(adapter.startVideo)
+      .mockResolvedValueOnce({ providerJobId: "provider-job-1" })
+      .mockResolvedValueOnce({ providerJobId: "provider-job-2" });
+    const command = {
+      contentRunId,
+      slot: "scene_1_store_video" as const,
+      idempotencyKey: "audio-retry-prepared-crash-resume",
+    };
+    const dependencies = { prisma, objectStorage: createStorage(), createAdapter: () => adapter };
+    const actor = { workspaceId, actorType: "service" as const, actorId: "hermes" };
+
+    const started = await generateManagedStyle1Video(actor, command, dependencies);
+    const repository = createOperationRepository(prisma);
+    await repository.terminalizeProviderAttempt(
+      { workspaceId, operationId: started.operationId },
+      {
+        attemptNumber: 1,
+        providerJobId: "provider-job-1",
+        status: "failed",
+        failureKind: "audio_generation",
+        errorCode: "audio_generation_failed",
+      },
+    );
+    await repository.prepareAudioRetry(
+      { workspaceId, operationId: started.operationId },
+      { attemptNumber: 1, providerJobId: "provider-job-1" },
+    );
+
+    const resumed = await generateManagedStyle1Video(actor, command, dependencies);
+
+    expect(resumed).toMatchObject({ operationStatus: "running", providerJobId: "provider-job-2" });
+    expect(adapter.startVideo).toHaveBeenCalledTimes(2);
+    const operation = await prisma.contentOperation.findFirstOrThrow({ where: { contentRunId } });
+    expect(JSON.parse(operation.providerAttemptsJson).map((attempt: any) => attempt.providerJobId)).toEqual([
+      "provider-job-1",
+      "provider-job-2",
+    ]);
+  });
+
+  it("does not reissue a provider start after an expired audio-retry start claim", async () => {
+    const adapter = createAdapter();
+    vi.mocked(adapter.startVideo).mockResolvedValueOnce({ providerJobId: "provider-job-1" });
+    const command = {
+      contentRunId,
+      slot: "scene_1_store_video" as const,
+      idempotencyKey: "audio-retry-expired-claim-no-reissue",
+    };
+    const dependencies = { prisma, objectStorage: createStorage(), createAdapter: () => adapter };
+    const actor = { workspaceId, actorType: "service" as const, actorId: "hermes" };
+
+    const started = await generateManagedStyle1Video(actor, command, dependencies);
+    const repository = createOperationRepository(prisma);
+    await repository.terminalizeProviderAttempt(
+      { workspaceId, operationId: started.operationId },
+      {
+        attemptNumber: 1,
+        providerJobId: "provider-job-1",
+        status: "failed",
+        failureKind: "audio_generation",
+        errorCode: "audio_generation_failed",
+      },
+    );
+    await repository.prepareAudioRetry(
+      { workspaceId, operationId: started.operationId },
+      { attemptNumber: 1, providerJobId: "provider-job-1" },
+    );
+    await prisma.contentOperation.update({
+      where: { id: started.operationId },
+      data: {
+        errorJson: JSON.stringify({
+          code: "AUDIO_RETRY_START_IN_PROGRESS",
+          attemptNumber: 2,
+          token: "expired-claim-token",
+          claimedAt: new Date(Date.now() - 120_000).toISOString(),
+          expiresAt: new Date(Date.now() - 60_000).toISOString(),
+        }),
+      },
+    });
+    await prisma.workspaceProviderLock.update({
+      where: { workspaceId },
+      data: { expiresAt: new Date(Date.now() + 60_000) },
+    });
+
+    await expect(generateManagedStyle1Video(actor, command, dependencies)).rejects.toMatchObject({
+      code: "PROVIDER_VIDEO_START_PERSISTENCE_FAILED",
+    });
+
+    expect(adapter.startVideo).toHaveBeenCalledTimes(1);
+    const operation = await prisma.contentOperation.findFirstOrThrow({ where: { contentRunId } });
+    expect(operation.status).toBe("failed");
+    expect(operation.providerJobId).toBeNull();
+    const run = await prisma.contentRun.findUniqueOrThrow({ where: { id: contentRunId } });
+    expect(run.status).toBe("failed");
+    await expect(prisma.flowGeneratedVideo.count({ where: { contentRunId } })).resolves.toBe(0);
+    await expect(prisma.workspaceProviderLock.count({ where: { workspaceId } })).resolves.toBe(0);
+  });
+
+  it("does not fail a concurrently accepted newer job when expired audio-retry claim terminalization loses CAS", async () => {
+    const adapter = createAdapter();
+    vi.mocked(adapter.startVideo).mockResolvedValueOnce({ providerJobId: "provider-job-1" });
+    const command = {
+      contentRunId,
+      slot: "scene_1_store_video" as const,
+      idempotencyKey: "audio-retry-expired-claim-cas-loss",
+    };
+    const dependencies = { prisma, objectStorage: createStorage(), createAdapter: () => adapter };
+    const actor = { workspaceId, actorType: "service" as const, actorId: "hermes" };
+
+    const started = await generateManagedStyle1Video(actor, command, dependencies);
+    const repository = createOperationRepository(prisma);
+    await repository.terminalizeProviderAttempt(
+      { workspaceId, operationId: started.operationId },
+      {
+        attemptNumber: 1,
+        providerJobId: "provider-job-1",
+        status: "failed",
+        failureKind: "audio_generation",
+        errorCode: "audio_generation_failed",
+      },
+    );
+    const prepared = await repository.prepareAudioRetry(
+      { workspaceId, operationId: started.operationId },
+      { attemptNumber: 1, providerJobId: "provider-job-1" },
+    );
+    const expiredClaim = JSON.stringify({
+      code: "AUDIO_RETRY_START_IN_PROGRESS",
+      attemptNumber: 2,
+      token: "expired-claim-token",
+      claimedAt: new Date(Date.now() - 120_000).toISOString(),
+      expiresAt: new Date(Date.now() - 60_000).toISOString(),
+    });
+    await prisma.contentOperation.update({
+      where: { id: started.operationId },
+      data: { errorJson: expiredClaim },
+    });
+    await prisma.workspaceProviderLock.update({
+      where: { workspaceId },
+      data: { expiresAt: new Date(Date.now() + 60_000) },
+    });
+    const racingPrisma = new Proxy(prisma, {
+      get(target, prop, receiver) {
+        if (prop !== "contentOperation") return Reflect.get(target, prop, receiver);
+        const delegate = target.contentOperation;
+        return new Proxy(delegate, {
+          get(contentOperation, delegateProp, delegateReceiver) {
+            if (delegateProp !== "updateMany") {
+              return Reflect.get(contentOperation, delegateProp, delegateReceiver);
+            }
+            return async (args: Parameters<typeof delegate.updateMany>[0]) => {
+              const data = args.data as { status?: unknown; errorJson?: unknown } | undefined;
+              if (data?.status === "failed" && data.errorJson && args.where?.errorJson === expiredClaim) {
+                const history = JSON.parse(prepared.providerAttemptsJson);
+                await target.contentOperation.update({
+                  where: { id: started.operationId },
+                  data: {
+                    providerJobId: "provider-job-2",
+                    providerAttemptNumber: 2,
+                    providerAttemptsJson: JSON.stringify([
+                      ...history,
+                      {
+                        attemptNumber: 2,
+                        providerJobId: "provider-job-2",
+                        model: "veo-3.1-lite",
+                        transportAttemptCount: 1,
+                        status: "running",
+                        failureKind: null,
+                        errorCode: null,
+                        acceptedAt: new Date().toISOString(),
+                        completedAt: null,
+                      },
+                    ]),
+                    technicalAttemptCount: 1,
+                    resultJson: prepared.resultJson,
+                    errorJson: null,
+                  },
+                });
+              }
+              return delegate.updateMany(args);
+            };
+          },
+        });
+      },
+    }) as PrismaClient;
+
+    const resumed = await generateManagedStyle1Video(actor, command, {
+      ...dependencies,
+      prisma: racingPrisma,
+    });
+
+    expect(resumed).toMatchObject({ operationStatus: "running", providerJobId: "provider-job-2" });
+    expect(adapter.startVideo).toHaveBeenCalledTimes(1);
+    await expect(prisma.contentOperation.findFirstOrThrow({ where: { contentRunId } })).resolves.toMatchObject({
+      status: "running",
+      providerJobId: "provider-job-2",
+    });
+    await expect(prisma.contentRun.findUniqueOrThrow({ where: { id: contentRunId } })).resolves.toMatchObject({
+      status: "generating",
+    });
+    await expect(prisma.flowGeneratedVideo.count({ where: { contentRunId } })).resolves.toBe(0);
+    await expect(prisma.workspaceProviderLock.count({ where: { workspaceId } })).resolves.toBe(1);
+  });
+
+  it("retries exact accepted audio-generation failures up to four total attempts and persists only the eventual success", async () => {
+    const adapter = createAdapter();
+    vi.mocked(adapter.startVideo)
+      .mockResolvedValueOnce({ providerJobId: "provider-job-1" })
+      .mockResolvedValueOnce({ providerJobId: "provider-job-2" })
+      .mockResolvedValueOnce({ providerJobId: "provider-job-3" })
+      .mockResolvedValueOnce({ providerJobId: "provider-job-4" });
+    vi.mocked(adapter.pollVideo)
+      .mockResolvedValueOnce({
+        status: "failed",
+        providerJobId: "provider-job-1",
+        reason: "Audio generation failed",
+        failureKind: "audio_generation",
+        errorCode: "audio_generation_failed",
+      })
+      .mockResolvedValueOnce({
+        status: "failed",
+        providerJobId: "provider-job-2",
+        reason: "Audio generation error",
+        failureKind: "audio_generation",
+        errorCode: "audio_generation_error",
+      })
+      .mockResolvedValueOnce({
+        status: "failed",
+        providerJobId: "provider-job-3",
+        reason: "Failed to generate audio",
+        failureKind: "audio_generation",
+        errorCode: "failed_to_generate_audio",
+      })
+      .mockResolvedValueOnce({
+        status: "completed",
+        providerJobId: "provider-job-4",
+        mediaGenerationId: "flow-video-after-audio-retry",
+        url: "https://provider.example/video-after-audio-retry.mp4",
+      });
+    const storage = createStorage();
+    const command = {
+      contentRunId,
+      slot: "scene_1_store_video" as const,
+      idempotencyKey: "audio-retry-eventual-success",
+      creativeDirection: lowRiskDirection,
+    };
+    const dependencies = {
+      prisma,
+      objectStorage: storage,
+      createAdapter: () => adapter,
+      fetchMedia: vi.fn(async () =>
+        new Response(MP4_BYTES, { headers: { "content-type": "video/mp4" } }),
+      ),
+    };
+    const actor = { workspaceId, actorType: "service" as const, actorId: "hermes" };
+
+    const started = await generateManagedStyle1Video(actor, command, dependencies);
+    await prisma.flowGeneratedImage.update({
+      where: { id: sourceImageId },
+      data: { mediaGenerationId: "mutated-source-after-accepted-start" },
+    });
+    const retry2 = await generateManagedStyle1Video(actor, command, dependencies);
+    const retry3 = await generateManagedStyle1Video(actor, command, dependencies);
+    const retry4 = await generateManagedStyle1Video(actor, command, dependencies);
+    const completed = await generateManagedStyle1Video(actor, command, dependencies);
+
+    expect([started.providerJobId, retry2.providerJobId, retry3.providerJobId, retry4.providerJobId]).toEqual([
+      "provider-job-1",
+      "provider-job-2",
+      "provider-job-3",
+      "provider-job-4",
+    ]);
+    expect(completed.operationStatus).toBe("succeeded");
+    expect(adapter.startVideo).toHaveBeenCalledTimes(4);
+    expect(adapter.pollVideo).toHaveBeenCalledTimes(4);
+    const firstStart = vi.mocked(adapter.startVideo).mock.calls[0][0];
+    for (const call of vi.mocked(adapter.startVideo).mock.calls) {
+      expect(call[0]).toEqual(firstStart);
+    }
+    expect(firstStart).toMatchObject({
+      prompt: expect.stringContaining("frozen store video prompt"),
+      model: "veo-3.1-lite",
+      sourceImageMediaGenerationId: "flow-source-image-1",
+      aspectRatio: "portrait",
+      durationSeconds: 8,
+    });
+    await expect(prisma.flowGeneratedVideo.count({ where: { contentRunId } })).resolves.toBe(1);
+    await expect(prisma.workspaceProviderLock.count()).resolves.toBe(0);
+    const operation = await prisma.contentOperation.findFirstOrThrow({ where: { contentRunId } });
+    const attempts = JSON.parse(operation.providerAttemptsJson);
+    expect(attempts).toHaveLength(4);
+    expect(attempts.map((attempt: any) => attempt.providerJobId)).toEqual([
+      "provider-job-1",
+      "provider-job-2",
+      "provider-job-3",
+      "provider-job-4",
+    ]);
+    expect(attempts.map((attempt: any) => attempt.status)).toEqual([
+      "failed",
+      "failed",
+      "failed",
+      "succeeded",
+    ]);
+    expect(attempts.slice(0, 3).map((attempt: any) => attempt.failureKind)).toEqual([
+      "audio_generation",
+      "audio_generation",
+      "audio_generation",
+    ]);
+    expect(attempts[3]).toMatchObject({ failureKind: null, errorCode: null });
+    expect(new Set(attempts.map((attempt: any) => attempt.model))).toEqual(new Set(["veo-3.1-lite"]));
+    await expect(
+      prisma.flowGeneratedVideo.findFirstOrThrow({ where: { contentRunId } }),
+    ).resolves.toMatchObject({
+      mediaGenerationId: "flow-video-after-audio-retry",
+      sourceImageId,
+      imageMediaGenerationId: "flow-source-image-1",
+      creativeDirectionJson: JSON.stringify(lowRiskDirection),
+    });
+  });
+
+  it("does not audio-retry generic provider failures and records them terminally", async () => {
+    const adapter = createAdapter();
+    vi.mocked(adapter.pollVideo).mockResolvedValue({
+      status: "failed",
+      providerJobId: "provider-job-1",
+      reason: "Provider render failed",
+      failureKind: "provider",
+    });
+    const command = {
+      contentRunId,
+      slot: "scene_1_store_video" as const,
+      idempotencyKey: "generic-provider-no-audio-retry",
+    };
+    const dependencies = { prisma, objectStorage: createStorage(), createAdapter: () => adapter };
+    const actor = { workspaceId, actorType: "service" as const, actorId: "hermes" };
+
+    await generateManagedStyle1Video(actor, command, dependencies);
+    await expect(generateManagedStyle1Video(actor, command, dependencies)).rejects.toMatchObject({
+      code: "PROVIDER_VIDEO_FAILED",
+    });
+
+    expect(adapter.startVideo).toHaveBeenCalledTimes(1);
+    await expect(prisma.flowGeneratedVideo.count({ where: { contentRunId } })).resolves.toBe(0);
+    const operation = await prisma.contentOperation.findFirstOrThrow({ where: { contentRunId } });
+    expect(operation).toMatchObject({ status: "failed", providerJobId: "provider-job-1" });
+    expect(JSON.parse(operation.providerAttemptsJson)).toMatchObject([
+      { providerJobId: "provider-job-1", status: "failed", failureKind: "provider" },
+    ]);
+  });
+
+  it("surfaces the fourth accepted audio-generation failure without starting a fifth job", async () => {
+    const adapter = createAdapter();
+    vi.mocked(adapter.startVideo)
+      .mockResolvedValueOnce({ providerJobId: "provider-job-1" })
+      .mockResolvedValueOnce({ providerJobId: "provider-job-2" })
+      .mockResolvedValueOnce({ providerJobId: "provider-job-3" })
+      .mockResolvedValueOnce({ providerJobId: "provider-job-4" });
+    vi.mocked(adapter.pollVideo).mockImplementation(async ({ providerJobId }) => ({
+      status: "failed" as const,
+      providerJobId,
+      reason: "Audio generation failed",
+      failureKind: "audio_generation" as const,
+      errorCode: "audio_generation_failed",
+    }));
+    const command = {
+      contentRunId,
+      slot: "scene_1_store_video" as const,
+      idempotencyKey: "audio-retry-limit",
+    };
+    const dependencies = { prisma, objectStorage: createStorage(), createAdapter: () => adapter };
+    const actor = { workspaceId, actorType: "service" as const, actorId: "hermes" };
+
+    await generateManagedStyle1Video(actor, command, dependencies);
+    await generateManagedStyle1Video(actor, command, dependencies);
+    await generateManagedStyle1Video(actor, command, dependencies);
+    await generateManagedStyle1Video(actor, command, dependencies);
+    await expect(generateManagedStyle1Video(actor, command, dependencies)).rejects.toMatchObject({
+      code: "PROVIDER_VIDEO_FAILED",
+    });
+
+    expect(adapter.startVideo).toHaveBeenCalledTimes(4);
+    await expect(prisma.flowGeneratedVideo.count({ where: { contentRunId } })).resolves.toBe(0);
+    const operation = await prisma.contentOperation.findFirstOrThrow({ where: { contentRunId } });
+    expect(operation).toMatchObject({ status: "failed", providerJobId: "provider-job-4" });
+    expect(JSON.parse(operation.providerAttemptsJson)).toHaveLength(4);
+  });
+});

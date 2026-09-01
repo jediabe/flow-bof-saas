@@ -2395,6 +2395,37 @@ export function extractTikTokProductId(
 }
 
 /**
+ * Build the canonical TikTok Shop view URL for a product.
+ *
+ *   https://shop.tiktok.com/view/product/<PRODUCT_ID>?region=<REGION>&locale=en
+ *
+ * Chosen because this shape deep-links straight into the TikTok
+ * mobile app when opened on a phone — every other TikTok Shop URL
+ * variant (www.tiktok.com/shop/gb/pdp/…, shop-us.tiktok.com/view/…,
+ * shortened wm.tiktok.com/… redirects) either bounces through a web
+ * intermediate or fails to trigger the mobile-app deep link on some
+ * platforms. The paste-URL importer normalises whatever the operator
+ * pasted to this canonical form so the /prompts drawer's "open on
+ * phone" link always works.
+ *
+ * Region is derived from the batch's market: "uk" → "GB", "us" →
+ * "US". Unknown / null market falls back to "GB" (matches the
+ * TikHub-enrichment default region and the most common case).
+ *
+ * Returns null when productId is empty/invalid. Callers should
+ * still guard against null before assigning to Product.tiktokUrl.
+ */
+export function canonicalTikTokShopUrl(
+  productId: string | null | undefined,
+  market: string | null | undefined,
+): string | null {
+  const id = (productId ?? "").trim();
+  if (!id || !/^\d{10,}$/.test(id)) return null;
+  const region = ((market ?? "").trim().toLowerCase() === "us") ? "US" : "GB";
+  return `https://shop.tiktok.com/view/product/${id}?region=${region}&locale=en`;
+}
+
+/**
  * Enriched detail shape — everything the Kalodata-import enrichment
  * path needs to pre-fill a Product row so mobile review is a tap-
  * to-approve rather than a manual-data-entry step.
@@ -2540,7 +2571,7 @@ export async function getShopProductDetailEnriched(
   // — these live in scattered components (coupon_popup, price
   // component, description string) not on product_model itself.
   const discount = pluckDiscount(r);
-  const additionalImages = pluckImageUrls(r);
+  const additionalImages = pluckImageUrls(r, productModel);
   const sourceDescription = pluckSourceDescription(productModel) ??
     pluckSourceDescription(r);
 
@@ -2736,7 +2767,10 @@ function collectSkuDiscounts(
  *  Capped at 12 to leave headroom for a rich gallery without
  *  hoarding.
  */
-function pluckImageUrls(d: Record<string, unknown>): string[] {
+function pluckImageUrls(
+  d: Record<string, unknown>,
+  productModel?: Record<string, unknown> | null,
+): string[] {
   const found: string[] = [];
   const seen = new Set<string>();
   const push = (u: string) => {
@@ -2744,27 +2778,74 @@ function pluckImageUrls(d: Record<string, unknown>): string[] {
     seen.add(u);
     found.push(u);
   };
-  // Two-pass walk.
+
+  // THREE-PASS extraction. Design intent (July 2026 fix — the
+  // previous two-pass logic was making the main product card
+  // fall off the gallery on listings like Halara where the
+  // description subtree is enormous, because pass 2 wouldn't
+  // run once pass 1 found ≥4 miscellaneous images):
   //
-  // First pass: prioritize the real product carousel by skipping
-  // known-noise keys (marketing infographics in `description`,
-  // UI config, shipping metadata, etc.). For most listings this
-  // fills the gallery with the actual product photos operators
-  // want for Google Flow paste.
+  //   Pass 0 (priority): explicit pull from the product_model's
+  //     known main-carousel array keys. These are the images
+  //     TikTok's app shows at the TOP of the product page —
+  //     the primary product-card shots the operator sees when
+  //     opening a listing. Runs FIRST so the main card leads
+  //     the gallery regardless of what the general walk finds.
+  //     Silently skips when productModel wasn't supplied or
+  //     doesn't carry these keys — the general walk still finds
+  //     product images most of the time.
   //
-  // Second pass: SOME listings (Soundcore Sleep A30, and other
-  // image-only-description sellers) rely entirely on description
-  // infographic panels — they have empty product_model.images[]
-  // and only visual content lives in the description. If the
-  // first pass found nothing (or very little), retry allowing
-  // the noise keys so at least SOMETHING renders. Dedup handles
-  // any overlap with pass-one URLs.
-  collectImageUrls(d, push, 0, IMAGE_WALK_SKIP_KEYS);
-  if (found.length < 4) {
-    collectImageUrls(d, push, 0, EMPTY_SKIP_SET);
+  //   Pass 1 (walk, skip description): general walk with
+  //     IMAGE_WALK_SKIP_KEYS blocking known-noise subtrees
+  //     (description marketing infographics, UI config,
+  //     shipping metadata). Picks up variant thumbs, SKU
+  //     images, and any product carousel content pass 0
+  //     missed.
+  //
+  //   Pass 2 (walk, no skips): full walk with EMPTY_SKIP_SET.
+  //     Runs UNCONDITIONALLY now (previously only as a fallback
+  //     when pass 1 was <4). Pulls in the description-panel
+  //     infographics — "Product Measurements", "Flat Tummy
+  //     Effect", etc. — which operators explicitly want to
+  //     see in the reference-images gallery too. Order-wise
+  //     these land AFTER the main card + product content
+  //     because pass 0 + pass 1 got first pick via the shared
+  //     `seen` set.
+  //
+  // Cap bumped 12 → 16 to accommodate main card slots + a
+  // reasonable number of description infographics without
+  // starving either half.
+  const pm =
+    productModel ?? (findProductModel(d) as Record<string, unknown> | null);
+  if (pm) {
+    for (const key of MAIN_CAROUSEL_PRIORITY_KEYS) {
+      const list = pm[key];
+      if (!list) continue;
+      collectImageUrls(list, push, 0, EMPTY_SKIP_SET);
+    }
   }
-  return found.slice(0, 12);
+  collectImageUrls(d, push, 0, IMAGE_WALK_SKIP_KEYS);
+  collectImageUrls(d, push, 0, EMPTY_SKIP_SET);
+  return found.slice(0, 16);
 }
+
+/**
+ * Product-model keys that TikTok Shop uses (across regions +
+ * response shape drift) for the primary product-card carousel —
+ * the array of hero images shown at the top of the listing.
+ * Order matters only when a single response has MULTIPLE of
+ * these populated; in practice one is populated per shape.
+ * Kept as data so a new observed shape is a one-line addition.
+ */
+const MAIN_CAROUSEL_PRIORITY_KEYS = [
+  "images",
+  "image_list",
+  "main_images",
+  "carousel_images",
+  "product_images",
+  "spec_images",
+  "gallery_images",
+] as const;
 
 const EMPTY_SKIP_SET: ReadonlySet<string> = new Set();
 
@@ -3132,3 +3213,15 @@ export async function getProductCreatorCount(
     [];
   return items.length;
 }
+
+// ---------------------------------------------------------------------------
+// Test-only re-exports.
+//
+// Some internals — pluckImageUrls is the current one — need
+// coverage from src/lib/__tests__/ but are used only via higher-
+// level callers (getShopProductDetailEnriched) in production. To
+// avoid widening the public surface (which would let random
+// callers reach past the enrichment shape), we expose them under
+// a `__test_` prefix so their status as internals is obvious to
+// anyone reading imports.
+export const __test_pluckImageUrls = pluckImageUrls;

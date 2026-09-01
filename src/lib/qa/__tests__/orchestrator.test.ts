@@ -308,6 +308,34 @@ describe("runQaForAsset — successful image QA", () => {
       }),
     );
   });
+
+  it("resolves a stored relative product reference through the configured asset base", async () => {
+    primeHappyPath({ kind: "image" });
+    mockedDb.flowGeneratedImage.findUnique.mockResolvedValue(
+      imageRow({
+        product: {
+          ...videoRow().product,
+          referenceImageUrl: "/uploads/workspaces/ws-1/product.jpg",
+        },
+      }),
+    );
+    const previousBase = process.env.AGENT_ASSET_BASE_URL;
+    process.env.AGENT_ASSET_BASE_URL = "https://assets.example.test";
+    try {
+      await runQaForAsset({
+        assetId: "image-1",
+        assetKind: "image",
+        triggeredBy: "manual",
+        providerOverride: fakeProvider(goodResult()),
+      });
+      expect(fetchImageAsBase64).toHaveBeenCalledWith(
+        "https://assets.example.test/uploads/workspaces/ws-1/product.jpg",
+      );
+    } finally {
+      if (previousBase === undefined) delete process.env.AGENT_ASSET_BASE_URL;
+      else process.env.AGENT_ASSET_BASE_URL = previousBase;
+    }
+  });
 });
 
 // -----------------------------------------------------------------
@@ -523,6 +551,40 @@ describe("runQaForAsset — extraction failure", () => {
         providerOverride: provider,
       }),
     ).rejects.toBeInstanceOf(MediaFetchError);
+  });
+
+  it("settles a fast reference failure while generated image loading is still pending", async () => {
+    primeHappyPath({ kind: "image" });
+    (fetchImageAsBase64 as ReturnType<typeof vi.fn>)
+      .mockReset()
+      .mockImplementationOnce(async () => {
+        throw new Error("reference failed immediately");
+      })
+      .mockImplementationOnce(
+        async () =>
+          new Promise((resolve) =>
+            setTimeout(
+              () => resolve({ data: "AAAA", mediaType: "image/jpeg" }),
+              10,
+            ),
+          ),
+      );
+
+    await expect(
+      runQaForAsset({
+        assetId: "image-1",
+        assetKind: "image",
+        triggeredBy: "manual",
+        providerOverride: fakeProvider(goodResult()),
+      }),
+    ).rejects.toBeInstanceOf(MediaFetchError);
+    expect(mockedDb.qaAttempt.create).toHaveBeenCalledTimes(1);
+    expect(mockedDb.flowGeneratedImage.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "image-1" },
+        data: expect.objectContaining({ qaStatus: "FAILED" }),
+      }),
+    );
   });
 });
 
