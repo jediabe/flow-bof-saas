@@ -328,7 +328,7 @@ export async function importTikTokUrlsForPrompts(
   const seen = new Set<string>();
   const parsed: Array<{ url: string; productId: string }> = [];
   const rejected: string[] = [];
-  const { extractTikTokProductId } = await import("@/lib/tikhub");
+  const { extractTikTokProductId, canonicalTikTokShopUrl } = await import("@/lib/tikhub");
   for (const url of tokens) {
     const productId = extractTikTokProductId(url);
     if (!productId) {
@@ -337,7 +337,16 @@ export async function importTikTokUrlsForPrompts(
     }
     if (seen.has(productId)) continue;
     seen.add(productId);
-    parsed.push({ url, productId });
+    // Normalise every pasted URL to the canonical
+    //   https://shop.tiktok.com/view/product/<id>?region=<GB|US>&locale=en
+    // shape so the drawer's "open on phone" link deep-links into
+    // the TikTok mobile app regardless of what the operator pasted
+    // (Kalodata /view/, /shop/gb/pdp/, shortener, etc.). Falls
+    // back to the raw pasted URL if normalisation can't produce
+    // one (extractTikTokProductId already validated the id, so
+    // canonicalTikTokShopUrl null is a defensive belt-and-braces).
+    const canonical = canonicalTikTokShopUrl(productId, market) ?? url;
+    parsed.push({ url: canonical, productId });
   }
 
   if (parsed.length === 0) {

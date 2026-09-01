@@ -2395,6 +2395,37 @@ export function extractTikTokProductId(
 }
 
 /**
+ * Build the canonical TikTok Shop view URL for a product.
+ *
+ *   https://shop.tiktok.com/view/product/<PRODUCT_ID>?region=<REGION>&locale=en
+ *
+ * Chosen because this shape deep-links straight into the TikTok
+ * mobile app when opened on a phone — every other TikTok Shop URL
+ * variant (www.tiktok.com/shop/gb/pdp/…, shop-us.tiktok.com/view/…,
+ * shortened wm.tiktok.com/… redirects) either bounces through a web
+ * intermediate or fails to trigger the mobile-app deep link on some
+ * platforms. The paste-URL importer normalises whatever the operator
+ * pasted to this canonical form so the /prompts drawer's "open on
+ * phone" link always works.
+ *
+ * Region is derived from the batch's market: "uk" → "GB", "us" →
+ * "US". Unknown / null market falls back to "GB" (matches the
+ * TikHub-enrichment default region and the most common case).
+ *
+ * Returns null when productId is empty/invalid. Callers should
+ * still guard against null before assigning to Product.tiktokUrl.
+ */
+export function canonicalTikTokShopUrl(
+  productId: string | null | undefined,
+  market: string | null | undefined,
+): string | null {
+  const id = (productId ?? "").trim();
+  if (!id || !/^\d{10,}$/.test(id)) return null;
+  const region = ((market ?? "").trim().toLowerCase() === "us") ? "US" : "GB";
+  return `https://shop.tiktok.com/view/product/${id}?region=${region}&locale=en`;
+}
+
+/**
  * Enriched detail shape — everything the Kalodata-import enrichment
  * path needs to pre-fill a Product row so mobile review is a tap-
  * to-approve rather than a manual-data-entry step.
