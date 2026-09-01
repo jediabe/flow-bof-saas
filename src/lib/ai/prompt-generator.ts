@@ -157,15 +157,36 @@ export function normaliseAiOutput(
   const r = data as Record<string, unknown>;
 
   // Detect Style 1 (Store Discovery) response shape — post-pivot
-  // (2026-08). Extraction fields (productName + market + category)
-  // sit at the top level next to copy.part1/2/3Options. No more
-  // scene1/scene2 (the operator's external Google Flow tool handles
-  // that). When the shape matches we take the Style 1 fast path.
-  const looksLikeStyle1 =
-    typeof r.productName === "string" &&
-    typeof r.category === "string" &&
-    !!r.copy &&
-    typeof r.copy === "object";
+  // (2026-08). The load-bearing Style 1 signal is `copy.part1Options`:
+  // a non-empty array under `copy` (or `copy_options` / `copy.parts`
+  // in some model outputs). Every other Style 1 field has a sensible
+  // fallback in normaliseStyle1Output — productName falls back to
+  // input.productName, category falls back to input.category — so
+  // insisting they be present at the top level in the ORIGINAL shape
+  // dropped otherwise-good Style 1 responses onto the legacy path
+  // and left Product.style1Kit null. The "generated before Style 1"
+  // banner then appears on cards whose LLM output was actually a
+  // valid Style 1 kit but happened to emit product_name (snake) or
+  // omit category. Detector now mirrors normaliseStyle1Output's own
+  // tolerance so any response with the load-bearing shape lands on
+  // the Style 1 fast path.
+  const copyObj =
+    r.copy && typeof r.copy === "object" ? (r.copy as Record<string, unknown>) : null;
+  const part1CandidateArray =
+    (copyObj &&
+      (Array.isArray(copyObj.part1Options) && copyObj.part1Options) ||
+      (copyObj && Array.isArray(copyObj.part1_options) && copyObj.part1_options)) ||
+    null;
+  const hasCopyPart1 = Array.isArray(part1CandidateArray) && part1CandidateArray.length > 0;
+  // Belt-and-braces: also accept the shape when top-level names are
+  // present without the copy.part1Options signal, in case a future
+  // response shape lands with the extraction fields but a different
+  // copy container. Kept as a permissive OR so we never regress the
+  // "Style 1 recognised" path from what it was pre-fix.
+  const hasStyle1TopLevel =
+    (typeof r.productName === "string" || typeof r.product_name === "string") &&
+    !!copyObj;
+  const looksLikeStyle1 = hasCopyPart1 || hasStyle1TopLevel;
 
   if (looksLikeStyle1) {
     return normaliseStyle1Output(r, input);
